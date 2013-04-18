@@ -19,7 +19,7 @@
 #include <linux/platform_device.h>
 
 #include <asm/mach-types.h>
-#include <asm/hardware.h>
+#include <mach/hardware.h>
 #include <asm/irq.h>
 #include <asm/hardware/scoop.h>
 
@@ -46,43 +46,15 @@ static void sharpsl_pcmcia_init_reset(struct soc_pcmcia_socket *skt)
 
 static int sharpsl_pcmcia_hw_init(struct soc_pcmcia_socket *skt)
 {
-	int ret;
-
-	if (platform_scoop_config->pcmcia_init)
-		platform_scoop_config->pcmcia_init();
-
-	/* Register interrupts */
 	if (SCOOP_DEV[skt->nr].cd_irq >= 0) {
-		struct pcmcia_irqs cd_irq;
-
-		cd_irq.sock = skt->nr;
-		cd_irq.irq  = SCOOP_DEV[skt->nr].cd_irq;
-		cd_irq.str  = SCOOP_DEV[skt->nr].cd_irq_str;
-		ret = soc_pcmcia_request_irqs(skt, &cd_irq, 1);
-
-		if (ret) {
-			printk(KERN_ERR "Request for Compact Flash IRQ failed\n");
-			return ret;
-		}
+		skt->stat[SOC_STAT_CD].irq = SCOOP_DEV[skt->nr].cd_irq;
+		skt->stat[SOC_STAT_CD].name = SCOOP_DEV[skt->nr].cd_irq_str;
 	}
 
-	skt->irq = SCOOP_DEV[skt->nr].irq;
+	skt->socket.pci_irq = SCOOP_DEV[skt->nr].irq;
 
 	return 0;
 }
-
-static void sharpsl_pcmcia_hw_shutdown(struct soc_pcmcia_socket *skt)
-{
-	if (SCOOP_DEV[skt->nr].cd_irq >= 0) {
-		struct pcmcia_irqs cd_irq;
-
-		cd_irq.sock = skt->nr;
-		cd_irq.irq  = SCOOP_DEV[skt->nr].cd_irq;
-		cd_irq.str  = SCOOP_DEV[skt->nr].cd_irq_str;
-		soc_pcmcia_free_irqs(skt, &cd_irq, 1);
-	}
-}
-
 
 static void sharpsl_pcmcia_socket_state(struct soc_pcmcia_socket *skt,
 				    struct pcmcia_state *state)
@@ -225,7 +197,6 @@ static void sharpsl_pcmcia_socket_suspend(struct soc_pcmcia_socket *skt)
 static struct pcmcia_low_level sharpsl_pcmcia_ops = {
 	.owner                  = THIS_MODULE,
 	.hw_init                = sharpsl_pcmcia_hw_init,
-	.hw_shutdown            = sharpsl_pcmcia_hw_shutdown,
 	.socket_state           = sharpsl_pcmcia_socket_state,
 	.configure_socket       = sharpsl_pcmcia_configure_socket,
 	.socket_init            = sharpsl_pcmcia_socket_init,
@@ -237,7 +208,7 @@ static struct pcmcia_low_level sharpsl_pcmcia_ops = {
 #ifdef CONFIG_SA1100_COLLIE
 #include "sa11xx_base.h"
 
-int __init pcmcia_collie_init(struct device *dev)
+int pcmcia_collie_init(struct device *dev)
 {
        int ret = -ENODEV;
 
@@ -255,17 +226,21 @@ static int __init sharpsl_pcmcia_init(void)
 {
 	int ret;
 
+	if (!platform_scoop_config)
+		return -ENODEV;
+
 	sharpsl_pcmcia_ops.nr = platform_scoop_config->num_devs;
 	sharpsl_pcmcia_device = platform_device_alloc("pxa2xx-pcmcia", -1);
 
 	if (!sharpsl_pcmcia_device)
 		return -ENOMEM;
 
-	sharpsl_pcmcia_device->dev.uevent_suppress = 0;
-	sharpsl_pcmcia_device->dev.platform_data = &sharpsl_pcmcia_ops;
-	sharpsl_pcmcia_device->dev.parent = platform_scoop_config->devs[0].dev;
-
-	ret = platform_device_add(sharpsl_pcmcia_device);
+	ret = platform_device_add_data(sharpsl_pcmcia_device,
+			&sharpsl_pcmcia_ops, sizeof(sharpsl_pcmcia_ops));
+	if (ret == 0) {
+		sharpsl_pcmcia_device->dev.parent = platform_scoop_config->devs[0].dev;
+		ret = platform_device_add(sharpsl_pcmcia_device);
+	}
 
 	if (ret)
 		platform_device_put(sharpsl_pcmcia_device);
@@ -284,3 +259,4 @@ module_exit(sharpsl_pcmcia_exit);
 
 MODULE_DESCRIPTION("Sharp SL Series PCMCIA Support");
 MODULE_LICENSE("GPL");
+MODULE_ALIAS("platform:pxa2xx-pcmcia");

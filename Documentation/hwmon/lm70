@@ -1,9 +1,15 @@
 Kernel driver lm70
 ==================
 
-Supported chip:
+Supported chips:
   * National Semiconductor LM70
     Datasheet: http://www.national.com/pf/LM/LM70.html
+  * Texas Instruments TMP121/TMP123
+    Information: http://focus.ti.com/docs/prod/folders/print/tmp121.html
+  * National Semiconductor LM71
+    Datasheet: http://www.ti.com/product/LM71
+  * National Semiconductor LM74
+    Datasheet: http://www.ti.com/product/LM74
 
 Author:
         Kaiwan N Billimoria <kaiwan@designergraphix.com>
@@ -24,6 +30,16 @@ comprise the MOSI/MISO loop. At the end of the transfer, the 11-bit 2's
 complement digital temperature (sent via the SIO line), is available in the
 driver for interpretation. This driver makes use of the kernel's in-core
 SPI support.
+
+As a real (in-tree) example of this "SPI protocol driver" interfacing
+with a "SPI master controller driver", see drivers/spi/spi_lm70llp.c
+and its associated documentation.
+
+The LM74 and TMP121/TMP123 are very similar; main difference is 13-bit
+temperature data (0.0625 degrees celsius resolution).
+
+The LM71 is also very similar; main difference is 14-bit temperature
+data (0.03125 degrees celsius resolution).
 
 Thanks to
 ---------

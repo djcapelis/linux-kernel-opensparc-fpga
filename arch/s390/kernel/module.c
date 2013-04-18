@@ -1,9 +1,8 @@
 /*
- *  arch/s390/kernel/module.c - Kernel module help for s390.
+ *  Kernel module help for s390.
  *
  *  S390 version
- *    Copyright (C) 2002, 2003 IBM Deutschland Entwicklung GmbH,
- *			       IBM Corporation
+ *    Copyright IBM Corp. 2002, 2003
  *    Author(s): Arnd Bergmann (arndb@de.ibm.com)
  *		 Martin Schwidefsky (schwidefsky@de.ibm.com)
  *
@@ -45,19 +44,25 @@
 #define PLT_ENTRY_SIZE 20
 #endif /* CONFIG_64BIT */
 
+#ifdef CONFIG_64BIT
 void *module_alloc(unsigned long size)
 {
-	if (size == 0)
+	if (PAGE_ALIGN(size) > MODULES_LEN)
 		return NULL;
-	return vmalloc(size);
+	return __vmalloc_node_range(size, 1, MODULES_VADDR, MODULES_END,
+				    GFP_KERNEL, PAGE_KERNEL, -1,
+				    __builtin_return_address(0));
 }
+#endif
 
 /* Free memory returned from module_alloc */
 void module_free(struct module *mod, void *module_region)
 {
+	if (mod) {
+		vfree(mod->arch.syminfo);
+		mod->arch.syminfo = NULL;
+	}
 	vfree(module_region);
-	/* FIXME: If module_region == mod->init_region, trim exception
-           table entries. */
 }
 
 static void
@@ -172,15 +177,6 @@ module_frob_arch_sections(Elf_Ehdr *hdr, Elf_Shdr *sechdrs,
 	me->arch.plt_offset = me->core_size;
 	me->core_size += me->arch.plt_size;
 	return 0;
-}
-
-int
-apply_relocate(Elf_Shdr *sechdrs, const char *strtab, unsigned int symindex,
-	       unsigned int relsec, struct module *me)
-{
-	printk(KERN_ERR "module %s: RELOCATION unsupported\n",
-	       me->name);
-	return -ENOEXEC;
 }
 
 static int
@@ -310,15 +306,20 @@ apply_rela(Elf_Rela *rela, Elf_Addr base, Elf_Sym *symtab,
 			info->plt_initialized = 1;
 		}
 		if (r_type == R_390_PLTOFF16 ||
-		    r_type == R_390_PLTOFF32
-		    || r_type == R_390_PLTOFF64
-			)
+		    r_type == R_390_PLTOFF32 ||
+		    r_type == R_390_PLTOFF64)
 			val = me->arch.plt_offset - me->arch.got_offset +
 				info->plt_offset + rela->r_addend;
-		else
-			val =  (Elf_Addr) me->module_core +
-				me->arch.plt_offset + info->plt_offset + 
-				rela->r_addend - loc;
+		else {
+			if (!((r_type == R_390_PLT16DBL &&
+			       val - loc + 0xffffUL < 0x1ffffeUL) ||
+			      (r_type == R_390_PLT32DBL &&
+			       val - loc + 0xffffffffULL < 0x1fffffffeULL)))
+				val = (Elf_Addr) me->module_core +
+					me->arch.plt_offset +
+					info->plt_offset;
+			val += rela->r_addend - loc;
+		}
 		if (r_type == R_390_PLT16DBL)
 			*(unsigned short *) loc = val >> 1;
 		else if (r_type == R_390_PLTOFF16)
@@ -399,10 +400,6 @@ int module_finalize(const Elf_Ehdr *hdr,
 		    struct module *me)
 {
 	vfree(me->arch.syminfo);
-	return module_bug_finalize(hdr, sechdrs, me);
-}
-
-void module_arch_cleanup(struct module *mod)
-{
-	module_bug_cleanup(mod);
+	me->arch.syminfo = NULL;
+	return 0;
 }

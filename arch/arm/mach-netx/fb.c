@@ -22,13 +22,13 @@
 #include <linux/dma-mapping.h>
 #include <linux/amba/bus.h>
 #include <linux/amba/clcd.h>
+#include <linux/err.h>
+#include <linux/gfp.h>
 
-#include <asm/arch/netx-regs.h>
-#include <asm/hardware.h>
+#include <asm/irq.h>
 
-struct clk {};
-
-static struct clk fb_clk;
+#include <mach/netx-regs.h>
+#include <mach/hardware.h>
 
 static struct clcd_panel *netx_panel;
 
@@ -69,42 +69,7 @@ void netx_clcd_remove(struct clcd_fb *fb)
 			      fb->fb.screen_base, fb->fb.fix.smem_start);
 }
 
-void clk_disable(struct clk *clk)
-{
-}
-
-int clk_set_rate(struct clk *clk, unsigned long rate)
-{
-	return 0;
-}
-
-int clk_enable(struct clk *clk)
-{
-	return 0;
-}
-
-struct clk *clk_get(struct device *dev, const char *id)
-{
-	return &fb_clk;
-}
-
-void clk_put(struct clk *clk)
-{
-}
-
-static struct amba_device fb_device = {
-	.dev		= {
-		.bus_id	= "fb",
-		.coherent_dma_mask = ~0,
-	},
-	.res		= {
-		.start	= 0x00104000,
-		.end	= 0x00104fff,
-		.flags	= IORESOURCE_MEM,
-	},
-	.irq		= { NETX_IRQ_LCD, NO_IRQ },
-	.periphid	= 0x10112400,
-};
+static AMBA_AHB_DEVICE(fb, "fb", 0, 0x00104000, { NETX_IRQ_LCD }, NULL);
 
 int netx_fb_init(struct clcd_board *board, struct clcd_panel *panel)
 {

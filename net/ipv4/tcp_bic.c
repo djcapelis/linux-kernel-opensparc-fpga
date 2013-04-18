@@ -1,12 +1,13 @@
 /*
  * Binary Increase Congestion control for TCP
- *
+ * Home page:
+ *      http://netsrv.csc.ncsu.edu/twiki/bin/view/Main/BIC
  * This is from the implementation of BICTCP in
  * Lison-Xu, Kahaled Harfoush, and Injong Rhee.
  *  "Binary Increase Congestion Control for Fast, Long Distance
  *  Networks" in InfoComm 2004
  * Available from:
- *  http://www.csc.ncsu.edu/faculty/rhee/export/bitcp.pdf
+ *  http://netsrv.csc.ncsu.edu/export/bitcp.pdf
  *
  * Unless BIC is enabled and congestion window is large
  * this behaves the same as the original Reno.
@@ -62,7 +63,6 @@ static inline void bictcp_reset(struct bictcp *ca)
 {
 	ca->cnt = 0;
 	ca->last_max_cwnd = 0;
-	ca->loss_cwnd = 0;
 	ca->last_cwnd = 0;
 	ca->last_time = 0;
 	ca->epoch_start = 0;
@@ -71,7 +71,11 @@ static inline void bictcp_reset(struct bictcp *ca)
 
 static void bictcp_init(struct sock *sk)
 {
-	bictcp_reset(inet_csk_ca(sk));
+	struct bictcp *ca = inet_csk_ca(sk);
+
+	bictcp_reset(ca);
+	ca->loss_cwnd = 0;
+
 	if (initial_ssthresh)
 		tcp_sk(sk)->snd_ssthresh = initial_ssthresh;
 }
@@ -126,7 +130,7 @@ static inline void bictcp_update(struct bictcp *ca, u32 cwnd)
 	}
 
 	/* if in slow start or link utilization is very low */
-	if (ca->loss_cwnd == 0) {
+	if (ca->last_max_cwnd == 0) {
 		if (ca->cnt > 20) /* increase cwnd 5% per RTT */
 			ca->cnt = 20;
 	}
@@ -136,8 +140,7 @@ static inline void bictcp_update(struct bictcp *ca, u32 cwnd)
 		ca->cnt = 1;
 }
 
-static void bictcp_cong_avoid(struct sock *sk, u32 ack,
-			      u32 seq_rtt, u32 in_flight, int data_acked)
+static void bictcp_cong_avoid(struct sock *sk, u32 ack, u32 in_flight)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
 	struct bictcp *ca = inet_csk_ca(sk);
@@ -149,16 +152,7 @@ static void bictcp_cong_avoid(struct sock *sk, u32 ack,
 		tcp_slow_start(tp);
 	else {
 		bictcp_update(ca, tp->snd_cwnd);
-
-		/* In dangerous area, increase slowly.
-		 * In theory this is tp->snd_cwnd += 1 / tp->snd_cwnd
-		 */
-		if (tp->snd_cwnd_cnt >= ca->cnt) {
-			if (tp->snd_cwnd < tp->snd_cwnd_clamp)
-				tp->snd_cwnd++;
-			tp->snd_cwnd_cnt = 0;
-		} else
-			tp->snd_cwnd_cnt++;
+		tcp_cong_avoid_ai(tp, ca->cnt);
 	}
 
 }
@@ -194,7 +188,7 @@ static u32 bictcp_undo_cwnd(struct sock *sk)
 {
 	const struct tcp_sock *tp = tcp_sk(sk);
 	const struct bictcp *ca = inet_csk_ca(sk);
-	return max(tp->snd_cwnd, ca->last_max_cwnd);
+	return max(tp->snd_cwnd, ca->loss_cwnd);
 }
 
 static void bictcp_state(struct sock *sk, u8 new_state)
@@ -206,11 +200,11 @@ static void bictcp_state(struct sock *sk, u8 new_state)
 /* Track delayed acknowledgment ratio using sliding window
  * ratio = (15*ratio + sample) / 16
  */
-static void bictcp_acked(struct sock *sk, u32 cnt, ktime_t last)
+static void bictcp_acked(struct sock *sk, u32 cnt, s32 rtt)
 {
 	const struct inet_connection_sock *icsk = inet_csk(sk);
 
-	if (cnt > 0 && icsk->icsk_ca_state == TCP_CA_Open) {
+	if (icsk->icsk_ca_state == TCP_CA_Open) {
 		struct bictcp *ca = inet_csk_ca(sk);
 		cnt -= ca->delayed_ack >> ACK_RATIO_SHIFT;
 		ca->delayed_ack += cnt;
@@ -218,7 +212,7 @@ static void bictcp_acked(struct sock *sk, u32 cnt, ktime_t last)
 }
 
 
-static struct tcp_congestion_ops bictcp = {
+static struct tcp_congestion_ops bictcp __read_mostly = {
 	.init		= bictcp_init,
 	.ssthresh	= bictcp_recalc_ssthresh,
 	.cong_avoid	= bictcp_cong_avoid,

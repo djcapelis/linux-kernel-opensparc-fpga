@@ -273,7 +273,7 @@ static void eesoxscsi_buffer_out(void *buf, int length, void __iomem *base)
 {
 	const void __iomem *reg_fas = base + EESOX_FAS216_OFFSET;
 	const void __iomem *reg_dmastat = base + EESOX_DMASTAT;
-	const void __iomem *reg_dmadata = base + EESOX_DMADATA;
+	void __iomem *reg_dmadata = base + EESOX_DMADATA;
 
 	do {
 		unsigned int status;
@@ -429,7 +429,7 @@ eesoxscsi_set_proc_info(struct Scsi_Host *host, char *buffer, int length)
  * Params   : buffer - a buffer to write information to
  *	      start  - a pointer into this buffer set by this routine to the start
  *		       of the required information.
- *	      offset - offset into information that we have read upto.
+ *	      offset - offset into information that we have read up to.
  *	      length - length of buffer
  *	      host_no - host number to return information for
  *	      inout  - 0 for reading, 1 for writing.
@@ -508,14 +508,14 @@ static struct scsi_host_template eesox_template = {
 	.eh_abort_handler		= fas216_eh_abort,
 	.can_queue			= 1,
 	.this_id			= 7,
-	.sg_tablesize			= SG_ALL,
+	.sg_tablesize			= SCSI_MAX_SG_CHAIN_SEGMENTS,
+	.dma_boundary			= IOMD_DMA_BOUNDARY,
 	.cmd_per_lun			= 1,
 	.use_clustering			= DISABLE_CLUSTERING,
 	.proc_name			= "eesox",
 };
 
-static int __devinit
-eesoxscsi_probe(struct expansion_card *ec, const struct ecard_id *id)
+static int eesoxscsi_probe(struct expansion_card *ec, const struct ecard_id *id)
 {
 	struct Scsi_Host *host;
 	struct eesoxscsi_info *info;
@@ -616,7 +616,7 @@ eesoxscsi_probe(struct expansion_card *ec, const struct ecard_id *id)
 	return ret;
 }
 
-static void __devexit eesoxscsi_remove(struct expansion_card *ec)
+static void eesoxscsi_remove(struct expansion_card *ec)
 {
 	struct Scsi_Host *host = ecard_get_drvdata(ec);
 	struct eesoxscsi_info *info = (struct eesoxscsi_info *)host->hostdata;
@@ -642,7 +642,7 @@ static const struct ecard_id eesoxscsi_cids[] = {
 
 static struct ecard_driver eesoxscsi_driver = {
 	.probe		= eesoxscsi_probe,
-	.remove		= __devexit_p(eesoxscsi_remove),
+	.remove		= eesoxscsi_remove,
 	.id_table	= eesoxscsi_cids,
 	.drv = {
 		.name		= "eesoxscsi",

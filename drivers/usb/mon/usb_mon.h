@@ -20,9 +20,11 @@ struct mon_bus {
 	struct usb_bus *u_bus;
 
 	int text_inited;
+	int bin_inited;
 	struct dentry *dent_s;		/* Debugging file */
 	struct dentry *dent_t;		/* Text interface file */
 	struct dentry *dent_u;		/* Second text interface file */
+	struct device *classdev;	/* Device in usbmon class */
 
 	/* Ref */
 	int nreaders;			/* Under mon_lock AND mbus->lock */
@@ -44,7 +46,7 @@ struct mon_reader {
 
 	void (*rnf_submit)(void *data, struct urb *urb);
 	void (*rnf_error)(void *data, struct urb *urb, int error);
-	void (*rnf_complete)(void *data, struct urb *urb);
+	void (*rnf_complete)(void *data, struct urb *urb, int status);
 };
 
 void mon_reader_add(struct mon_bus *mbus, struct mon_reader *r);
@@ -52,28 +54,15 @@ void mon_reader_del(struct mon_bus *mbus, struct mon_reader *r);
 
 struct mon_bus *mon_bus_lookup(unsigned int num);
 
-int /*bool*/ mon_text_add(struct mon_bus *mbus, int busnum);
+int /*bool*/ mon_text_add(struct mon_bus *mbus, const struct usb_bus *ubus);
 void mon_text_del(struct mon_bus *mbus);
-// void mon_bin_add(struct mon_bus *);
+int /*bool*/ mon_bin_add(struct mon_bus *mbus, const struct usb_bus *ubus);
+void mon_bin_del(struct mon_bus *mbus);
 
 int __init mon_text_init(void);
 void mon_text_exit(void);
 int __init mon_bin_init(void);
 void mon_bin_exit(void);
-
-/*
- * DMA interface.
- *
- * XXX The vectored side needs a serious re-thinking. Abstracting vectors,
- * like in Paolo's original patch, produces a double pkmap. We need an idea.
-*/
-extern char mon_dmapeek(unsigned char *dst, dma_addr_t dma_addr, int len);
-
-struct mon_reader_bin;
-extern void mon_dmapeek_vec(const struct mon_reader_bin *rp,
-    unsigned int offset, dma_addr_t dma_addr, unsigned int len);
-extern unsigned int mon_copy_to_buff(const struct mon_reader_bin *rp,
-    unsigned int offset, const unsigned char *from, unsigned int len);
 
 /*
  */

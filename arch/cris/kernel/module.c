@@ -21,6 +21,7 @@
 #include <linux/fs.h>
 #include <linux/string.h>
 #include <linux/kernel.h>
+#include <linux/slab.h>
 
 #if 0
 #define DEBUGP printk
@@ -28,40 +29,18 @@
 #define DEBUGP(fmt , ...)
 #endif
 
+#ifdef CONFIG_ETRAX_KMALLOCED_MODULES
 void *module_alloc(unsigned long size)
 {
-	if (size == 0)
-		return NULL;
-	return vmalloc_exec(size);
+	return kmalloc(size, GFP_KERNEL);
 }
-
 
 /* Free memory returned from module_alloc */
 void module_free(struct module *mod, void *module_region)
 {
-	vfree(module_region);
-	/* FIXME: If module_region == mod->init_region, trim exception
-           table entries. */
+	kfree(module_region);
 }
-
-/* We don't need anything special. */
-int module_frob_arch_sections(Elf_Ehdr *hdr,
-			      Elf_Shdr *sechdrs,
-			      char *secstrings,
-			      struct module *mod)
-{
-	return 0;
-}
-
-int apply_relocate(Elf32_Shdr *sechdrs,
-		   const char *strtab,
-		   unsigned int symindex,
-		   unsigned int relsec,
-		   struct module *me)
-{
-	printk(KERN_ERR "module %s: REL relocation unsupported\n", me->name);
-	return -ENOEXEC;
-}
+#endif
 
 int apply_relocate_add(Elf32_Shdr *sechdrs,
 		       const char *strtab,
@@ -100,15 +79,4 @@ int apply_relocate_add(Elf32_Shdr *sechdrs,
 	}
 
 	return 0;
-}
-
-int module_finalize(const Elf_Ehdr *hdr,
-		    const Elf_Shdr *sechdrs,
-		    struct module *me)
-{
- 	return 0;
-}
-
-void module_arch_cleanup(struct module *mod)
-{
 }

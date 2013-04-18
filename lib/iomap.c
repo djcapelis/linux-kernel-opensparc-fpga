@@ -6,7 +6,7 @@
 #include <linux/pci.h>
 #include <linux/io.h>
 
-#include <linux/module.h>
+#include <linux/export.h>
 
 /*
  * Read/write from/to an (offsettable) iomem cookie. It might be a PIO
@@ -40,8 +40,7 @@ static void bad_io_access(unsigned long port, const char *access)
 	static int count = 10;
 	if (count) {
 		count--;
-		printk(KERN_ERR "Bad IO access at port %lx (%s)\n", port, access);
-		WARN_ON(1);
+		WARN(1, KERN_ERR "Bad IO access at port %#lx (%s)\n", port, access);
 	}
 }
 
@@ -69,27 +68,27 @@ static void bad_io_access(unsigned long port, const char *access)
 #define mmio_read32be(addr) be32_to_cpu(__raw_readl(addr))
 #endif
 
-unsigned int fastcall ioread8(void __iomem *addr)
+unsigned int ioread8(void __iomem *addr)
 {
 	IO_COND(addr, return inb(port), return readb(addr));
 	return 0xff;
 }
-unsigned int fastcall ioread16(void __iomem *addr)
+unsigned int ioread16(void __iomem *addr)
 {
 	IO_COND(addr, return inw(port), return readw(addr));
 	return 0xffff;
 }
-unsigned int fastcall ioread16be(void __iomem *addr)
+unsigned int ioread16be(void __iomem *addr)
 {
 	IO_COND(addr, return pio_read16be(port), return mmio_read16be(addr));
 	return 0xffff;
 }
-unsigned int fastcall ioread32(void __iomem *addr)
+unsigned int ioread32(void __iomem *addr)
 {
 	IO_COND(addr, return inl(port), return readl(addr));
 	return 0xffffffff;
 }
-unsigned int fastcall ioread32be(void __iomem *addr)
+unsigned int ioread32be(void __iomem *addr)
 {
 	IO_COND(addr, return pio_read32be(port), return mmio_read32be(addr));
 	return 0xffffffff;
@@ -110,23 +109,23 @@ EXPORT_SYMBOL(ioread32be);
 #define mmio_write32be(val,port) __raw_writel(be32_to_cpu(val),port)
 #endif
 
-void fastcall iowrite8(u8 val, void __iomem *addr)
+void iowrite8(u8 val, void __iomem *addr)
 {
 	IO_COND(addr, outb(val,port), writeb(val, addr));
 }
-void fastcall iowrite16(u16 val, void __iomem *addr)
+void iowrite16(u16 val, void __iomem *addr)
 {
 	IO_COND(addr, outw(val,port), writew(val, addr));
 }
-void fastcall iowrite16be(u16 val, void __iomem *addr)
+void iowrite16be(u16 val, void __iomem *addr)
 {
 	IO_COND(addr, pio_write16be(val,port), mmio_write16be(val, addr));
 }
-void fastcall iowrite32(u32 val, void __iomem *addr)
+void iowrite32(u32 val, void __iomem *addr)
 {
 	IO_COND(addr, outl(val,port), writel(val, addr));
 }
-void fastcall iowrite32be(u32 val, void __iomem *addr)
+void iowrite32be(u32 val, void __iomem *addr)
 {
 	IO_COND(addr, pio_write32be(val,port), mmio_write32be(val, addr));
 }
@@ -193,15 +192,15 @@ static inline void mmio_outsl(void __iomem *addr, const u32 *src, int count)
 }
 #endif
 
-void fastcall ioread8_rep(void __iomem *addr, void *dst, unsigned long count)
+void ioread8_rep(void __iomem *addr, void *dst, unsigned long count)
 {
 	IO_COND(addr, insb(port,dst,count), mmio_insb(addr, dst, count));
 }
-void fastcall ioread16_rep(void __iomem *addr, void *dst, unsigned long count)
+void ioread16_rep(void __iomem *addr, void *dst, unsigned long count)
 {
 	IO_COND(addr, insw(port,dst,count), mmio_insw(addr, dst, count));
 }
-void fastcall ioread32_rep(void __iomem *addr, void *dst, unsigned long count)
+void ioread32_rep(void __iomem *addr, void *dst, unsigned long count)
 {
 	IO_COND(addr, insl(port,dst,count), mmio_insl(addr, dst, count));
 }
@@ -209,15 +208,15 @@ EXPORT_SYMBOL(ioread8_rep);
 EXPORT_SYMBOL(ioread16_rep);
 EXPORT_SYMBOL(ioread32_rep);
 
-void fastcall iowrite8_rep(void __iomem *addr, const void *src, unsigned long count)
+void iowrite8_rep(void __iomem *addr, const void *src, unsigned long count)
 {
 	IO_COND(addr, outsb(port, src, count), mmio_outsb(addr, src, count));
 }
-void fastcall iowrite16_rep(void __iomem *addr, const void *src, unsigned long count)
+void iowrite16_rep(void __iomem *addr, const void *src, unsigned long count)
 {
 	IO_COND(addr, outsw(port, src, count), mmio_outsw(addr, src, count));
 }
-void fastcall iowrite32_rep(void __iomem *addr, const void *src, unsigned long count)
+void iowrite32_rep(void __iomem *addr, const void *src, unsigned long count)
 {
 	IO_COND(addr, outsl(port, src,count), mmio_outsl(addr, src, count));
 }
@@ -225,6 +224,7 @@ EXPORT_SYMBOL(iowrite8_rep);
 EXPORT_SYMBOL(iowrite16_rep);
 EXPORT_SYMBOL(iowrite32_rep);
 
+#ifdef CONFIG_HAS_IOPORT
 /* Create a virtual mapping cookie for an IO port range */
 void __iomem *ioport_map(unsigned long port, unsigned int nr)
 {
@@ -239,32 +239,14 @@ void ioport_unmap(void __iomem *addr)
 }
 EXPORT_SYMBOL(ioport_map);
 EXPORT_SYMBOL(ioport_unmap);
+#endif /* CONFIG_HAS_IOPORT */
 
-/* Create a virtual mapping cookie for a PCI BAR (memory or IO) */
-void __iomem *pci_iomap(struct pci_dev *dev, int bar, unsigned long maxlen)
-{
-	unsigned long start = pci_resource_start(dev, bar);
-	unsigned long len = pci_resource_len(dev, bar);
-	unsigned long flags = pci_resource_flags(dev, bar);
-
-	if (!len || !start)
-		return NULL;
-	if (maxlen && len > maxlen)
-		len = maxlen;
-	if (flags & IORESOURCE_IO)
-		return ioport_map(start, len);
-	if (flags & IORESOURCE_MEM) {
-		if (flags & IORESOURCE_CACHEABLE)
-			return ioremap(start, len);
-		return ioremap_nocache(start, len);
-	}
-	/* What? */
-	return NULL;
-}
-
+#ifdef CONFIG_PCI
+/* Hide the details if this is a MMIO or PIO address space and just do what
+ * you expect in the correct way. */
 void pci_iounmap(struct pci_dev *dev, void __iomem * addr)
 {
 	IO_COND(addr, /* nothing */, iounmap(addr));
 }
-EXPORT_SYMBOL(pci_iomap);
 EXPORT_SYMBOL(pci_iounmap);
+#endif /* CONFIG_PCI */

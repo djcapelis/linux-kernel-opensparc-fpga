@@ -1,18 +1,11 @@
-/*
- * arch/powerpc/platforms/85xx/mpc85xx.h
- *
- * MPC85xx soc definitions/function decls
- *
- * Maintainer: Kumar Gala <kumar.gala@freescale.com>
- *
- * Copyright 2005 Freescale Semiconductor Inc.
- *
- * This program is free software; you can redistribute  it and/or modify it
- * under  the terms of  the GNU General  Public License as published by the
- * Free Software Foundation;  either version 2 of the  License, or (at your
- * option) any later version.
- *
- */
+#ifndef MPC85xx_H
+#define MPC85xx_H
+extern int mpc85xx_common_publish_devices(void);
 
-extern void mpc85xx_restart(char *);
-extern int add_bridge(struct device_node *dev);
+#ifdef CONFIG_CPM2
+extern void mpc85xx_cpm2_pic_init(void);
+#else
+static inline void __init mpc85xx_cpm2_pic_init(void) {}
+#endif /* CONFIG_CPM2 */
+
+#endif

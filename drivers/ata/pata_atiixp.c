@@ -1,7 +1,7 @@
 /*
  * pata_atiixp.c 	- ATI PATA for new ATA layer
  *			  (C) 2005 Red Hat Inc
- *			  Alan Cox <alan@redhat.com>
+ *			  (C) 2009-2010 Bartlomiej Zolnierkiewicz
  *
  * Based on
  *
@@ -20,9 +20,10 @@
 #include <linux/delay.h>
 #include <scsi/scsi_host.h>
 #include <linux/libata.h>
+#include <linux/dmi.h>
 
 #define DRV_NAME "pata_atiixp"
-#define DRV_VERSION "0.4.5"
+#define DRV_VERSION "0.4.6"
 
 enum {
 	ATIIXP_IDE_PIO_TIMING	= 0x40,
@@ -33,29 +34,25 @@ enum {
 	ATIIXP_IDE_UDMA_MODE 	= 0x56
 };
 
-static int atiixp_pre_reset(struct ata_port *ap, unsigned long deadline)
-{
-	static const struct pci_bits atiixp_enable_bits[] = {
-		{ 0x48, 1, 0x01, 0x00 },
-		{ 0x48, 1, 0x08, 0x00 }
-	};
-	struct pci_dev *pdev = to_pci_dev(ap->host->dev);
-
-	if (!pci_test_config_bits(pdev, &atiixp_enable_bits[ap->port_no]))
-		return -ENOENT;
-
-	return ata_std_prereset(ap, deadline);
-}
-
-static void atiixp_error_handler(struct ata_port *ap)
-{
-	ata_bmdma_drive_eh(ap, atiixp_pre_reset, ata_std_softreset, NULL,   ata_std_postreset);
-}
+static const struct dmi_system_id attixp_cable_override_dmi_table[] = {
+	{
+		/* Board has onboard PATA<->SATA converters */
+		.ident = "MSI E350DM-E33",
+		.matches = {
+			DMI_MATCH(DMI_BOARD_VENDOR, "MSI"),
+			DMI_MATCH(DMI_BOARD_NAME, "E350DM-E33(MS-7720)"),
+		},
+	},
+	{ }
+};
 
 static int atiixp_cable_detect(struct ata_port *ap)
 {
 	struct pci_dev *pdev = to_pci_dev(ap->host->dev);
 	u8 udma;
+
+	if (dmi_check_system(attixp_cable_override_dmi_table))
+		return ATA_CBL_PATA40_SHORT;
 
 	/* Hack from drivers/ide/pci. Really we want to know how to do the
 	   raw detection not play follow the bios mode guess */
@@ -63,6 +60,33 @@ static int atiixp_cable_detect(struct ata_port *ap)
 	if ((udma & 0x07) >= 0x04 || (udma & 0x70) >= 0x40)
 		return  ATA_CBL_PATA80;
 	return ATA_CBL_PATA40;
+}
+
+static DEFINE_SPINLOCK(atiixp_lock);
+
+/**
+ *	atiixp_prereset	-	perform reset handling
+ *	@link: ATA link
+ *	@deadline: deadline jiffies for the operation
+ *
+ *	Reset sequence checking enable bits to see which ports are
+ *	active.
+ */
+
+static int atiixp_prereset(struct ata_link *link, unsigned long deadline)
+{
+	static const struct pci_bits atiixp_enable_bits[] = {
+		{ 0x48, 1, 0x01, 0x00 },
+		{ 0x48, 1, 0x08, 0x00 }
+	};
+
+	struct ata_port *ap = link->ap;
+	struct pci_dev *pdev = to_pci_dev(ap->host->dev);
+
+	if (!pci_test_config_bits(pdev, &atiixp_enable_bits[ap->port_no]))
+		return -ENOENT;
+
+	return ata_sff_prereset(link, deadline);
 }
 
 /**
@@ -81,20 +105,19 @@ static void atiixp_set_pio_timing(struct ata_port *ap, struct ata_device *adev, 
 
 	struct pci_dev *pdev = to_pci_dev(ap->host->dev);
 	int dn = 2 * ap->port_no + adev->devno;
-
-	/* Check this is correct - the order is odd in both drivers */
 	int timing_shift = (16 * ap->port_no) + 8 * (adev->devno ^ 1);
-	u16 pio_mode_data, pio_timing_data;
+	u32 pio_timing_data;
+	u16 pio_mode_data;
 
 	pci_read_config_word(pdev, ATIIXP_IDE_PIO_MODE, &pio_mode_data);
 	pio_mode_data &= ~(0x7 << (4 * dn));
 	pio_mode_data |= pio << (4 * dn);
 	pci_write_config_word(pdev, ATIIXP_IDE_PIO_MODE, pio_mode_data);
 
-	pci_read_config_word(pdev, ATIIXP_IDE_PIO_TIMING, &pio_timing_data);
-	pio_mode_data &= ~(0xFF << timing_shift);
-	pio_mode_data |= (pio_timings[pio] << timing_shift);
-	pci_write_config_word(pdev, ATIIXP_IDE_PIO_TIMING, pio_timing_data);
+	pci_read_config_dword(pdev, ATIIXP_IDE_PIO_TIMING, &pio_timing_data);
+	pio_timing_data &= ~(0xFF << timing_shift);
+	pio_timing_data |= (pio_timings[pio] << timing_shift);
+	pci_write_config_dword(pdev, ATIIXP_IDE_PIO_TIMING, pio_timing_data);
 }
 
 /**
@@ -108,7 +131,10 @@ static void atiixp_set_pio_timing(struct ata_port *ap, struct ata_device *adev, 
 
 static void atiixp_set_piomode(struct ata_port *ap, struct ata_device *adev)
 {
+	unsigned long flags;
+	spin_lock_irqsave(&atiixp_lock, flags);
 	atiixp_set_pio_timing(ap, adev, adev->pio_mode - XFER_PIO_0);
+	spin_unlock_irqrestore(&atiixp_lock, flags);
 }
 
 /**
@@ -128,6 +154,9 @@ static void atiixp_set_dmamode(struct ata_port *ap, struct ata_device *adev)
 	int dma = adev->dma_mode;
 	int dn = 2 * ap->port_no + adev->devno;
 	int wanted_pio;
+	unsigned long flags;
+
+	spin_lock_irqsave(&atiixp_lock, flags);
 
 	if (adev->dma_mode >= XFER_UDMA_0) {
 		u16 udma_mode_data;
@@ -139,16 +168,17 @@ static void atiixp_set_dmamode(struct ata_port *ap, struct ata_device *adev)
 		udma_mode_data |= dma << (4 * dn);
 		pci_write_config_word(pdev, ATIIXP_IDE_UDMA_MODE, udma_mode_data);
 	} else {
-		u16 mwdma_timing_data;
-		/* Check this is correct - the order is odd in both drivers */
 		int timing_shift = (16 * ap->port_no) + 8 * (adev->devno ^ 1);
+		u32 mwdma_timing_data;
 
 		dma -= XFER_MW_DMA_0;
 
-		pci_read_config_word(pdev, ATIIXP_IDE_MWDMA_TIMING, &mwdma_timing_data);
+		pci_read_config_dword(pdev, ATIIXP_IDE_MWDMA_TIMING,
+				      &mwdma_timing_data);
 		mwdma_timing_data &= ~(0xFF << timing_shift);
 		mwdma_timing_data |= (mwdma_timings[dma] << timing_shift);
-		pci_write_config_word(pdev, ATIIXP_IDE_MWDMA_TIMING, mwdma_timing_data);
+		pci_write_config_dword(pdev, ATIIXP_IDE_MWDMA_TIMING,
+				       mwdma_timing_data);
 	}
 	/*
 	 *	We must now look at the PIO mode situation. We may need to
@@ -164,6 +194,7 @@ static void atiixp_set_dmamode(struct ata_port *ap, struct ata_device *adev)
 
 	if (adev->pio_mode != wanted_pio)
 		atiixp_set_pio_timing(ap, adev, wanted_pio);
+	spin_unlock_irqrestore(&atiixp_lock, flags);
 }
 
 /**
@@ -172,6 +203,9 @@ static void atiixp_set_dmamode(struct ata_port *ap, struct ata_device *adev)
  *
  *	When DMA begins we need to ensure that the UDMA control
  *	register for the channel is correctly set.
+ *
+ *	Note: The host lock held by the libata layer protects
+ *	us from two channels both trying to set DMA bits at once
  */
 
 static void atiixp_bmdma_start(struct ata_queued_cmd *qc)
@@ -184,7 +218,7 @@ static void atiixp_bmdma_start(struct ata_queued_cmd *qc)
 	u16 tmp16;
 
 	pci_read_config_word(pdev, ATIIXP_IDE_UDMA_CONTROL, &tmp16);
-	if (adev->dma_mode >= XFER_UDMA_0)
+	if (ata_using_udma(adev))
 		tmp16 |= (1 << dn);
 	else
 		tmp16 &= ~(1 << dn);
@@ -198,6 +232,9 @@ static void atiixp_bmdma_start(struct ata_queued_cmd *qc)
  *
  *	DMA has completed. Clear the UDMA flag as the next operations will
  *	be PIO ones not UDMA data transfer.
+ *
+ *	Note: The host lock held by the libata layer protects
+ *	us from two channels both trying to set DMA bits at once
  */
 
 static void atiixp_bmdma_stop(struct ata_queued_cmd *qc)
@@ -214,70 +251,36 @@ static void atiixp_bmdma_stop(struct ata_queued_cmd *qc)
 }
 
 static struct scsi_host_template atiixp_sht = {
-	.module			= THIS_MODULE,
-	.name			= DRV_NAME,
-	.ioctl			= ata_scsi_ioctl,
-	.queuecommand		= ata_scsi_queuecmd,
-	.can_queue		= ATA_DEF_QUEUE,
-	.this_id		= ATA_SHT_THIS_ID,
-	.sg_tablesize		= LIBATA_MAX_PRD,
-	.cmd_per_lun		= ATA_SHT_CMD_PER_LUN,
-	.emulated		= ATA_SHT_EMULATED,
-	.use_clustering		= ATA_SHT_USE_CLUSTERING,
-	.proc_name		= DRV_NAME,
-	.dma_boundary		= ATA_DMA_BOUNDARY,
-	.slave_configure	= ata_scsi_slave_config,
-	.slave_destroy		= ata_scsi_slave_destroy,
-	.bios_param		= ata_std_bios_param,
+	ATA_BMDMA_SHT(DRV_NAME),
+	.sg_tablesize		= LIBATA_DUMB_MAX_PRD,
 };
 
 static struct ata_port_operations atiixp_port_ops = {
-	.port_disable	= ata_port_disable,
-	.set_piomode	= atiixp_set_piomode,
-	.set_dmamode	= atiixp_set_dmamode,
-	.mode_filter	= ata_pci_default_filter,
-	.tf_load	= ata_tf_load,
-	.tf_read	= ata_tf_read,
-	.check_status 	= ata_check_status,
-	.exec_command	= ata_exec_command,
-	.dev_select 	= ata_std_dev_select,
+	.inherits	= &ata_bmdma_port_ops,
 
-	.freeze		= ata_bmdma_freeze,
-	.thaw		= ata_bmdma_thaw,
-	.error_handler	= atiixp_error_handler,
-	.post_internal_cmd = ata_bmdma_post_internal_cmd,
-	.cable_detect	= atiixp_cable_detect,
-
-	.bmdma_setup 	= ata_bmdma_setup,
+	.qc_prep 	= ata_bmdma_dumb_qc_prep,
 	.bmdma_start 	= atiixp_bmdma_start,
 	.bmdma_stop	= atiixp_bmdma_stop,
-	.bmdma_status 	= ata_bmdma_status,
 
-	.qc_prep 	= ata_qc_prep,
-	.qc_issue	= ata_qc_issue_prot,
-
-	.data_xfer	= ata_data_xfer,
-
-	.irq_handler	= ata_interrupt,
-	.irq_clear	= ata_bmdma_irq_clear,
-	.irq_on		= ata_irq_on,
-	.irq_ack	= ata_irq_ack,
-
-	.port_start	= ata_port_start,
+	.prereset	= atiixp_prereset,
+	.cable_detect	= atiixp_cable_detect,
+	.set_piomode	= atiixp_set_piomode,
+	.set_dmamode	= atiixp_set_dmamode,
 };
 
-static int atiixp_init_one(struct pci_dev *dev, const struct pci_device_id *id)
+static int atiixp_init_one(struct pci_dev *pdev, const struct pci_device_id *id)
 {
 	static const struct ata_port_info info = {
-		.sht = &atiixp_sht,
-		.flags = ATA_FLAG_SLAVE_POSS | ATA_FLAG_SRST,
-		.pio_mask = 0x1f,
-		.mwdma_mask = 0x06,	/* No MWDMA0 support */
-		.udma_mask = 0x3F,
+		.flags = ATA_FLAG_SLAVE_POSS,
+		.pio_mask = ATA_PIO4,
+		.mwdma_mask = ATA_MWDMA12_ONLY,
+		.udma_mask = ATA_UDMA5,
 		.port_ops = &atiixp_port_ops
 	};
-	const struct ata_port_info *ppi[] = { &info, NULL };
-	return ata_pci_init_one(dev, ppi);
+	const struct ata_port_info *ppi[] = { &info, &info };
+
+	return ata_pci_bmdma_init_one(pdev, ppi, &atiixp_sht, NULL,
+				      ATA_HOST_PARALLEL_SCAN);
 }
 
 static const struct pci_device_id atiixp[] = {
@@ -285,6 +288,8 @@ static const struct pci_device_id atiixp[] = {
 	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_IXP300_IDE), },
 	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_IXP400_IDE), },
 	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_IXP600_IDE), },
+	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_IXP700_IDE), },
+	{ PCI_VDEVICE(AMD, PCI_DEVICE_ID_AMD_HUDSON2_IDE), },
 
 	{ },
 };
@@ -300,22 +305,10 @@ static struct pci_driver atiixp_pci_driver = {
 #endif
 };
 
-static int __init atiixp_init(void)
-{
-	return pci_register_driver(&atiixp_pci_driver);
-}
-
-
-static void __exit atiixp_exit(void)
-{
-	pci_unregister_driver(&atiixp_pci_driver);
-}
+module_pci_driver(atiixp_pci_driver);
 
 MODULE_AUTHOR("Alan Cox");
 MODULE_DESCRIPTION("low-level driver for ATI IXP200/300/400");
 MODULE_LICENSE("GPL");
 MODULE_DEVICE_TABLE(pci, atiixp);
 MODULE_VERSION(DRV_VERSION);
-
-module_init(atiixp_init);
-module_exit(atiixp_exit);

@@ -20,20 +20,27 @@ struct gfs2_glock;
 #define RES_JDATA	1
 #define RES_DATA	1
 #define RES_LEAF	1
+#define RES_RG_HDR	1
 #define RES_RG_BIT	2
 #define RES_EATTR	1
 #define RES_STATFS	1
 #define RES_QUOTA	2
 
-int gfs2_trans_begin(struct gfs2_sbd *sdp, unsigned int blocks,
-		     unsigned int revokes);
+/* reserve either the number of blocks to be allocated plus the rg header
+ * block, or all of the blocks in the rg, whichever is smaller */
+static inline unsigned int gfs2_rg_blocks(const struct gfs2_inode *ip, unsigned requested)
+{
+	if (requested < ip->i_rgd->rd_length)
+		return requested + 1;
+	return ip->i_rgd->rd_length;
+}
 
-void gfs2_trans_end(struct gfs2_sbd *sdp);
+extern int gfs2_trans_begin(struct gfs2_sbd *sdp, unsigned int blocks,
+			    unsigned int revokes);
 
-void gfs2_trans_add_gl(struct gfs2_glock *gl);
-void gfs2_trans_add_bh(struct gfs2_glock *gl, struct buffer_head *bh, int meta);
-void gfs2_trans_add_revoke(struct gfs2_sbd *sdp, u64 blkno);
-void gfs2_trans_add_unrevoke(struct gfs2_sbd *sdp, u64 blkno);
-void gfs2_trans_add_rg(struct gfs2_rgrpd *rgd);
+extern void gfs2_trans_end(struct gfs2_sbd *sdp);
+extern void gfs2_trans_add_bh(struct gfs2_glock *gl, struct buffer_head *bh, int meta);
+extern void gfs2_trans_add_revoke(struct gfs2_sbd *sdp, struct gfs2_bufdata *bd);
+extern void gfs2_trans_add_unrevoke(struct gfs2_sbd *sdp, u64 blkno, unsigned int len);
 
 #endif /* __TRANS_DOT_H__ */

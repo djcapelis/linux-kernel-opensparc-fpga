@@ -13,14 +13,15 @@
 #include <linux/circ_buf.h>
 #include <linux/net.h>
 #include <linux/skbuff.h>
+#include <linux/slab.h>
 #include <linux/udp.h>
 #include <net/sock.h>
 #include <net/af_rxrpc.h>
 #include "ar-internal.h"
 
-static unsigned rxrpc_ack_defer = 1;
+static unsigned int rxrpc_ack_defer = 1;
 
-static const char *rxrpc_acks[] = {
+static const char *const rxrpc_acks[] = {
 	"---", "REQ", "DUP", "OOS", "WIN", "MEM", "PNG", "PNR", "DLY", "IDL",
 	"-?-"
 };
@@ -40,7 +41,7 @@ static const s8 rxrpc_ack_priority[] = {
 /*
  * propose an ACK be sent
  */
-void __rxrpc_propose_ACK(struct rxrpc_call *call, uint8_t ack_reason,
+void __rxrpc_propose_ACK(struct rxrpc_call *call, u8 ack_reason,
 			 __be32 serial, bool immediate)
 {
 	unsigned long expiry;
@@ -120,7 +121,7 @@ cancel_timer:
 /*
  * propose an ACK be sent, locking the call structure
  */
-void rxrpc_propose_ACK(struct rxrpc_call *call, uint8_t ack_reason,
+void rxrpc_propose_ACK(struct rxrpc_call *call, u8 ack_reason,
 		       __be32 serial, bool immediate)
 {
 	s8 prior = rxrpc_ack_priority[ack_reason];
@@ -194,7 +195,7 @@ static void rxrpc_resend(struct rxrpc_call *call)
 		sp = rxrpc_skb(txb);
 
 		if (sp->need_resend) {
-			sp->need_resend = 0;
+			sp->need_resend = false;
 
 			/* each Tx packet has a new serial number */
 			sp->hdr.serial =
@@ -215,7 +216,7 @@ static void rxrpc_resend(struct rxrpc_call *call)
 		}
 
 		if (time_after_eq(jiffies + 1, sp->resend_at)) {
-			sp->need_resend = 1;
+			sp->need_resend = true;
 			resend |= 1;
 		} else if (resend & 2) {
 			if (time_before(sp->resend_at, resend_at))
@@ -244,6 +245,9 @@ static void rxrpc_resend_timer(struct rxrpc_call *call)
 	_enter("%d,%d,%d",
 	       call->acks_tail, call->acks_unacked, call->acks_head);
 
+	if (call->state >= RXRPC_CALL_COMPLETE)
+		return;
+
 	resend = 0;
 	resend_at = 0;
 
@@ -261,7 +265,7 @@ static void rxrpc_resend_timer(struct rxrpc_call *call)
 		if (sp->need_resend) {
 			;
 		} else if (time_after_eq(jiffies + 1, sp->resend_at)) {
-			sp->need_resend = 1;
+			sp->need_resend = true;
 			resend |= 1;
 		} else if (resend & 2) {
 			if (time_before(sp->resend_at, resend_at))
@@ -310,11 +314,11 @@ static int rxrpc_process_soft_ACKs(struct rxrpc_call *call,
 
 		switch (sacks[loop]) {
 		case RXRPC_ACK_TYPE_ACK:
-			sp->need_resend = 0;
+			sp->need_resend = false;
 			*p_txb |= 1;
 			break;
 		case RXRPC_ACK_TYPE_NACK:
-			sp->need_resend = 1;
+			sp->need_resend = true;
 			*p_txb &= ~1;
 			resend = 1;
 			break;
@@ -340,13 +344,13 @@ static int rxrpc_process_soft_ACKs(struct rxrpc_call *call,
 
 		if (*p_txb & 1) {
 			/* packet must have been discarded */
-			sp->need_resend = 1;
+			sp->need_resend = true;
 			*p_txb &= ~1;
 			resend |= 1;
 		} else if (sp->need_resend) {
 			;
 		} else if (time_after_eq(jiffies + 1, sp->resend_at)) {
-			sp->need_resend = 1;
+			sp->need_resend = true;
 			resend |= 1;
 		} else if (resend & 2) {
 			if (time_before(sp->resend_at, resend_at))
@@ -371,7 +375,6 @@ protocol_error:
  */
 static void rxrpc_rotate_tx_window(struct rxrpc_call *call, u32 hard)
 {
-	struct rxrpc_skb_priv *sp;
 	unsigned long _skb;
 	int tail = call->acks_tail, old_tail;
 	int win = CIRC_CNT(call->acks_head, tail, call->acks_winsz);
@@ -383,7 +386,6 @@ static void rxrpc_rotate_tx_window(struct rxrpc_call *call, u32 hard)
 	while (call->acks_hard < hard) {
 		smp_read_barrier_depends();
 		_skb = call->acks_window[tail] & ~1;
-		sp = rxrpc_skb((struct sk_buff *) _skb);
 		rxrpc_free_skb((struct sk_buff *) _skb);
 		old_tail = tail;
 		tail = (tail + 1) & (call->acks_winsz - 1);
@@ -520,7 +522,7 @@ static void rxrpc_zap_tx_window(struct rxrpc_call *call)
 	struct rxrpc_skb_priv *sp;
 	struct sk_buff *skb;
 	unsigned long _skb, *acks_window;
-	uint8_t winsz = call->acks_winsz;
+	u8 winsz = call->acks_winsz;
 	int tail;
 
 	acks_window = call->acks_window;
@@ -546,11 +548,11 @@ static void rxrpc_zap_tx_window(struct rxrpc_call *call)
  * process the extra information that may be appended to an ACK packet
  */
 static void rxrpc_extract_ackinfo(struct rxrpc_call *call, struct sk_buff *skb,
-				  unsigned latest, int nAcks)
+				  unsigned int latest, int nAcks)
 {
 	struct rxrpc_ackinfo ackinfo;
 	struct rxrpc_peer *peer;
-	unsigned mtu;
+	unsigned int mtu;
 
 	if (skb_copy_bits(skb, nAcks + 3, &ackinfo, sizeof(ackinfo)) < 0) {
 		_leave(" [no ackinfo]");
@@ -814,8 +816,7 @@ static int rxrpc_post_message(struct rxrpc_call *call, u32 mark, u32 error,
 		spin_lock_bh(&call->lock);
 		ret = rxrpc_queue_rcv_skb(call, skb, true, fatal);
 		spin_unlock_bh(&call->lock);
-		if (ret < 0)
-			BUG();
+		BUG_ON(ret < 0);
 	}
 
 	return 0;

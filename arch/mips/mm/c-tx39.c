@@ -1,7 +1,7 @@
 /*
  * r2300.c: R2000 and R3000 specific mmu/cache code.
  *
- * Copyright (C) 1996 David S. Miller (dm@engr.sgi.com)
+ * Copyright (C) 1996 David S. Miller (davem@davemloft.net)
  *
  * with a lot of changes to make this thing work for R3000s
  * Tx39XX R4k style caches added. HK
@@ -11,13 +11,13 @@
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
+#include <linux/smp.h>
 #include <linux/mm.h>
 
 #include <asm/cacheops.h>
 #include <asm/page.h>
 #include <asm/pgtable.h>
 #include <asm/mmu_context.h>
-#include <asm/system.h>
 #include <asm/isadep.h>
 #include <asm/io.h>
 #include <asm/bootinfo.h>
@@ -69,7 +69,7 @@ static void tx39h_dma_cache_wback_inv(unsigned long addr, unsigned long size)
 /* TX39H2,TX39H3 */
 static inline void tx39_blast_dcache_page(unsigned long addr)
 {
-	if (current_cpu_data.cputype != CPU_TX3912)
+	if (current_cpu_type() != CPU_TX3912)
 		blast_dcache16_page(addr);
 }
 
@@ -120,6 +120,16 @@ static inline void tx39_blast_icache(void)
 	blast_icache16();
 	write_c0_conf(config);
 	local_irq_restore(flags);
+}
+
+static void tx39__flush_cache_vmap(void)
+{
+	tx39_blast_dcache();
+}
+
+static void tx39__flush_cache_vunmap(void)
+{
+	tx39_blast_dcache();
 }
 
 static inline void tx39_flush_cache_all(void)
@@ -242,6 +252,11 @@ static void tx39_flush_icache_range(unsigned long start, unsigned long end)
 	}
 }
 
+static void tx39_flush_kernel_vmap_range(unsigned long vaddr, int size)
+{
+	BUG();
+}
+
 static void tx39_dma_cache_wback_inv(unsigned long addr, unsigned long size)
 {
 	unsigned long end;
@@ -307,7 +322,7 @@ static __init void tx39_probe_cache(void)
 				  TX39_CONF_DCS_SHIFT));
 
 	current_cpu_data.icache.linesz = 16;
-	switch (current_cpu_data.cputype) {
+	switch (current_cpu_type()) {
 	case CPU_TX3912:
 		current_cpu_data.icache.ways = 1;
 		current_cpu_data.dcache.ways = 1;
@@ -329,7 +344,7 @@ static __init void tx39_probe_cache(void)
 	}
 }
 
-void __init tx39_cache_init(void)
+void __cpuinit tx39_cache_init(void)
 {
 	extern void build_clear_page(void);
 	extern void build_copy_page(void);
@@ -341,15 +356,18 @@ void __init tx39_cache_init(void)
 
 	tx39_probe_cache();
 
-	switch (current_cpu_data.cputype) {
+	switch (current_cpu_type()) {
 	case CPU_TX3912:
 		/* TX39/H core (writethru direct-map cache) */
+		__flush_cache_vmap	= tx39__flush_cache_vmap;
+		__flush_cache_vunmap	= tx39__flush_cache_vunmap;
 		flush_cache_all	= tx39h_flush_icache_all;
 		__flush_cache_all	= tx39h_flush_icache_all;
 		flush_cache_mm		= (void *) tx39h_flush_icache_all;
 		flush_cache_range	= (void *) tx39h_flush_icache_all;
 		flush_cache_page	= (void *) tx39h_flush_icache_all;
 		flush_icache_range	= (void *) tx39h_flush_icache_all;
+		local_flush_icache_range = (void *) tx39h_flush_icache_all;
 
 		flush_cache_sigtramp	= (void *) tx39h_flush_icache_all;
 		local_flush_data_cache_page	= (void *) tx39h_flush_icache_all;
@@ -369,12 +387,18 @@ void __init tx39_cache_init(void)
 		write_c0_wired(0);	/* set 8 on reset... */
 		/* board-dependent init code may set WBON */
 
+		__flush_cache_vmap	= tx39__flush_cache_vmap;
+		__flush_cache_vunmap	= tx39__flush_cache_vunmap;
+
 		flush_cache_all = tx39_flush_cache_all;
 		__flush_cache_all = tx39___flush_cache_all;
 		flush_cache_mm = tx39_flush_cache_mm;
 		flush_cache_range = tx39_flush_cache_range;
 		flush_cache_page = tx39_flush_cache_page;
 		flush_icache_range = tx39_flush_icache_range;
+		local_flush_icache_range = tx39_flush_icache_range;
+
+		__flush_kernel_vmap_range = tx39_flush_kernel_vmap_range;
 
 		flush_cache_sigtramp = tx39_flush_cache_sigtramp;
 		local_flush_data_cache_page = local_tx39_flush_data_cache_page;

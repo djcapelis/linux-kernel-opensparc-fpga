@@ -1,7 +1,6 @@
 			  Linux Input drivers v1.0
 	       (c) 1999-2001 Vojtech Pavlik <vojtech@ucw.cz>
 			     Sponsored by SuSE
-	    $Id: input.txt,v 1.8 2002/05/29 03:15:01 bradleym Exp $
 ----------------------------------------------------------------------------
 
 0. Disclaimer
@@ -112,7 +111,7 @@ LCDs and many other purposes.
 
  The monitor and speaker controls should be easy to add to the hid/input
 interface, but for the UPSs and LCDs it doesn't make much sense. For this,
-the hiddev interface was designed. See Documentation/usb/hiddev.txt
+the hiddev interface was designed. See Documentation/hid/hiddev.txt
 for more information about it.
 
   The usage of the usbhid module is very simple, it takes no parameters,
@@ -251,8 +250,8 @@ And so on up to event31.
 a USB keyboard works and is correctly connected to the kernel keyboard
 driver. 
 
-  Doing a cat /dev/input/mouse0 (c, 13, 32) will verify that a mouse
-is also emulated, characters should appear if you move it.
+  Doing a "cat /dev/input/mouse0" (c, 13, 32) will verify that a mouse
+is also emulated; characters should appear if you move it.
 
   You can test the joystick emulation with the 'jstest' utility,
 available in the joystick package (see Documentation/input/joystick.txt).
@@ -279,7 +278,7 @@ struct input_event {
 };
 
   'time' is the timestamp, it returns the time at which the event happened.
-Type is for example EV_REL for relative moment, REL_KEY for a keypress or
+Type is for example EV_REL for relative moment, EV_KEY for a keypress or
 release. More types are defined in include/linux/input.h.
 
   'code' is event code, for example REL_X or KEY_BACKSPACE, again a complete

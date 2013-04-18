@@ -132,8 +132,8 @@ static int tw_connect(struct serio *serio, struct serio_driver *drv)
 	input_dev->id.product = 0;
 	input_dev->id.version = 0x0100;
 	input_dev->dev.parent = &serio->dev;
-	input_dev->evbit[0] = BIT(EV_KEY) | BIT(EV_ABS);
-	input_dev->keybit[LONG(BTN_TOUCH)] = BIT(BTN_TOUCH);
+	input_dev->evbit[0] = BIT_MASK(EV_KEY) | BIT_MASK(EV_ABS);
+	input_dev->keybit[BIT_WORD(BTN_TOUCH)] = BIT_MASK(BTN_TOUCH);
 	input_set_abs_params(tw->dev, ABS_X, TW_MIN_XC, TW_MAX_XC, 0, 0);
 	input_set_abs_params(tw->dev, ABS_Y, TW_MIN_YC, TW_MAX_YC, 0, 0);
 
@@ -183,19 +183,4 @@ static struct serio_driver tw_drv = {
 	.disconnect	= tw_disconnect,
 };
 
-/*
- * The functions for inserting/removing us as a module.
- */
-
-static int __init tw_init(void)
-{
-	return serio_register_driver(&tw_drv);
-}
-
-static void __exit tw_exit(void)
-{
-	serio_unregister_driver(&tw_drv);
-}
-
-module_init(tw_init);
-module_exit(tw_exit);
+module_serio_driver(tw_drv);

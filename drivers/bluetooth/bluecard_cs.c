@@ -37,10 +37,8 @@
 #include <linux/wait.h>
 
 #include <linux/skbuff.h>
-#include <asm/io.h>
+#include <linux/io.h>
 
-#include <pcmcia/cs_types.h>
-#include <pcmcia/cs.h>
 #include <pcmcia/cistpl.h>
 #include <pcmcia/ciscode.h>
 #include <pcmcia/ds.h>
@@ -65,7 +63,6 @@ MODULE_LICENSE("GPL");
 
 typedef struct bluecard_info_t {
 	struct pcmcia_device *p_dev;
-	dev_node_t node;
 
 	struct hci_dev *hdev;
 
@@ -161,7 +158,7 @@ static void bluecard_detach(struct pcmcia_device *p_dev);
 static void bluecard_activity_led_timeout(u_long arg)
 {
 	bluecard_info_t *info = (bluecard_info_t *)arg;
-	unsigned int iobase = info->p_dev->io.BasePort1;
+	unsigned int iobase = info->p_dev->resource[0]->start;
 
 	if (!test_bit(CARD_HAS_PCCARD_ID, &(info->hw_state)))
 		return;
@@ -178,7 +175,7 @@ static void bluecard_activity_led_timeout(u_long arg)
 
 static void bluecard_enable_activity_led(bluecard_info_t *info)
 {
-	unsigned int iobase = info->p_dev->io.BasePort1;
+	unsigned int iobase = info->p_dev->resource[0]->start;
 
 	if (!test_bit(CARD_HAS_PCCARD_ID, &(info->hw_state)))
 		return;
@@ -234,12 +231,12 @@ static void bluecard_write_wakeup(bluecard_info_t *info)
 	}
 
 	do {
-		register unsigned int iobase = info->p_dev->io.BasePort1;
-		register unsigned int offset;
-		register unsigned char command;
-		register unsigned long ready_bit;
+		unsigned int iobase = info->p_dev->resource[0]->start;
+		unsigned int offset;
+		unsigned char command;
+		unsigned long ready_bit;
 		register struct sk_buff *skb;
-		register int len;
+		int len;
 
 		clear_bit(XMIT_WAKEUP, &(info->tx_state));
 
@@ -381,7 +378,7 @@ static void bluecard_receive(bluecard_info_t *info, unsigned int offset)
 		return;
 	}
 
-	iobase = info->p_dev->io.BasePort1;
+	iobase = info->p_dev->resource[0]->start;
 
 	if (test_bit(XMIT_SENDING_READY, &(info->tx_state)))
 		bluecard_enable_activity_led(info);
@@ -503,15 +500,14 @@ static irqreturn_t bluecard_interrupt(int irq, void *dev_inst)
 	unsigned int iobase;
 	unsigned char reg;
 
-	if (!info || !info->hdev) {
-		BT_ERR("Call of irq %d for unknown device", irq);
+	if (!info || !info->hdev)
+		/* our irq handler is shared */
 		return IRQ_NONE;
-	}
 
 	if (!test_bit(CARD_READY, &(info->hw_state)))
 		return IRQ_HANDLED;
 
-	iobase = info->p_dev->io.BasePort1;
+	iobase = info->p_dev->resource[0]->start;
 
 	spin_lock(&(info->lock));
 
@@ -565,7 +561,7 @@ static irqreturn_t bluecard_interrupt(int irq, void *dev_inst)
 
 static int bluecard_hci_set_baud_rate(struct hci_dev *hdev, int baud)
 {
-	bluecard_info_t *info = (bluecard_info_t *)(hdev->driver_data);
+	bluecard_info_t *info = hci_get_drvdata(hdev);
 	struct sk_buff *skb;
 
 	/* Ericsson baud rate command */
@@ -613,7 +609,7 @@ static int bluecard_hci_set_baud_rate(struct hci_dev *hdev, int baud)
 
 static int bluecard_hci_flush(struct hci_dev *hdev)
 {
-	bluecard_info_t *info = (bluecard_info_t *)(hdev->driver_data);
+	bluecard_info_t *info = hci_get_drvdata(hdev);
 
 	/* Drop TX queue */
 	skb_queue_purge(&(info->txq));
@@ -624,8 +620,7 @@ static int bluecard_hci_flush(struct hci_dev *hdev)
 
 static int bluecard_hci_open(struct hci_dev *hdev)
 {
-	bluecard_info_t *info = (bluecard_info_t *)(hdev->driver_data);
-	unsigned int iobase = info->p_dev->io.BasePort1;
+	bluecard_info_t *info = hci_get_drvdata(hdev);
 
 	if (test_bit(CARD_HAS_PCCARD_ID, &(info->hw_state)))
 		bluecard_hci_set_baud_rate(hdev, DEFAULT_BAUD_RATE);
@@ -634,6 +629,8 @@ static int bluecard_hci_open(struct hci_dev *hdev)
 		return 0;
 
 	if (test_bit(CARD_HAS_PCCARD_ID, &(info->hw_state))) {
+		unsigned int iobase = info->p_dev->resource[0]->start;
+
 		/* Enable LED */
 		outb(0x08 | 0x20, iobase + 0x30);
 	}
@@ -644,8 +641,7 @@ static int bluecard_hci_open(struct hci_dev *hdev)
 
 static int bluecard_hci_close(struct hci_dev *hdev)
 {
-	bluecard_info_t *info = (bluecard_info_t *)(hdev->driver_data);
-	unsigned int iobase = info->p_dev->io.BasePort1;
+	bluecard_info_t *info = hci_get_drvdata(hdev);
 
 	if (!test_and_clear_bit(HCI_RUNNING, &(hdev->flags)))
 		return 0;
@@ -653,6 +649,8 @@ static int bluecard_hci_close(struct hci_dev *hdev)
 	bluecard_hci_flush(hdev);
 
 	if (test_bit(CARD_HAS_PCCARD_ID, &(info->hw_state))) {
+		unsigned int iobase = info->p_dev->resource[0]->start;
+
 		/* Disable LED */
 		outb(0x00, iobase + 0x30);
 	}
@@ -671,7 +669,7 @@ static int bluecard_hci_send_frame(struct sk_buff *skb)
 		return -ENODEV;
 	}
 
-	info = (bluecard_info_t *)(hdev->driver_data);
+	info = hci_get_drvdata(hdev);
 
 	switch (bt_cb(skb)->pkt_type) {
 	case HCI_COMMAND_PKT:
@@ -683,7 +681,7 @@ static int bluecard_hci_send_frame(struct sk_buff *skb)
 	case HCI_SCODATA_PKT:
 		hdev->stat.sco_tx++;
 		break;
-	};
+	}
 
 	/* Prepend skb with frame type */
 	memcpy(skb_push(skb, 1), &bt_cb(skb)->pkt_type, 1);
@@ -692,11 +690,6 @@ static int bluecard_hci_send_frame(struct sk_buff *skb)
 	bluecard_write_wakeup(info);
 
 	return 0;
-}
-
-
-static void bluecard_hci_destruct(struct hci_dev *hdev)
-{
 }
 
 
@@ -712,7 +705,7 @@ static int bluecard_hci_ioctl(struct hci_dev *hdev, unsigned int cmd, unsigned l
 
 static int bluecard_open(bluecard_info_t *info)
 {
-	unsigned int iobase = info->p_dev->io.BasePort1;
+	unsigned int iobase = info->p_dev->resource[0]->start;
 	struct hci_dev *hdev;
 	unsigned char id;
 
@@ -737,18 +730,15 @@ static int bluecard_open(bluecard_info_t *info)
 
 	info->hdev = hdev;
 
-	hdev->type = HCI_PCCARD;
-	hdev->driver_data = info;
+	hdev->bus = HCI_PCCARD;
+	hci_set_drvdata(hdev, info);
 	SET_HCIDEV_DEV(hdev, &info->p_dev->dev);
 
 	hdev->open     = bluecard_hci_open;
 	hdev->close    = bluecard_hci_close;
 	hdev->flush    = bluecard_hci_flush;
 	hdev->send     = bluecard_hci_send_frame;
-	hdev->destruct = bluecard_hci_destruct;
 	hdev->ioctl    = bluecard_hci_ioctl;
-
-	hdev->owner = THIS_MODULE;
 
 	id = inb(iobase + 0x30);
 
@@ -831,7 +821,7 @@ static int bluecard_open(bluecard_info_t *info)
 
 static int bluecard_close(bluecard_info_t *info)
 {
-	unsigned int iobase = info->p_dev->io.BasePort1;
+	unsigned int iobase = info->p_dev->resource[0]->start;
 	struct hci_dev *hdev = info->hdev;
 
 	if (!hdev)
@@ -848,9 +838,7 @@ static int bluecard_close(bluecard_info_t *info)
 	/* Turn FPGA off */
 	outb(0x80, iobase + 0x30);
 
-	if (hci_unregister_dev(hdev) < 0)
-		BT_ERR("Can't unregister HCI device %s", hdev->name);
-
+	hci_unregister_dev(hdev);
 	hci_free_dev(hdev);
 
 	return 0;
@@ -861,23 +849,14 @@ static int bluecard_probe(struct pcmcia_device *link)
 	bluecard_info_t *info;
 
 	/* Create new info device */
-	info = kzalloc(sizeof(*info), GFP_KERNEL);
+	info = devm_kzalloc(&link->dev, sizeof(*info), GFP_KERNEL);
 	if (!info)
 		return -ENOMEM;
 
 	info->p_dev = link;
 	link->priv = info;
 
-	link->io.Attributes1 = IO_DATA_PATH_WIDTH_8;
-	link->io.NumPorts1 = 8;
-	link->irq.Attributes = IRQ_TYPE_EXCLUSIVE | IRQ_HANDLE_PRESENT;
-	link->irq.IRQInfo1 = IRQ_LEVEL_ID;
-
-	link->irq.Handler = bluecard_interrupt;
-	link->irq.Instance = info;
-
-	link->conf.Attributes = CONF_ENABLE_IRQ;
-	link->conf.IntType = INT_MEMORY_AND_IO;
+	link->config_flags |= CONF_ENABLE_IRQ;
 
 	return bluecard_config(link);
 }
@@ -885,10 +864,7 @@ static int bluecard_probe(struct pcmcia_device *link)
 
 static void bluecard_detach(struct pcmcia_device *link)
 {
-	bluecard_info_t *info = link->priv;
-
 	bluecard_release(link);
-	kfree(info);
 }
 
 
@@ -897,39 +873,32 @@ static int bluecard_config(struct pcmcia_device *link)
 	bluecard_info_t *info = link->priv;
 	int i, n;
 
-	link->conf.ConfigIndex = 0x20;
-	link->io.NumPorts1 = 64;
-	link->io.IOAddrLines = 6;
+	link->config_index = 0x20;
+
+	link->resource[0]->flags |= IO_DATA_PATH_WIDTH_8;
+	link->resource[0]->end = 64;
+	link->io_lines = 6;
 
 	for (n = 0; n < 0x400; n += 0x40) {
-		link->io.BasePort1 = n ^ 0x300;
-		i = pcmcia_request_io(link, &link->io);
-		if (i == CS_SUCCESS)
+		link->resource[0]->start = n ^ 0x300;
+		i = pcmcia_request_io(link);
+		if (i == 0)
 			break;
 	}
 
-	if (i != CS_SUCCESS) {
-		cs_error(link, RequestIO, i);
+	if (i != 0)
 		goto failed;
-	}
 
-	i = pcmcia_request_irq(link, &link->irq);
-	if (i != CS_SUCCESS) {
-		cs_error(link, RequestIRQ, i);
-		link->irq.AssignedIRQ = 0;
-	}
-
-	i = pcmcia_request_configuration(link, &link->conf);
-	if (i != CS_SUCCESS) {
-		cs_error(link, RequestConfiguration, i);
+	i = pcmcia_request_irq(link, bluecard_interrupt);
+	if (i != 0)
 		goto failed;
-	}
+
+	i = pcmcia_enable_device(link);
+	if (i != 0)
+		goto failed;
 
 	if (bluecard_open(info) != 0)
 		goto failed;
-
-	strcpy(info->node.dev_name, info->hdev->name);
-	link->dev_node = &info->node;
 
 	return 0;
 
@@ -950,7 +919,7 @@ static void bluecard_release(struct pcmcia_device *link)
 	pcmcia_disable_device(link);
 }
 
-static struct pcmcia_device_id bluecard_ids[] = {
+static const struct pcmcia_device_id bluecard_ids[] = {
 	PCMCIA_DEVICE_PROD_ID12("BlueCard", "LSE041", 0xbaf16fbf, 0x657cc15e),
 	PCMCIA_DEVICE_PROD_ID12("BTCFCARD", "LSE139", 0xe3987764, 0x2524b59c),
 	PCMCIA_DEVICE_PROD_ID12("WSS", "LSE039", 0x0a0736ec, 0x24e6dfab),
@@ -960,9 +929,7 @@ MODULE_DEVICE_TABLE(pcmcia, bluecard_ids);
 
 static struct pcmcia_driver bluecard_driver = {
 	.owner		= THIS_MODULE,
-	.drv		= {
-		.name	= "bluecard_cs",
-	},
+	.name		= "bluecard_cs",
 	.probe		= bluecard_probe,
 	.remove		= bluecard_detach,
 	.id_table	= bluecard_ids,

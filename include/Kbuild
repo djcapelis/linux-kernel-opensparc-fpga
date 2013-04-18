@@ -1,9 +1,5 @@
-header-y += asm-generic/
-header-y += linux/
-header-y += scsi/
-header-y += sound/
-header-y += mtd/
-header-y += rdma/
-header-y += video/
+# Top-level Makefile calls into asm-$(ARCH)
+# List only non-arch directories below
 
-header-y += asm-$(ARCH)/
+header-y += video/
+header-y += scsi/

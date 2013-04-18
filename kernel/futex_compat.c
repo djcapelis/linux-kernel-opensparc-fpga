@@ -8,7 +8,9 @@
 
 #include <linux/linkage.h>
 #include <linux/compat.h>
+#include <linux/nsproxy.h>
 #include <linux/futex.h>
+#include <linux/ptrace.h>
 
 #include <asm/uaccess.h>
 
@@ -18,7 +20,7 @@
  */
 static inline int
 fetch_robust_entry(compat_uptr_t *uentry, struct robust_list __user **entry,
-		   compat_uptr_t __user *head, int *pi)
+		   compat_uptr_t __user *head, unsigned int *pi)
 {
 	if (get_user(*uentry, head))
 		return -EFAULT;
@@ -27,6 +29,15 @@ fetch_robust_entry(compat_uptr_t *uentry, struct robust_list __user **entry,
 	*pi = (unsigned int)(*uentry) & 1;
 
 	return 0;
+}
+
+static void __user *futex_uaddr(struct robust_list __user *entry,
+				compat_long_t futex_offset)
+{
+	compat_uptr_t base = ptr_to_compat(entry);
+	void __user *uaddr = compat_ptr(base + futex_offset);
+
+	return uaddr;
 }
 
 /*
@@ -38,10 +49,15 @@ fetch_robust_entry(compat_uptr_t *uentry, struct robust_list __user **entry,
 void compat_exit_robust_list(struct task_struct *curr)
 {
 	struct compat_robust_list_head __user *head = curr->compat_robust_list;
-	struct robust_list __user *entry, *pending;
+	struct robust_list __user *entry, *next_entry, *pending;
 	unsigned int limit = ROBUST_LIST_LIMIT, pi, pip;
-	compat_uptr_t uentry, upending;
+	unsigned int uninitialized_var(next_pi);
+	compat_uptr_t uentry, next_uentry, upending;
 	compat_long_t futex_offset;
+	int rc;
+
+	if (!futex_cmpxchg_enabled)
+		return;
 
 	/*
 	 * Fetch the list head (which was registered earlier, via
@@ -61,25 +77,30 @@ void compat_exit_robust_list(struct task_struct *curr)
 	if (fetch_robust_entry(&upending, &pending,
 			       &head->list_op_pending, &pip))
 		return;
-	if (upending)
-		handle_futex_death((void __user *)pending + futex_offset, curr, pip);
 
-	while (compat_ptr(uentry) != &head->list) {
+	next_entry = NULL;	/* avoid warning with gcc */
+	while (entry != (struct robust_list __user *) &head->list) {
+		/*
+		 * Fetch the next entry in the list before calling
+		 * handle_futex_death:
+		 */
+		rc = fetch_robust_entry(&next_uentry, &next_entry,
+			(compat_uptr_t __user *)&entry->next, &next_pi);
 		/*
 		 * A pending lock might already be on the list, so
 		 * dont process it twice:
 		 */
-		if (entry != pending)
-			if (handle_futex_death((void __user *)entry + futex_offset,
-						curr, pi))
-				return;
+		if (entry != pending) {
+			void __user *uaddr = futex_uaddr(entry, futex_offset);
 
-		/*
-		 * Fetch the next entry in the list:
-		 */
-		if (fetch_robust_entry(&uentry, &entry,
-				       (compat_uptr_t __user *)&entry->next, &pi))
+			if (handle_futex_death(uaddr, curr, pi))
+				return;
+		}
+		if (rc)
 			return;
+		uentry = next_uentry;
+		entry = next_entry;
+		pi = next_pi;
 		/*
 		 * Avoid excessively long or circular lists:
 		 */
@@ -88,12 +109,20 @@ void compat_exit_robust_list(struct task_struct *curr)
 
 		cond_resched();
 	}
+	if (pending) {
+		void __user *uaddr = futex_uaddr(pending, futex_offset);
+
+		handle_futex_death(uaddr, curr, pip);
+	}
 }
 
 asmlinkage long
 compat_sys_set_robust_list(struct compat_robust_list_head __user *head,
 			   compat_size_t len)
 {
+	if (!futex_cmpxchg_enabled)
+		return -ENOSYS;
+
 	if (unlikely(len != sizeof(*head)))
 		return -EINVAL;
 
@@ -108,31 +137,35 @@ compat_sys_get_robust_list(int pid, compat_uptr_t __user *head_ptr,
 {
 	struct compat_robust_list_head __user *head;
 	unsigned long ret;
+	struct task_struct *p;
 
+	if (!futex_cmpxchg_enabled)
+		return -ENOSYS;
+
+	rcu_read_lock();
+
+	ret = -ESRCH;
 	if (!pid)
-		head = current->compat_robust_list;
+		p = current;
 	else {
-		struct task_struct *p;
-
-		ret = -ESRCH;
-		read_lock(&tasklist_lock);
-		p = find_task_by_pid(pid);
+		p = find_task_by_vpid(pid);
 		if (!p)
 			goto err_unlock;
-		ret = -EPERM;
-		if ((current->euid != p->euid) && (current->euid != p->uid) &&
-				!capable(CAP_SYS_PTRACE))
-			goto err_unlock;
-		head = p->compat_robust_list;
-		read_unlock(&tasklist_lock);
 	}
+
+	ret = -EPERM;
+	if (!ptrace_may_access(p, PTRACE_MODE_READ))
+		goto err_unlock;
+
+	head = p->compat_robust_list;
+	rcu_read_unlock();
 
 	if (put_user(sizeof(*head), len_ptr))
 		return -EFAULT;
 	return put_user(ptr_to_compat(head), head_ptr);
 
 err_unlock:
-	read_unlock(&tasklist_lock);
+	rcu_read_unlock();
 
 	return ret;
 }
@@ -146,7 +179,9 @@ asmlinkage long compat_sys_futex(u32 __user *uaddr, int op, u32 val,
 	int val2 = 0;
 	int cmd = op & FUTEX_CMD_MASK;
 
-	if (utime && (cmd == FUTEX_WAIT || cmd == FUTEX_LOCK_PI)) {
+	if (utime && (cmd == FUTEX_WAIT || cmd == FUTEX_LOCK_PI ||
+		      cmd == FUTEX_WAIT_BITSET ||
+		      cmd == FUTEX_WAIT_REQUEUE_PI)) {
 		if (get_compat_timespec(&ts, utime))
 			return -EFAULT;
 		if (!timespec_valid(&ts))
@@ -154,10 +189,11 @@ asmlinkage long compat_sys_futex(u32 __user *uaddr, int op, u32 val,
 
 		t = timespec_to_ktime(ts);
 		if (cmd == FUTEX_WAIT)
-			t = ktime_add(ktime_get(), t);
+			t = ktime_add_safe(ktime_get(), t);
 		tp = &t;
 	}
-	if (cmd == FUTEX_REQUEUE || cmd == FUTEX_CMP_REQUEUE)
+	if (cmd == FUTEX_REQUEUE || cmd == FUTEX_CMP_REQUEUE ||
+	    cmd == FUTEX_CMP_REQUEUE_PI || cmd == FUTEX_WAKE_OP)
 		val2 = (int) (unsigned long) utime;
 
 	return do_futex(uaddr, op, val, tp, uaddr2, val2, val3);

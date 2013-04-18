@@ -1,5 +1,5 @@
 /*
- * Copyright (C) Freescale Semicondutor, Inc. 2006. All rights reserved.
+ * Copyright 2006 Freescale Semiconductor, Inc. All rights reserved.
  *
  * Description:
  * MPC832xE MDS board specific routines.
@@ -23,20 +23,19 @@
 #include <linux/seq_file.h>
 #include <linux/root_dev.h>
 #include <linux/initrd.h>
+#include <linux/of_platform.h>
+#include <linux/of_device.h>
 
-#include <asm/of_device.h>
-#include <asm/of_platform.h>
-#include <asm/system.h>
-#include <asm/atomic.h>
+#include <linux/atomic.h>
 #include <asm/time.h>
 #include <asm/io.h>
 #include <asm/machdep.h>
 #include <asm/ipic.h>
-#include <asm/bootinfo.h>
 #include <asm/irq.h>
 #include <asm/prom.h>
 #include <asm/udbg.h>
 #include <sysdev/fsl_soc.h>
+#include <sysdev/fsl_pci.h>
 #include <asm/qe.h>
 #include <asm/qe_ic.h>
 
@@ -49,13 +48,6 @@
 #define DBG(fmt...)
 #endif
 
-#ifndef CONFIG_PCI
-unsigned long isa_io_base = 0;
-unsigned long isa_mem_base = 0;
-#endif
-
-static u8 *bcsr_regs = NULL;
-
 /* ************************************************************************
  *
  * Setup the architecture
@@ -64,25 +56,22 @@ static u8 *bcsr_regs = NULL;
 static void __init mpc832x_sys_setup_arch(void)
 {
 	struct device_node *np;
+	u8 __iomem *bcsr_regs = NULL;
 
 	if (ppc_md.progress)
 		ppc_md.progress("mpc832x_sys_setup_arch()", 0);
 
 	/* Map BCSR area */
 	np = of_find_node_by_name(NULL, "bcsr");
-	if (np != 0) {
+	if (np) {
 		struct resource res;
 
 		of_address_to_resource(np, 0, &res);
-		bcsr_regs = ioremap(res.start, res.end - res.start +1);
+		bcsr_regs = ioremap(res.start, resource_size(&res));
 		of_node_put(np);
 	}
 
-#ifdef CONFIG_PCI
-	for (np = NULL; (np = of_find_node_by_type(np, "pci")) != NULL;)
-		add_bridge(np);
-	ppc_md.pci_exclude_device = mpc83xx_exclude_device;
-#endif
+	mpc83xx_setup_pci();
 
 #ifdef CONFIG_QUICC_ENGINE
 	qe_reset();
@@ -97,85 +86,18 @@ static void __init mpc832x_sys_setup_arch(void)
 
 	if ((np = of_find_compatible_node(NULL, "network", "ucc_geth"))
 			!= NULL){
-		/* Reset the Ethernet PHY */
-		bcsr_regs[9] &= ~0x20;
+		/* Reset the Ethernet PHYs */
+#define BCSR8_FETH_RST 0x50
+		clrbits8(&bcsr_regs[8], BCSR8_FETH_RST);
 		udelay(1000);
-		bcsr_regs[9] |= 0x20;
+		setbits8(&bcsr_regs[8], BCSR8_FETH_RST);
 		iounmap(bcsr_regs);
 		of_node_put(np);
 	}
 #endif				/* CONFIG_QUICC_ENGINE */
 }
 
-static struct of_device_id mpc832x_ids[] = {
-	{ .type = "soc", },
-	{ .compatible = "soc", },
-	{ .type = "qe", },
-	{ .type = "mdio", },
-	{},
-};
-
-static int __init mpc832x_declare_of_platform_devices(void)
-{
-	if (!machine_is(mpc832x_mds))
-		return 0;
-
-	/* Publish the QE devices */
-	of_platform_bus_probe(NULL, mpc832x_ids, NULL);
-
-	return 0;
-}
-device_initcall(mpc832x_declare_of_platform_devices);
-
-static void __init mpc832x_sys_init_IRQ(void)
-{
-	struct device_node *np;
-
-	np = of_find_node_by_type(NULL, "ipic");
-	if (!np)
-		return;
-
-	ipic_init(np, 0);
-
-	/* Initialize the default interrupt mapping priorities,
-	 * in case the boot rom changed something on us.
-	 */
-	ipic_set_default_priority();
-	of_node_put(np);
-
-#ifdef CONFIG_QUICC_ENGINE
-	np = of_find_node_by_type(NULL, "qeic");
-	if (!np)
-		return;
-
-	qe_ic_init(np, 0);
-	of_node_put(np);
-#endif				/* CONFIG_QUICC_ENGINE */
-}
-
-#if defined(CONFIG_I2C_MPC) && defined(CONFIG_SENSORS_DS1374)
-extern ulong ds1374_get_rtc_time(void);
-extern int ds1374_set_rtc_time(ulong);
-
-static int __init mpc832x_rtc_hookup(void)
-{
-	struct timespec tv;
-
-	if (!machine_is(mpc832x_mds))
-		return 0;
-
-	ppc_md.get_rtc_time = ds1374_get_rtc_time;
-	ppc_md.set_rtc_time = ds1374_set_rtc_time;
-
-	tv.tv_nsec = 0;
-	tv.tv_sec = (ppc_md.get_rtc_time) ();
-	do_settimeofday(&tv);
-
-	return 0;
-}
-
-late_initcall(mpc832x_rtc_hookup);
-#endif
+machine_device_initcall(mpc832x_mds, mpc83xx_declare_of_platform_devices);
 
 /*
  * Called very early, MMU is off, device-tree isn't unflattened
@@ -191,7 +113,7 @@ define_machine(mpc832x_mds) {
 	.name 		= "MPC832x MDS",
 	.probe 		= mpc832x_sys_probe,
 	.setup_arch 	= mpc832x_sys_setup_arch,
-	.init_IRQ 	= mpc832x_sys_init_IRQ,
+	.init_IRQ	= mpc83xx_ipic_and_qe_init_IRQ,
 	.get_irq 	= ipic_get_irq,
 	.restart 	= mpc83xx_restart,
 	.time_init 	= mpc83xx_time_init,

@@ -13,23 +13,14 @@
  * any later version.
  *
  */
+
+#include <crypto/scatterwalk.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/pagemap.h>
 #include <linux/highmem.h>
 #include <linux/scatterlist.h>
-
-#include "internal.h"
-#include "scatterwalk.h"
-
-enum km_type crypto_km_types[] = {
-	KM_USER0,
-	KM_USER1,
-	KM_SOFTIRQ0,
-	KM_SOFTIRQ1,
-};
-EXPORT_SYMBOL_GPL(crypto_km_types);
 
 static inline void memcpy_dir(void *buf, void *sgdata, size_t nbytes, int out)
 {
@@ -49,9 +40,9 @@ void scatterwalk_start(struct scatter_walk *walk, struct scatterlist *sg)
 }
 EXPORT_SYMBOL_GPL(scatterwalk_start);
 
-void *scatterwalk_map(struct scatter_walk *walk, int out)
+void *scatterwalk_map(struct scatter_walk *walk)
 {
-	return crypto_kmap(scatterwalk_page(walk), out) +
+	return kmap_atomic(scatterwalk_page(walk)) +
 	       offset_in_page(walk->offset);
 }
 EXPORT_SYMBOL_GPL(scatterwalk_map);
@@ -62,21 +53,22 @@ static void scatterwalk_pagedone(struct scatter_walk *walk, int out,
 	if (out) {
 		struct page *page;
 
-		page = walk->sg->page + ((walk->offset - 1) >> PAGE_SHIFT);
-		flush_dcache_page(page);
+		page = sg_page(walk->sg) + ((walk->offset - 1) >> PAGE_SHIFT);
+		if (!PageSlab(page))
+			flush_dcache_page(page);
 	}
 
 	if (more) {
 		walk->offset += PAGE_SIZE - 1;
 		walk->offset &= PAGE_MASK;
 		if (walk->offset >= walk->sg->offset + walk->sg->length)
-			scatterwalk_start(walk, sg_next(walk->sg));
+			scatterwalk_start(walk, scatterwalk_sg_next(walk->sg));
 	}
 }
 
 void scatterwalk_done(struct scatter_walk *walk, int out, int more)
 {
-	if (!offset_in_page(walk->offset) || !more)
+	if (!(scatterwalk_pagelen(walk) & (PAGE_SIZE - 1)) || !more)
 		scatterwalk_pagedone(walk, out, more);
 }
 EXPORT_SYMBOL_GPL(scatterwalk_done);
@@ -91,9 +83,9 @@ void scatterwalk_copychunks(void *buf, struct scatter_walk *walk,
 		if (len_this_page > nbytes)
 			len_this_page = nbytes;
 
-		vaddr = scatterwalk_map(walk, out);
+		vaddr = scatterwalk_map(walk);
 		memcpy_dir(buf, vaddr, len_this_page, out);
-		scatterwalk_unmap(vaddr, out);
+		scatterwalk_unmap(vaddr);
 
 		scatterwalk_advance(walk, len_this_page);
 
@@ -107,3 +99,28 @@ void scatterwalk_copychunks(void *buf, struct scatter_walk *walk,
 	}
 }
 EXPORT_SYMBOL_GPL(scatterwalk_copychunks);
+
+void scatterwalk_map_and_copy(void *buf, struct scatterlist *sg,
+			      unsigned int start, unsigned int nbytes, int out)
+{
+	struct scatter_walk walk;
+	unsigned int offset = 0;
+
+	if (!nbytes)
+		return;
+
+	for (;;) {
+		scatterwalk_start(&walk, sg);
+
+		if (start < offset + sg->length)
+			break;
+
+		offset += sg->length;
+		sg = scatterwalk_sg_next(sg);
+	}
+
+	scatterwalk_advance(&walk, start - offset);
+	scatterwalk_copychunks(buf, &walk, nbytes, out);
+	scatterwalk_done(&walk, out, 0);
+}
+EXPORT_SYMBOL_GPL(scatterwalk_map_and_copy);

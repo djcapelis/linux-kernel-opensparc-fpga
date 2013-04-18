@@ -2,8 +2,8 @@
 # S/390 block devices
 #
 
-dasd_eckd_mod-objs := dasd_eckd.o dasd_3990_erp.o dasd_9343_erp.o
-dasd_fba_mod-objs  := dasd_fba.o dasd_3370_erp.o dasd_9336_erp.o
+dasd_eckd_mod-objs := dasd_eckd.o dasd_3990_erp.o dasd_alias.o
+dasd_fba_mod-objs  := dasd_fba.o
 dasd_diag_mod-objs := dasd_diag.o
 dasd_mod-objs      := dasd.o dasd_ioctl.o dasd_proc.o dasd_devmap.o \
 			dasd_genhd.o dasd_erp.o
@@ -17,3 +17,9 @@ obj-$(CONFIG_DASD_ECKD) += dasd_eckd_mod.o
 obj-$(CONFIG_DASD_FBA)  += dasd_fba_mod.o
 obj-$(CONFIG_BLK_DEV_XPRAM) += xpram.o
 obj-$(CONFIG_DCSSBLK) += dcssblk.o
+
+scm_block-objs := scm_drv.o scm_blk.o
+ifdef CONFIG_SCM_BLOCK_CLUSTER_WRITE
+scm_block-objs += scm_blk_cluster.o
+endif
+obj-$(CONFIG_SCM_BLOCK) += scm_block.o

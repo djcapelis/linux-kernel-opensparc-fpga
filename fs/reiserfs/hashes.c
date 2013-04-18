@@ -7,7 +7,7 @@
  * (see Applied Cryptography, 2nd edition, p448).
  *
  * Jeremy Fitzhardinge <jeremy@zip.com.au> 1998
- * 
+ *
  * Jeremy has agreed to the contents of reiserfs/README. -Hans
  * Yura's function is added (04/07/2000)
  */
@@ -19,7 +19,7 @@
 //
 
 #include <linux/kernel.h>
-#include <linux/reiserfs_fs.h>
+#include "reiserfs.h"
 #include <asm/types.h>
 
 #define DELTA 0x9E3779B9

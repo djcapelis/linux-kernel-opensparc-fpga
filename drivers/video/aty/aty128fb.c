@@ -52,11 +52,10 @@
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/mm.h>
-#include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <linux/fb.h>
 #include <linux/init.h>
 #include <linux/pci.h>
@@ -91,14 +90,15 @@
 #undef DEBUG
 
 #ifdef DEBUG
-#define DBG(fmt, args...)		printk(KERN_DEBUG "aty128fb: %s " fmt, __FUNCTION__, ##args);
+#define DBG(fmt, args...) \
+	printk(KERN_DEBUG "aty128fb: %s " fmt, __func__, ##args);
 #else
 #define DBG(fmt, args...)
 #endif
 
 #ifndef CONFIG_PPC_PMAC
 /* default mode */
-static struct fb_var_screeninfo default_var __devinitdata = {
+static struct fb_var_screeninfo default_var = {
 	/* 640x480, 60 Hz, Non-Interlaced (25.175 MHz dotclock) */
 	640, 480, 640, 480, 0, 0, 8, 0,
 	{0, 8, 0}, {0, 8, 0}, {0, 8, 0}, {0, 0, 0},
@@ -121,7 +121,7 @@ static struct fb_var_screeninfo default_var = {
 
 /* default modedb mode */
 /* 640x480, 60 Hz, Non-Interlaced (25.172 MHz dotclock) */
-static struct fb_videomode defaultmode __devinitdata = {
+static struct fb_videomode defaultmode = {
 	.refresh =	60,
 	.xres =		640,
 	.yres =		480,
@@ -149,7 +149,7 @@ enum {
 };
 
 /* Must match above enum */
-static const char *r128_family[] __devinitdata = {
+static char * const r128_family[] = {
 	"AGP",
 	"PCI",
 	"PRO AGP",
@@ -275,7 +275,7 @@ static struct pci_driver aty128fb_driver = {
 	.name		= "aty128fb",
 	.id_table	= aty128_pci_tbl,
 	.probe		= aty128_probe,
-	.remove		= __devexit_p(aty128_remove),
+	.remove		= aty128_remove,
 	.suspend	= aty128_pci_suspend,
 	.resume		= aty128_pci_resume,
 };
@@ -333,7 +333,7 @@ static const struct aty128_meminfo sdr_sgram =
 static const struct aty128_meminfo ddr_sgram =
 	{ 4, 4, 3, 3, 2, 3, 1, 16, 31, 16, "64-bit DDR SGRAM" };
 
-static struct fb_fix_screeninfo aty128fb_fix __devinitdata = {
+static struct fb_fix_screeninfo aty128fb_fix = {
 	.id		= "ATY Rage128",
 	.type		= FB_TYPE_PACKED_PIXELS,
 	.visual		= FB_VISUAL_PSEUDOCOLOR,
@@ -343,24 +343,24 @@ static struct fb_fix_screeninfo aty128fb_fix __devinitdata = {
 	.accel		= FB_ACCEL_ATI_RAGE128,
 };
 
-static char *mode_option __devinitdata = NULL;
+static char *mode_option = NULL;
 
 #ifdef CONFIG_PPC_PMAC
-static int default_vmode __devinitdata = VMODE_1024_768_60;
-static int default_cmode __devinitdata = CMODE_8;
+static int default_vmode = VMODE_1024_768_60;
+static int default_cmode = CMODE_8;
 #endif
 
-static int default_crt_on __devinitdata = 0;
-static int default_lcd_on __devinitdata = 1;
+static int default_crt_on = 0;
+static int default_lcd_on = 1;
 
 #ifdef CONFIG_MTRR
-static int mtrr = 1;
+static bool mtrr = true;
 #endif
 
 #ifdef CONFIG_PMAC_BACKLIGHT
-static int backlight __devinitdata = 1;
+static int backlight = 1;
 #else
-static int backlight __devinitdata = 0;
+static int backlight = 0;
 #endif
 
 /* PLL constants */
@@ -449,9 +449,9 @@ static int aty128_encode_var(struct fb_var_screeninfo *var,
 static int aty128_decode_var(struct fb_var_screeninfo *var,
                              struct aty128fb_par *par);
 #if 0
-static void __devinit aty128_get_pllinfo(struct aty128fb_par *par,
-				      void __iomem *bios);
-static void __devinit __iomem *aty128_map_ROM(struct pci_dev *pdev, const struct aty128fb_par *par);
+static void aty128_get_pllinfo(struct aty128fb_par *par, void __iomem *bios);
+static void __iomem *aty128_map_ROM(struct pci_dev *pdev,
+				    const struct aty128fb_par *par);
 #endif
 static void aty128_timings(struct aty128fb_par *par);
 static void aty128_init_engine(struct aty128fb_par *par);
@@ -581,7 +581,7 @@ static void aty_pll_writeupdate(const struct aty128fb_par *par)
 
 
 /* write to the scratch register to test r/w functionality */
-static int __devinit register_test(const struct aty128fb_par *par)
+static int register_test(const struct aty128fb_par *par)
 {
 	u32 val;
 	int flag = 0;
@@ -780,7 +780,8 @@ static u32 depth_to_dst(u32 depth)
 
 
 #ifndef __sparc__
-static void __iomem * __devinit aty128_map_ROM(const struct aty128fb_par *par, struct pci_dev *dev)
+static void __iomem *aty128_map_ROM(const struct aty128fb_par *par,
+				    struct pci_dev *dev)
 {
 	u16 dptr;
 	u8 rom_type;
@@ -812,13 +813,14 @@ static void __iomem * __devinit aty128_map_ROM(const struct aty128fb_par *par, s
 	/* Look for the PCI data to check the ROM type */
 	dptr = BIOS_IN16(0x18);
 
-	/* Check the PCI data signature. If it's wrong, we still assume a normal x86 ROM
-	 * for now, until I've verified this works everywhere. The goal here is more
-	 * to phase out Open Firmware images.
+	/* Check the PCI data signature. If it's wrong, we still assume a normal
+	 * x86 ROM for now, until I've verified this works everywhere.
+	 * The goal here is more to phase out Open Firmware images.
 	 *
-	 * Currently, we only look at the first PCI data, we could iteratre and deal with
-	 * them all, and we should use fb_bios_start relative to start of image and not
-	 * relative start of ROM, but so far, I never found a dual-image ATI card
+	 * Currently, we only look at the first PCI data, we could iteratre and
+	 * deal with them all, and we should use fb_bios_start relative to start
+	 * of image and not relative start of ROM, but so far, I never found a
+	 * dual-image ATI card.
 	 *
 	 * typedef struct {
 	 * 	u32	signature;	+ 0x00
@@ -853,7 +855,8 @@ static void __iomem * __devinit aty128_map_ROM(const struct aty128fb_par *par, s
 		printk(KERN_INFO "aty128fb: Found HP PA-RISC ROM Image\n");
 		goto failed;
 	default:
-		printk(KERN_INFO "aty128fb: Found unknown type %d ROM Image\n", rom_type);
+		printk(KERN_INFO "aty128fb: Found unknown type %d ROM Image\n",
+		       rom_type);
 		goto failed;
 	}
  anyway:
@@ -864,7 +867,8 @@ static void __iomem * __devinit aty128_map_ROM(const struct aty128fb_par *par, s
 	return NULL;
 }
 
-static void __devinit aty128_get_pllinfo(struct aty128fb_par *par, unsigned char __iomem *bios)
+static void aty128_get_pllinfo(struct aty128fb_par *par,
+			       unsigned char __iomem *bios)
 {
 	unsigned int bios_hdr;
 	unsigned int bios_pll;
@@ -886,7 +890,7 @@ static void __devinit aty128_get_pllinfo(struct aty128fb_par *par, unsigned char
 }           
 
 #ifdef CONFIG_X86
-static void __iomem *  __devinit aty128_find_mem_vbios(struct aty128fb_par *par)
+static void __iomem *aty128_find_mem_vbios(struct aty128fb_par *par)
 {
 	/* I simplified this code as we used to miss the signatures in
 	 * a lot of case. It's now closer to XFree, we just don't check
@@ -911,7 +915,7 @@ static void __iomem *  __devinit aty128_find_mem_vbios(struct aty128fb_par *par)
 #endif /* ndef(__sparc__) */
 
 /* fill in known card constants if pll_block is not available */
-static void __devinit aty128_timings(struct aty128fb_par *par)
+static void aty128_timings(struct aty128fb_par *par)
 {
 #ifdef CONFIG_PPC_OF
 	/* instead of a table lookup, assume OF has properly
@@ -1248,10 +1252,13 @@ static int aty128_crtc_to_var(const struct aty128_crtc *crtc,
 static void aty128_set_crt_enable(struct aty128fb_par *par, int on)
 {
 	if (on) {
-		aty_st_le32(CRTC_EXT_CNTL, aty_ld_le32(CRTC_EXT_CNTL) | CRT_CRTC_ON);
-		aty_st_le32(DAC_CNTL, (aty_ld_le32(DAC_CNTL) | DAC_PALETTE2_SNOOP_EN));
+		aty_st_le32(CRTC_EXT_CNTL, aty_ld_le32(CRTC_EXT_CNTL) |
+			    CRT_CRTC_ON);
+		aty_st_le32(DAC_CNTL, (aty_ld_le32(DAC_CNTL) |
+			    DAC_PALETTE2_SNOOP_EN));
 	} else
-		aty_st_le32(CRTC_EXT_CNTL, aty_ld_le32(CRTC_EXT_CNTL) & ~CRT_CRTC_ON);
+		aty_st_le32(CRTC_EXT_CNTL, aty_ld_le32(CRTC_EXT_CNTL) &
+			    ~CRT_CRTC_ON);
 }
 
 static void aty128_set_lcd_enable(struct aty128fb_par *par, int on)
@@ -1282,7 +1289,8 @@ static void aty128_set_lcd_enable(struct aty128fb_par *par, int on)
 	}
 }
 
-static void aty128_set_pll(struct aty128_pll *pll, const struct aty128fb_par *par)
+static void aty128_set_pll(struct aty128_pll *pll,
+			   const struct aty128fb_par *par)
 {
 	u32 div3;
 
@@ -1339,10 +1347,8 @@ static int aty128_var_to_pll(u32 period_in_ps, struct aty128_pll *pll,
 	if (vclk * 12 < c.ppll_min)
 		vclk = c.ppll_min/12;
 
-	pll->post_divider = -1;
-
 	/* now, find an acceptable divider */
-	for (i = 0; i < sizeof(post_dividers); i++) {
+	for (i = 0; i < ARRAY_SIZE(post_dividers); i++) {
 		output_freq = post_dividers[i] * vclk;
 		if (output_freq >= c.ppll_min && output_freq <= c.ppll_max) {
 			pll->post_divider = post_dividers[i];
@@ -1350,7 +1356,7 @@ static int aty128_var_to_pll(u32 period_in_ps, struct aty128_pll *pll,
 		}
 	}
 
-	if (pll->post_divider < 0)
+	if (i == ARRAY_SIZE(post_dividers))
 		return -EINVAL;
 
 	/* calculate feedback divider */
@@ -1369,7 +1375,8 @@ static int aty128_var_to_pll(u32 period_in_ps, struct aty128_pll *pll,
 }
 
 
-static int aty128_pll_to_var(const struct aty128_pll *pll, struct fb_var_screeninfo *var)
+static int aty128_pll_to_var(const struct aty128_pll *pll,
+			     struct fb_var_screeninfo *var)
 {
 	var->pixclock = 100000000 / pll->vclk;
 
@@ -1477,7 +1484,7 @@ static int aty128fb_set_par(struct fb_info *info)
 	aty128_set_pll(&par->pll, par);
 	aty128_set_fifo(&par->fifo_reg, par);
 
-	config = aty_ld_le32(CONFIG_CNTL) & ~3;
+	config = aty_ld_le32(CNFG_CNTL) & ~3;
 
 #if defined(__BIG_ENDIAN)
 	if (par->crtc.bpp == 32)
@@ -1486,7 +1493,7 @@ static int aty128fb_set_par(struct fb_info *info)
 		config |= 1;	/* make aperture do 16 bit swapping */
 #endif
 
-	aty_st_le32(CONFIG_CNTL, config);
+	aty_st_le32(CNFG_CNTL, config);
 	aty_st_8(CRTC_EXT_CNTL + 1, 0);	/* turn the video back on */
 
 	info->fix.line_length = (par->crtc.vxres * par->crtc.bpp) >> 3;
@@ -1515,7 +1522,8 @@ static int aty128fb_set_par(struct fb_info *info)
  *  encode/decode the User Defined Part of the Display
  */
 
-static int aty128_decode_var(struct fb_var_screeninfo *var, struct aty128fb_par *par)
+static int aty128_decode_var(struct fb_var_screeninfo *var,
+			     struct aty128fb_par *par)
 {
 	int err;
 	struct aty128_crtc crtc;
@@ -1562,7 +1570,8 @@ static int aty128_encode_var(struct fb_var_screeninfo *var,
 }           
 
 
-static int aty128fb_check_var(struct fb_var_screeninfo *var, struct fb_info *info)
+static int aty128fb_check_var(struct fb_var_screeninfo *var,
+			      struct fb_info *info)
 {
 	struct aty128fb_par par;
 	int err;
@@ -1578,7 +1587,8 @@ static int aty128fb_check_var(struct fb_var_screeninfo *var, struct fb_info *inf
 /*
  *  Pan or Wrap the Display
  */
-static int aty128fb_pan_display(struct fb_var_screeninfo *var, struct fb_info *fb) 
+static int aty128fb_pan_display(struct fb_var_screeninfo *var,
+				struct fb_info *fb)
 {
 	struct aty128fb_par *par = fb->par;
 	u32 xoffset, yoffset;
@@ -1597,7 +1607,8 @@ static int aty128fb_pan_display(struct fb_var_screeninfo *var, struct fb_info *f
 	par->crtc.xoffset = xoffset;
 	par->crtc.yoffset = yoffset;
 
-	offset = ((yoffset * par->crtc.vxres + xoffset)*(par->crtc.bpp >> 3)) & ~7;
+	offset = ((yoffset * par->crtc.vxres + xoffset) * (par->crtc.bpp >> 3))
+									  & ~7;
 
 	if (par->crtc.bpp == 24)
 		offset += 8 * (offset % 3); /* Must be multiple of 8 and 3 */
@@ -1623,11 +1634,13 @@ static void aty128_st_pal(u_int regno, u_int red, u_int green, u_int blue,
 		 * do mirroring
 		 */
 
-		aty_st_le32(DAC_CNTL, aty_ld_le32(DAC_CNTL) | DAC_PALETTE_ACCESS_CNTL);
+		aty_st_le32(DAC_CNTL, aty_ld_le32(DAC_CNTL) |
+			    DAC_PALETTE_ACCESS_CNTL);
 		aty_st_8(PALETTE_INDEX, regno);
 		aty_st_le32(PALETTE_DATA, (red<<16)|(green<<8)|blue);
 #endif
-		aty_st_le32(DAC_CNTL, aty_ld_le32(DAC_CNTL) & ~DAC_PALETTE_ACCESS_CNTL);
+		aty_st_le32(DAC_CNTL, aty_ld_le32(DAC_CNTL) &
+			    ~DAC_PALETTE_ACCESS_CNTL);
 	}
 
 	aty_st_8(PALETTE_INDEX, regno);
@@ -1644,7 +1657,7 @@ static int aty128fb_sync(struct fb_info *info)
 }
 
 #ifndef MODULE
-static int __devinit aty128fb_setup(char *options)
+static int aty128fb_setup(char *options)
 {
 	char *this_opt;
 
@@ -1733,7 +1746,7 @@ static int aty128_bl_get_level_brightness(struct aty128fb_par *par,
 
 static int aty128_bl_update_status(struct backlight_device *bd)
 {
-	struct aty128fb_par *par = class_get_devdata(&bd->class_dev);
+	struct aty128fb_par *par = bl_get_data(bd);
 	unsigned int reg = aty_ld_le32(LVDS_GEN_CNTL);
 	int level;
 
@@ -1756,7 +1769,8 @@ static int aty128_bl_update_status(struct backlight_device *bd)
 			aty_st_le32(LVDS_GEN_CNTL, reg);
 		}
 		reg &= ~LVDS_BL_MOD_LEVEL_MASK;
-		reg |= (aty128_bl_get_level_brightness(par, level) << LVDS_BL_MOD_LEVEL_SHIFT);
+		reg |= (aty128_bl_get_level_brightness(par, level) <<
+			LVDS_BL_MOD_LEVEL_SHIFT);
 #ifdef BACKLIGHT_LVDS_OFF
 		reg |= LVDS_ON | LVDS_EN;
 		reg &= ~LVDS_DISPLAY_DIS;
@@ -1767,7 +1781,8 @@ static int aty128_bl_update_status(struct backlight_device *bd)
 #endif
 	} else {
 		reg &= ~LVDS_BL_MOD_LEVEL_MASK;
-		reg |= (aty128_bl_get_level_brightness(par, 0) << LVDS_BL_MOD_LEVEL_SHIFT);
+		reg |= (aty128_bl_get_level_brightness(par, 0) <<
+			LVDS_BL_MOD_LEVEL_SHIFT);
 #ifdef BACKLIGHT_LVDS_OFF
 		reg |= LVDS_DISPLAY_DIS;
 		aty_st_le32(LVDS_GEN_CNTL, reg);
@@ -1789,7 +1804,7 @@ static int aty128_bl_get_brightness(struct backlight_device *bd)
 	return bd->props.brightness;
 }
 
-static struct backlight_ops aty128_bl_data = {
+static const struct backlight_ops aty128_bl_data = {
 	.get_brightness	= aty128_bl_get_brightness,
 	.update_status	= aty128_bl_update_status,
 };
@@ -1804,6 +1819,7 @@ static void aty128_bl_set_power(struct fb_info *info, int power)
 
 static void aty128_bl_init(struct aty128fb_par *par)
 {
+	struct backlight_properties props;
 	struct fb_info *info = pci_get_drvdata(par->pdev);
 	struct backlight_device *bd;
 	char name[12];
@@ -1819,7 +1835,11 @@ static void aty128_bl_init(struct aty128fb_par *par)
 
 	snprintf(name, sizeof(name), "aty128bl%d", info->node);
 
-	bd = backlight_device_register(name, info->dev, par, &aty128_bl_data);
+	memset(&props, 0, sizeof(struct backlight_properties));
+	props.type = BACKLIGHT_RAW;
+	props.max_brightness = FB_BACKLIGHT_LEVELS - 1;
+	bd = backlight_device_register(name, info->dev, par, &aty128_bl_data,
+				       &props);
 	if (IS_ERR(bd)) {
 		info->bl_dev = NULL;
 		printk(KERN_WARNING "aty128: Backlight registration failed\n");
@@ -1831,7 +1851,6 @@ static void aty128_bl_init(struct aty128fb_par *par)
 		 63 * FB_BACKLIGHT_MAX / MAX_LEVEL,
 		219 * FB_BACKLIGHT_MAX / MAX_LEVEL);
 
-	bd->props.max_brightness = FB_BACKLIGHT_LEVELS - 1;
 	bd->props.brightness = bd->props.max_brightness;
 	bd->props.power = FB_BLANK_UNBLANK;
 	backlight_update_status(bd);
@@ -1855,29 +1874,30 @@ static void aty128_bl_exit(struct backlight_device *bd)
  *  Initialisation
  */
 
-#ifdef CONFIG_PPC_PMAC
+#ifdef CONFIG_PPC_PMAC__disabled
 static void aty128_early_resume(void *data)
 {
         struct aty128fb_par *par = data;
 
-	if (try_acquire_console_sem())
+	if (!console_trylock())
 		return;
+	pci_restore_state(par->pdev);
 	aty128_do_resume(par->pdev);
-	release_console_sem();
+	console_unlock();
 }
 #endif /* CONFIG_PPC_PMAC */
 
-static int __devinit aty128_init(struct pci_dev *pdev, const struct pci_device_id *ent)
+static int aty128_init(struct pci_dev *pdev, const struct pci_device_id *ent)
 {
 	struct fb_info *info = pci_get_drvdata(pdev);
 	struct aty128fb_par *par = info->par;
 	struct fb_var_screeninfo var;
-	char video_card[DEVICE_NAME_SIZE];
+	char video_card[50];
 	u8 chip_rev;
 	u32 dac;
 
 	/* Get the chip revision */
-	chip_rev = (aty_ld_le32(CONFIG_CNTL) >> 16) & 0x1F;
+	chip_rev = (aty_ld_le32(CNFG_CNTL) >> 16) & 0x1F;
 
 	strcpy(video_card, "Rage128 XX ");
 	video_card[8] = ent->device >> 8;
@@ -1885,7 +1905,8 @@ static int __devinit aty128_init(struct pci_dev *pdev, const struct pci_device_i
 
 	/* range check to make sure */
 	if (ent->driver_data < ARRAY_SIZE(r128_family))
-	    strncat(video_card, r128_family[ent->driver_data], sizeof(video_card));
+		strlcat(video_card, r128_family[ent->driver_data],
+			sizeof(video_card));
 
 	printk(KERN_INFO "aty128fb: %s [chip rev 0x%x] ", video_card, chip_rev);
 
@@ -1909,7 +1930,14 @@ static int __devinit aty128_init(struct pci_dev *pdev, const struct pci_device_i
 		/* Indicate sleep capability */
 		if (par->chip_gen == rage_M3) {
 			pmac_call_feature(PMAC_FTR_DEVICE_CAN_WAKE, NULL, 0, 1);
+#if 0 /* Disable the early video resume hack for now as it's causing problems,
+       * among others we now rely on the PCI core restoring the config space
+       * for us, which isn't the case with that hack, and that code path causes
+       * various things to be called with interrupts off while they shouldn't.
+       * I'm leaving the code in as it can be useful for debugging purposes
+       */
 			pmac_set_early_video_resume(aty128_early_resume, par);
+#endif
 		}
 
 		/* Find default mode */
@@ -1925,30 +1953,30 @@ static int __devinit aty128_init(struct pci_dev *pdev, const struct pci_device_i
 			 * PowerMac2,2 summer 2000 iMacs
 			 * PowerMac4,1 january 2001 iMacs "flower power"
 			 */
-			if (machine_is_compatible("PowerMac2,1") ||
-			    machine_is_compatible("PowerMac2,2") ||
-			    machine_is_compatible("PowerMac4,1"))
+			if (of_machine_is_compatible("PowerMac2,1") ||
+			    of_machine_is_compatible("PowerMac2,2") ||
+			    of_machine_is_compatible("PowerMac4,1"))
 				default_vmode = VMODE_1024_768_75;
 
 			/* iBook SE */
-			if (machine_is_compatible("PowerBook2,2"))
+			if (of_machine_is_compatible("PowerBook2,2"))
 				default_vmode = VMODE_800_600_60;
 
 			/* PowerBook Firewire (Pismo), iBook Dual USB */
-			if (machine_is_compatible("PowerBook3,1") ||
-			    machine_is_compatible("PowerBook4,1"))
+			if (of_machine_is_compatible("PowerBook3,1") ||
+			    of_machine_is_compatible("PowerBook4,1"))
 				default_vmode = VMODE_1024_768_60;
 
 			/* PowerBook Titanium */
-			if (machine_is_compatible("PowerBook3,2"))
+			if (of_machine_is_compatible("PowerBook3,2"))
 				default_vmode = VMODE_1152_768_60;
 	
 			if (default_cmode > 16) 
-			    default_cmode = CMODE_32;
+				default_cmode = CMODE_32;
 			else if (default_cmode > 8) 
-			    default_cmode = CMODE_16;
+				default_cmode = CMODE_16;
 			else 
-			    default_cmode = CMODE_8;
+				default_cmode = CMODE_8;
 
 			if (mac_vmode_to_var(default_vmode, default_cmode, &var))
 				var = default_var;
@@ -2009,7 +2037,7 @@ static int __devinit aty128_init(struct pci_dev *pdev, const struct pci_device_i
 
 #ifdef CONFIG_PCI
 /* register a card    ++ajoshi */
-static int __devinit aty128_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
+static int aty128_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 {
 	unsigned long fb_addr, reg_addr;
 	struct aty128fb_par *par;
@@ -2053,13 +2081,13 @@ static int __devinit aty128_probe(struct pci_dev *pdev, const struct pci_device_
 
 	/* Virtualize mmio region */
 	info->fix.mmio_start = reg_addr;
-	par->regbase = ioremap(reg_addr, pci_resource_len(pdev, 2));
+	par->regbase = pci_ioremap_bar(pdev, 2);
 	if (!par->regbase)
 		goto err_free_info;
 
 	/* Grab memory size from the card */
 	// How does this relate to the resource length from the PCI hardware?
-	par->vram_size = aty_ld_le32(CONFIG_MEMSIZE) & 0x03FFFFFF;
+	par->vram_size = aty_ld_le32(CNFG_MEMSIZE) & 0x03FFFFFF;
 
 	/* Virtualize the framebuffer */
 	info->screen_base = ioremap(fb_addr, par->vram_size);
@@ -2125,7 +2153,7 @@ err_free_fb:
 	return -ENODEV;
 }
 
-static void __devexit aty128_remove(struct pci_dev *pdev)
+static void aty128_remove(struct pci_dev *pdev)
 {
 	struct fb_info *info = pci_get_drvdata(pdev);
 	struct aty128fb_par *par;
@@ -2309,39 +2337,39 @@ static inline void aty128_rectcopy(int srcx, int srcy, int dstx, int dsty,
 				   u_int width, u_int height,
 				   struct fb_info_aty128 *par)
 {
-    u32 save_dp_datatype, save_dp_cntl, dstval;
+	u32 save_dp_datatype, save_dp_cntl, dstval;
 
-    if (!width || !height)
-        return;
+	if (!width || !height)
+		return;
 
-    dstval = depth_to_dst(par->current_par.crtc.depth);
-    if (dstval == DST_24BPP) {
-        srcx *= 3;
-        dstx *= 3;
-        width *= 3;
-    } else if (dstval == -EINVAL) {
-        printk("aty128fb: invalid depth or RGBA\n");
-        return;
-    }
+	dstval = depth_to_dst(par->current_par.crtc.depth);
+	if (dstval == DST_24BPP) {
+		srcx *= 3;
+		dstx *= 3;
+		width *= 3;
+	} else if (dstval == -EINVAL) {
+		printk("aty128fb: invalid depth or RGBA\n");
+		return;
+	}
 
-    wait_for_fifo(2, par);
-    save_dp_datatype = aty_ld_le32(DP_DATATYPE);
-    save_dp_cntl     = aty_ld_le32(DP_CNTL);
+	wait_for_fifo(2, par);
+	save_dp_datatype = aty_ld_le32(DP_DATATYPE);
+	save_dp_cntl     = aty_ld_le32(DP_CNTL);
 
-    wait_for_fifo(6, par);
-    aty_st_le32(SRC_Y_X, (srcy << 16) | srcx);
-    aty_st_le32(DP_MIX, ROP3_SRCCOPY | DP_SRC_RECT);
-    aty_st_le32(DP_CNTL, DST_X_LEFT_TO_RIGHT | DST_Y_TOP_TO_BOTTOM);
-    aty_st_le32(DP_DATATYPE, save_dp_datatype | dstval | SRC_DSTCOLOR);
+	wait_for_fifo(6, par);
+	aty_st_le32(SRC_Y_X, (srcy << 16) | srcx);
+	aty_st_le32(DP_MIX, ROP3_SRCCOPY | DP_SRC_RECT);
+	aty_st_le32(DP_CNTL, DST_X_LEFT_TO_RIGHT | DST_Y_TOP_TO_BOTTOM);
+	aty_st_le32(DP_DATATYPE, save_dp_datatype | dstval | SRC_DSTCOLOR);
 
-    aty_st_le32(DST_Y_X, (dsty << 16) | dstx);
-    aty_st_le32(DST_HEIGHT_WIDTH, (height << 16) | width);
+	aty_st_le32(DST_Y_X, (dsty << 16) | dstx);
+	aty_st_le32(DST_HEIGHT_WIDTH, (height << 16) | width);
 
-    par->blitter_may_be_busy = 1;
+	par->blitter_may_be_busy = 1;
 
-    wait_for_fifo(2, par);
-    aty_st_le32(DP_DATATYPE, save_dp_datatype);
-    aty_st_le32(DP_CNTL, save_dp_cntl); 
+	wait_for_fifo(2, par);
+	aty_st_le32(DP_DATATYPE, save_dp_datatype);
+	aty_st_le32(DP_CNTL, save_dp_cntl);
 }
 
 
@@ -2349,17 +2377,17 @@ static inline void aty128_rectcopy(int srcx, int srcy, int dstx, int dsty,
      * Text mode accelerated functions
      */
 
-static void fbcon_aty128_bmove(struct display *p, int sy, int sx, int dy, int dx,
-			int height, int width)
+static void fbcon_aty128_bmove(struct display *p, int sy, int sx, int dy,
+			       int dx, int height, int width)
 {
-    sx     *= fontwidth(p);
-    sy     *= fontheight(p);
-    dx     *= fontwidth(p);
-    dy     *= fontheight(p);
-    width  *= fontwidth(p);
-    height *= fontheight(p);
+	sx     *= fontwidth(p);
+	sy     *= fontheight(p);
+	dx     *= fontwidth(p);
+	dy     *= fontheight(p);
+	width  *= fontwidth(p);
+	height *= fontheight(p);
 
-    aty128_rectcopy(sx, sy, dx, dy, width, height,
+	aty128_rectcopy(sx, sy, dx, dy, width, height,
 			(struct fb_info_aty128 *)p->fb_info);
 }
 #endif /* 0 */
@@ -2367,7 +2395,6 @@ static void fbcon_aty128_bmove(struct display *p, int sy, int sx, int dy, int dx
 static void aty128_set_suspend(struct aty128fb_par *par, int suspend)
 {
 	u32	pmgt;
-	u16	pwr_command;
 	struct pci_dev *pdev = par->pdev;
 
 	if (!par->pm_reg)
@@ -2376,6 +2403,8 @@ static void aty128_set_suspend(struct aty128fb_par *par, int suspend)
 	/* Set the chip into the appropriate suspend mode (we use D2,
 	 * D3 would require a complete re-initialisation of the chip,
 	 * including PCI config registers, clocks, AGP configuration, ...)
+	 *
+	 * For resume, the core will have already brought us back to D0
 	 */
 	if (suspend) {
 		/* Make sure CRTC2 is reset. Remove that the day we decide to
@@ -2393,17 +2422,9 @@ static void aty128_set_suspend(struct aty128fb_par *par, int suspend)
 		aty_st_le32(BUS_CNTL1, 0x00000010);
 		aty_st_le32(MEM_POWER_MISC, 0x0c830000);
 		mdelay(100);
-		pci_read_config_word(pdev, par->pm_reg+PCI_PM_CTRL, &pwr_command);
+
 		/* Switch PCI power management to D2 */
-		pci_write_config_word(pdev, par->pm_reg+PCI_PM_CTRL,
-			(pwr_command & ~PCI_PM_CTRL_STATE_MASK) | 2);
-		pci_read_config_word(pdev, par->pm_reg+PCI_PM_CTRL, &pwr_command);
-	} else {
-		/* Switch back PCI power management to D0 */
-		mdelay(100);
-		pci_write_config_word(pdev, par->pm_reg+PCI_PM_CTRL, 0);
-		pci_read_config_word(pdev, par->pm_reg+PCI_PM_CTRL, &pwr_command);
-		mdelay(100);
+		pci_set_power_state(pdev, PCI_D2);
 	}
 }
 
@@ -2411,6 +2432,12 @@ static int aty128_pci_suspend(struct pci_dev *pdev, pm_message_t state)
 {
 	struct fb_info *info = pci_get_drvdata(pdev);
 	struct aty128fb_par *par = info->par;
+
+	/* Because we may change PCI D state ourselves, we need to
+	 * first save the config space content so the core can
+	 * restore it properly on resume.
+	 */
+	pci_save_state(pdev);
 
 	/* We don't do anything but D2, for now we return 0, but
 	 * we may want to change that. How do we know if the BIOS
@@ -2431,7 +2458,7 @@ static int aty128_pci_suspend(struct pci_dev *pdev, pm_message_t state)
 
 	printk(KERN_DEBUG "aty128fb: suspending...\n");
 	
-	acquire_console_sem();
+	console_lock();
 
 	fb_set_suspend(info, 1);
 
@@ -2463,7 +2490,7 @@ static int aty128_pci_suspend(struct pci_dev *pdev, pm_message_t state)
 	if (state.event != PM_EVENT_ON)
 		aty128_set_suspend(par, 1);
 
-	release_console_sem();
+	console_unlock();
 
 	pdev->dev.power.power_state = state;
 
@@ -2477,6 +2504,11 @@ static int aty128_do_resume(struct pci_dev *pdev)
 
 	if (pdev->dev.power.power_state.event == PM_EVENT_ON)
 		return 0;
+
+	/* PCI state will have been restored by the core, so
+	 * we should be in D0 now with our config space fully
+	 * restored
+	 */
 
 	/* Wakeup chip */
 	aty128_set_suspend(par, 0);
@@ -2515,15 +2547,15 @@ static int aty128_pci_resume(struct pci_dev *pdev)
 {
 	int rc;
 
-	acquire_console_sem();
+	console_lock();
 	rc = aty128_do_resume(pdev);
-	release_console_sem();
+	console_unlock();
 
 	return rc;
 }
 
 
-static int __devinit aty128fb_init(void)
+static int aty128fb_init(void)
 {
 #ifndef MODULE
 	char *option = NULL;

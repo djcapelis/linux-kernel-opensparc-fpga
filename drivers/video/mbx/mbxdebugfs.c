@@ -1,4 +1,5 @@
 #include <linux/debugfs.h>
+#include <linux/slab.h>
 
 #define BIG_BUFFER_SIZE	(1024)
 
@@ -174,39 +175,45 @@ static const struct file_operations sysconf_fops = {
 	.read = sysconf_read_file,
 	.write = write_file_dummy,
 	.open = open_file_generic,
+	.llseek = default_llseek,
 };
 
 static const struct file_operations clock_fops = {
 	.read = clock_read_file,
 	.write = write_file_dummy,
 	.open = open_file_generic,
+	.llseek = default_llseek,
 };
 
 static const struct file_operations display_fops = {
 	.read = display_read_file,
 	.write = write_file_dummy,
 	.open = open_file_generic,
+	.llseek = default_llseek,
 };
 
 static const struct file_operations gsctl_fops = {
 	.read = gsctl_read_file,
 	.write = write_file_dummy,
 	.open = open_file_generic,
+	.llseek = default_llseek,
 };
 
 static const struct file_operations sdram_fops = {
 	.read = sdram_read_file,
 	.write = write_file_dummy,
 	.open = open_file_generic,
+	.llseek = default_llseek,
 };
 
 static const struct file_operations misc_fops = {
 	.read = misc_read_file,
 	.write = write_file_dummy,
 	.open = open_file_generic,
+	.llseek = default_llseek,
 };
 
-static void __devinit mbxfb_debugfs_init(struct fb_info *fbi)
+static void mbxfb_debugfs_init(struct fb_info *fbi)
 {
 	struct mbxfb_info *mfbi = fbi->par;
 	struct mbxfb_debugfs_data *dbg;
@@ -229,7 +236,7 @@ static void __devinit mbxfb_debugfs_init(struct fb_info *fbi)
 					fbi, &misc_fops);
 }
 
-static void __devexit mbxfb_debugfs_remove(struct fb_info *fbi)
+static void mbxfb_debugfs_remove(struct fb_info *fbi)
 {
 	struct mbxfb_info *mfbi = fbi->par;
 	struct mbxfb_debugfs_data *dbg = mfbi->debugfs_data;

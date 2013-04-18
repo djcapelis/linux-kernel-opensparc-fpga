@@ -18,6 +18,7 @@
 #include <linux/spinlock.h>
 #include <linux/types.h>
 #include <linux/pm.h>
+#include <linux/irq.h>
 
 #include <asm/bootinfo.h>
 #include <asm/cpu.h>
@@ -55,7 +56,7 @@ EXPORT_SYMBOL(dec_kn_slot_size);
 
 int dec_tc_bus;
 
-spinlock_t ioasic_ssr_lock;
+DEFINE_SPINLOCK(ioasic_ssr_lock);
 
 volatile u32 *ioasic_base;
 
@@ -100,20 +101,23 @@ int cpu_fpu_mask = DEC_CPU_IRQ_MASK(DEC_CPU_INR_FPU);
 static struct irqaction ioirq = {
 	.handler = no_action,
 	.name = "cascade",
+	.flags = IRQF_NO_THREAD,
 };
 static struct irqaction fpuirq = {
 	.handler = no_action,
 	.name = "fpu",
+	.flags = IRQF_NO_THREAD,
 };
 
 static struct irqaction busirq = {
-	.flags = IRQF_DISABLED,
 	.name = "bus error",
+	.flags = IRQF_NO_THREAD,
 };
 
 static struct irqaction haltirq = {
 	.handler = dec_intr_halt,
 	.name = "halt",
+	.flags = IRQF_NO_THREAD,
 };
 
 
@@ -145,13 +149,9 @@ static void __init dec_be_init(void)
 	}
 }
 
-
-extern void dec_time_init(void);
-
 void __init plat_mem_setup(void)
 {
 	board_be_init = dec_be_init;
-	board_time_init = dec_time_init;
 
 	wbflush_setup();
 

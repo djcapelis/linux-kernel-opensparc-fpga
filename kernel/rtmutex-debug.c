@@ -18,7 +18,7 @@
  */
 #include <linux/sched.h>
 #include <linux/delay.h>
-#include <linux/module.h>
+#include <linux/export.h>
 #include <linux/spinlock.h>
 #include <linux/kallsyms.h>
 #include <linux/syscalls.h>
@@ -29,76 +29,10 @@
 
 #include "rtmutex_common.h"
 
-#ifdef CONFIG_DEBUG_RT_MUTEXES
-# include "rtmutex-debug.h"
-#else
-# include "rtmutex.h"
-#endif
-
-# define TRACE_WARN_ON(x)			WARN_ON(x)
-# define TRACE_BUG_ON(x)			BUG_ON(x)
-
-# define TRACE_OFF()						\
-do {								\
-	if (rt_trace_on) {					\
-		rt_trace_on = 0;				\
-		console_verbose();				\
-		if (spin_is_locked(&current->pi_lock))		\
-			spin_unlock(&current->pi_lock);		\
-	}							\
-} while (0)
-
-# define TRACE_OFF_NOLOCK()					\
-do {								\
-	if (rt_trace_on) {					\
-		rt_trace_on = 0;				\
-		console_verbose();				\
-	}							\
-} while (0)
-
-# define TRACE_BUG_LOCKED()			\
-do {						\
-	TRACE_OFF();				\
-	BUG();					\
-} while (0)
-
-# define TRACE_WARN_ON_LOCKED(c)		\
-do {						\
-	if (unlikely(c)) {			\
-		TRACE_OFF();			\
-		WARN_ON(1);			\
-	}					\
-} while (0)
-
-# define TRACE_BUG_ON_LOCKED(c)			\
-do {						\
-	if (unlikely(c))			\
-		TRACE_BUG_LOCKED();		\
-} while (0)
-
-#ifdef CONFIG_SMP
-# define SMP_TRACE_BUG_ON_LOCKED(c)	TRACE_BUG_ON_LOCKED(c)
-#else
-# define SMP_TRACE_BUG_ON_LOCKED(c)	do { } while (0)
-#endif
-
-/*
- * deadlock detection flag. We turn it off when we detect
- * the first problem because we dont want to recurse back
- * into the tracing code when doing error printk or
- * executing a BUG():
- */
-int rt_trace_on = 1;
-
-void deadlock_trace_off(void)
-{
-	rt_trace_on = 0;
-}
-
 static void printk_task(struct task_struct *p)
 {
 	if (p)
-		printk("%16s:%5d [%p, %3d]", p->comm, p->pid, p, p->prio);
+		printk("%16s:%5d [%p, %3d]", p->comm, task_pid_nr(p), p, p->prio);
 	else
 		printk("<none>");
 }
@@ -122,8 +56,8 @@ static void printk_lock(struct rt_mutex *lock, int print_owner)
 
 void rt_mutex_debug_task_free(struct task_struct *task)
 {
-	WARN_ON(!plist_head_empty(&task->pi_waiters));
-	WARN_ON(task->pi_blocked_on);
+	DEBUG_LOCKS_WARN_ON(!plist_head_empty(&task->pi_waiters));
+	DEBUG_LOCKS_WARN_ON(task->pi_blocked_on);
 }
 
 /*
@@ -136,12 +70,12 @@ void debug_rt_mutex_deadlock(int detect, struct rt_mutex_waiter *act_waiter,
 {
 	struct task_struct *task;
 
-	if (!rt_trace_on || detect || !act_waiter)
+	if (!debug_locks || detect || !act_waiter)
 		return;
 
 	task = rt_mutex_owner(act_waiter->lock);
 	if (task && task != current) {
-		act_waiter->deadlock_task_pid = task->pid;
+		act_waiter->deadlock_task_pid = get_pid(task_pid(task));
 		act_waiter->deadlock_lock = lock;
 	}
 }
@@ -150,41 +84,51 @@ void debug_rt_mutex_print_deadlock(struct rt_mutex_waiter *waiter)
 {
 	struct task_struct *task;
 
-	if (!waiter->deadlock_lock || !rt_trace_on)
+	if (!waiter->deadlock_lock || !debug_locks)
 		return;
 
-	task = find_task_by_pid(waiter->deadlock_task_pid);
-	if (!task)
+	rcu_read_lock();
+	task = pid_task(waiter->deadlock_task_pid, PIDTYPE_PID);
+	if (!task) {
+		rcu_read_unlock();
 		return;
+	}
 
-	TRACE_OFF_NOLOCK();
+	if (!debug_locks_off()) {
+		rcu_read_unlock();
+		return;
+	}
 
 	printk("\n============================================\n");
 	printk(  "[ BUG: circular locking deadlock detected! ]\n");
+	printk("%s\n", print_tainted());
 	printk(  "--------------------------------------------\n");
 	printk("%s/%d is deadlocking current task %s/%d\n\n",
-	       task->comm, task->pid, current->comm, current->pid);
+	       task->comm, task_pid_nr(task),
+	       current->comm, task_pid_nr(current));
 
 	printk("\n1) %s/%d is trying to acquire this lock:\n",
-	       current->comm, current->pid);
+	       current->comm, task_pid_nr(current));
 	printk_lock(waiter->lock, 1);
 
-	printk("\n2) %s/%d is blocked on this lock:\n", task->comm, task->pid);
+	printk("\n2) %s/%d is blocked on this lock:\n",
+		task->comm, task_pid_nr(task));
 	printk_lock(waiter->deadlock_lock, 1);
 
 	debug_show_held_locks(current);
 	debug_show_held_locks(task);
 
-	printk("\n%s/%d's [blocked] stackdump:\n\n", task->comm, task->pid);
+	printk("\n%s/%d's [blocked] stackdump:\n\n",
+		task->comm, task_pid_nr(task));
 	show_stack(task, NULL);
 	printk("\n%s/%d's [current] stackdump:\n\n",
-	       current->comm, current->pid);
+		current->comm, task_pid_nr(current));
 	dump_stack();
 	debug_show_all_locks();
+	rcu_read_unlock();
 
 	printk("[ turning off deadlock detection."
 	       "Please report this trace. ]\n\n");
-	local_irq_disable();
 }
 
 void debug_rt_mutex_lock(struct rt_mutex *lock)
@@ -193,7 +137,7 @@ void debug_rt_mutex_lock(struct rt_mutex *lock)
 
 void debug_rt_mutex_unlock(struct rt_mutex *lock)
 {
-	TRACE_WARN_ON_LOCKED(rt_mutex_owner(lock) != current);
+	DEBUG_LOCKS_WARN_ON(rt_mutex_owner(lock) != current);
 }
 
 void
@@ -203,7 +147,7 @@ debug_rt_mutex_proxy_lock(struct rt_mutex *lock, struct task_struct *powner)
 
 void debug_rt_mutex_proxy_unlock(struct rt_mutex *lock)
 {
-	TRACE_WARN_ON_LOCKED(!rt_mutex_owner(lock));
+	DEBUG_LOCKS_WARN_ON(!rt_mutex_owner(lock));
 }
 
 void debug_rt_mutex_init_waiter(struct rt_mutex_waiter *waiter)
@@ -211,13 +155,14 @@ void debug_rt_mutex_init_waiter(struct rt_mutex_waiter *waiter)
 	memset(waiter, 0x11, sizeof(*waiter));
 	plist_node_init(&waiter->list_entry, MAX_PRIO);
 	plist_node_init(&waiter->pi_list_entry, MAX_PRIO);
+	waiter->deadlock_task_pid = NULL;
 }
 
 void debug_rt_mutex_free_waiter(struct rt_mutex_waiter *waiter)
 {
-	TRACE_WARN_ON(!plist_node_empty(&waiter->list_entry));
-	TRACE_WARN_ON(!plist_node_empty(&waiter->pi_list_entry));
-	TRACE_WARN_ON(waiter->task);
+	put_pid(waiter->deadlock_task_pid);
+	DEBUG_LOCKS_WARN_ON(!plist_node_empty(&waiter->list_entry));
+	DEBUG_LOCKS_WARN_ON(!plist_node_empty(&waiter->pi_list_entry));
 	memset(waiter, 0x22, sizeof(*waiter));
 }
 

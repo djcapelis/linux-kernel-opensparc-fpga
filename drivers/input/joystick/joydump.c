@@ -1,6 +1,4 @@
 /*
- * $Id: joydump.c,v 1.1 2002/01/23 06:56:16 jsimmons Exp $
- *
  *  Copyright (c) 1996-2001 Vojtech Pavlik
  */
 
@@ -161,16 +159,4 @@ static struct gameport_driver joydump_drv = {
 	.disconnect	= joydump_disconnect,
 };
 
-static int __init joydump_init(void)
-{
-	gameport_register_driver(&joydump_drv);
-	return 0;
-}
-
-static void __exit joydump_exit(void)
-{
-	gameport_unregister_driver(&joydump_drv);
-}
-
-module_init(joydump_init);
-module_exit(joydump_exit);
+module_gameport_driver(joydump_drv);

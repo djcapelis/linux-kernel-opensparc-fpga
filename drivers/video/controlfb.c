@@ -40,6 +40,8 @@
 #include <linux/vmalloc.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
+#include <linux/of.h>
+#include <linux/of_address.h>
 #include <linux/fb.h>
 #include <linux/init.h>
 #include <linux/pci.h>
@@ -94,7 +96,7 @@ static inline int VAR_MATCH(struct fb_var_screeninfo *x, struct fb_var_screeninf
 struct fb_info_control {
 	struct fb_info		info;
 	struct fb_par_control	par;
-	u32			pseudo_palette[17];
+	u32			pseudo_palette[16];
 		
 	struct cmap_regs	__iomem *cmap_regs;
 	unsigned long		cmap_regs_phys;
@@ -298,10 +300,10 @@ static int controlfb_mmap(struct fb_info *info,
                        return -EINVAL;
                start = info->fix.mmio_start;
                len = PAGE_ALIGN((start & ~PAGE_MASK)+info->fix.mmio_len);
-               pgprot_val(vma->vm_page_prot) |= _PAGE_NO_CACHE|_PAGE_GUARDED;
+	       vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
        } else {
                /* framebuffer */
-               pgprot_val(vma->vm_page_prot) |= _PAGE_WRITETHRU;
+	       vma->vm_page_prot = pgprot_cached_wthru(vma->vm_page_prot);
        }
        start &= PAGE_MASK;
        if ((vma->vm_end - vma->vm_start + off) > len)
@@ -418,7 +420,7 @@ static int __init init_control(struct fb_info_control *p)
 
 	/* Try to pick a video mode out of NVRAM if we have one. */
 #ifdef CONFIG_NVRAM
-	if (default_cmode == CMODE_NVRAM){
+	if (default_cmode == CMODE_NVRAM) {
 		cmode = nvram_read_byte(NV_CMODE);
 		if(cmode < CMODE_8 || cmode > CMODE_32)
 			cmode = CMODE_8;
@@ -548,7 +550,7 @@ static void control_set_hardware(struct fb_info_control *p, struct fb_par_contro
 
 
 /*
- * Parse user speficied options (`video=controlfb:')
+ * Parse user specified options (`video=controlfb:')
  */
 static void __init control_setup(char *options)
 {
@@ -707,11 +709,11 @@ static int __init control_of_init(struct device_node *dp)
 
 	/* Map in frame buffer and registers */
 	p->fb_orig_base = fb_res.start;
-	p->fb_orig_size = fb_res.end - fb_res.start + 1;
+	p->fb_orig_size = resource_size(&fb_res);
 	/* use the big-endian aperture (??) */
 	p->frame_buffer_phys = fb_res.start + 0x800000;
 	p->control_regs_phys = reg_res.start;
-	p->control_regs_size = reg_res.end - reg_res.start + 1;
+	p->control_regs_size = resource_size(&reg_res);
 
 	if (!p->fb_orig_base ||
 	    !request_mem_region(p->fb_orig_base,p->fb_orig_size,"controlfb")) {

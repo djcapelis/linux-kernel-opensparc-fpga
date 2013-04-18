@@ -9,7 +9,9 @@
  */
 #include <linux/init.h>
 #include <linux/kernel.h>
+#include <linux/export.h>
 #include <linux/pci.h>
+#include <linux/smp.h>
 #include <asm/sn/arch.h>
 #include <asm/pci/bridge.h>
 #include <asm/paccess.h>
@@ -40,13 +42,15 @@ int irq_to_slot[MAX_PCI_BUSSES * MAX_DEVICES_PER_PCIBUS];
 
 extern struct pci_ops bridge_pci_ops;
 
-int __init bridge_probe(nasid_t nasid, int widget_id, int masterwid)
+int __cpuinit bridge_probe(nasid_t nasid, int widget_id, int masterwid)
 {
 	unsigned long offset = NODE_OFFSET(nasid);
 	struct bridge_controller *bc;
 	static int num_bridges = 0;
 	bridge_t *bridge;
 	int slot;
+
+	pci_set_flags(PCI_PROBE_ONLY);
 
 	printk("a bridge\n");
 
@@ -100,6 +104,11 @@ int __init bridge_probe(nasid_t nasid, int widget_id, int masterwid)
 	 */
 	bridge->b_wid_control |= BRIDGE_CTRL_IO_SWAP |
 	                         BRIDGE_CTRL_MEM_SWAP;
+#ifdef CONFIG_PAGE_SIZE_4KB
+	bridge->b_wid_control &= ~BRIDGE_CTRL_PAGE_SIZE;
+#else /* 16kB or larger */
+	bridge->b_wid_control |= BRIDGE_CTRL_PAGE_SIZE;
+#endif
 
 	/*
 	 * Hmm...  IRIX sets additional bits in the address which
@@ -134,27 +143,43 @@ int __init bridge_probe(nasid_t nasid, int widget_id, int masterwid)
  * A given PCI device, in general, should be able to intr any of the cpus
  * on any one of the hubs connected to its xbow.
  */
-int __devinit pcibios_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
+int pcibios_map_irq(const struct pci_dev *dev, u8 slot, u8 pin)
 {
-	struct bridge_controller *bc = BRIDGE_CONTROLLER(dev->bus);
-	int irq = bc->pci_int[slot];
+	return 0;
+}
 
-	if (irq == -1) {
-		irq = bc->pci_int[slot] = request_bridge_irq(bc);
-		if (irq < 0)
-			panic("Can't allocate interrupt for PCI device %s\n",
-			      pci_name(dev));
+static inline struct pci_dev *bridge_root_dev(struct pci_dev *dev)
+{
+	while (dev->bus->parent) {
+		/* Move up the chain of bridges. */
+		dev = dev->bus->self;
 	}
 
-	irq_to_bridge[irq] = bc;
-	irq_to_slot[irq] = slot;
-
-	return irq;
+	return dev;
 }
 
 /* Do platform specific device initialization at pci_enable_device() time */
 int pcibios_plat_dev_init(struct pci_dev *dev)
 {
+	struct bridge_controller *bc = BRIDGE_CONTROLLER(dev->bus);
+	struct pci_dev *rdev = bridge_root_dev(dev);
+	int slot = PCI_SLOT(rdev->devfn);
+	int irq;
+
+	irq = bc->pci_int[slot];
+	if (irq == -1) {
+		irq = request_bridge_irq(bc);
+		if (irq < 0)
+			return irq;
+
+		bc->pci_int[slot] = irq;
+	}
+
+	irq_to_bridge[irq] = bc;
+	irq_to_slot[irq] = slot;
+
+	dev->irq = irq;
+
 	return 0;
 }
 
@@ -187,7 +212,7 @@ static inline void pci_enable_swapping(struct pci_dev *dev)
 	bridge->b_widget.w_tflush;	/* Flush */
 }
 
-static void __init pci_fixup_ioc3(struct pci_dev *d)
+static void pci_fixup_ioc3(struct pci_dev *d)
 {
 	pci_disable_swapping(d);
 }
@@ -198,6 +223,7 @@ int pcibus_to_node(struct pci_bus *bus)
 
 	return bc->nasid;
 }
+EXPORT_SYMBOL(pcibus_to_node);
 
 DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_SGI, PCI_DEVICE_ID_SGI_IOC3,
 	pci_fixup_ioc3);

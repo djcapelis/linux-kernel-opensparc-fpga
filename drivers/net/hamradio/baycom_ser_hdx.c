@@ -61,10 +61,12 @@
 
 /*****************************************************************************/
 
+#include <linux/capability.h>
 #include <linux/module.h>
 #include <linux/ioport.h>
 #include <linux/string.h>
 #include <linux/init.h>
+#include <linux/interrupt.h>
 #include <asm/uaccess.h>
 #include <asm/io.h>
 #include <linux/hdlcdrv.h>
@@ -79,7 +81,7 @@
 
 static const char bc_drvname[] = "baycom_ser_hdx";
 static const char bc_drvinfo[] = KERN_INFO "baycom_ser_hdx: (C) 1996-2000 Thomas Sailer, HB9JNX/AE4WA\n"
-KERN_INFO "baycom_ser_hdx: version 0.10 compiled " __TIME__ " " __DATE__ "\n";
+"baycom_ser_hdx: version 0.10\n";
 
 /* --------------------------------------------------------------------- */
 

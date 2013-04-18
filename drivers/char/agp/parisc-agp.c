@@ -18,21 +18,23 @@
 #include <linux/init.h>
 #include <linux/klist.h>
 #include <linux/agp_backend.h>
+#include <linux/log2.h>
+#include <linux/slab.h>
 
-#include <asm-parisc/parisc-device.h>
-#include <asm-parisc/ropes.h>
+#include <asm/parisc-device.h>
+#include <asm/ropes.h>
 
 #include "agp.h"
 
 #define DRVNAME	"quicksilver"
 #define DRVPFX	DRVNAME ": "
 
-#ifndef log2
-#define log2(x)		ffz(~(x))
-#endif
-
 #define AGP8X_MODE_BIT		3
 #define AGP8X_MODE		(1 << AGP8X_MODE_BIT)
+
+static unsigned long
+parisc_agp_mask_memory(struct agp_bridge_data *bridge, dma_addr_t addr,
+		       int type);
 
 static struct _parisc_agp_info {
 	void __iomem *ioc_regs;
@@ -92,7 +94,7 @@ parisc_agp_tlbflush(struct agp_memory *mem)
 {
 	struct _parisc_agp_info *info = &parisc_agp_info;
 
-	writeq(info->gart_base | log2(info->gart_size), info->ioc_regs+IOC_PCOM);
+	writeq(info->gart_base | ilog2(info->gart_size), info->ioc_regs+IOC_PCOM);
 	readq(info->ioc_regs+IOC_PCOM);	/* flush */
 }
 
@@ -144,20 +146,20 @@ parisc_agp_insert_memory(struct agp_memory *mem, off_t pg_start, int type)
 		j++;
 	}
 
-	if (mem->is_flushed == FALSE) {
+	if (!mem->is_flushed) {
 		global_cache_flush();
-		mem->is_flushed = TRUE;
+		mem->is_flushed = true;
 	}
 
 	for (i = 0, j = io_pg_start; i < mem->page_count; i++) {
 		unsigned long paddr;
 
-		paddr = mem->memory[i];
+		paddr = page_to_phys(mem->pages[i]);
 		for (k = 0;
 		     k < info->io_pages_per_kpage;
 		     k++, j++, paddr += info->io_page_size) {
 			info->gatt[j] =
-				agp_bridge->driver->mask_memory(agp_bridge,
+				parisc_agp_mask_memory(agp_bridge,
 					paddr, type);
 		}
 	}
@@ -188,8 +190,8 @@ parisc_agp_remove_memory(struct agp_memory *mem, off_t pg_start, int type)
 }
 
 static unsigned long
-parisc_agp_mask_memory(struct agp_bridge_data *bridge,
-		    unsigned long addr, int type)
+parisc_agp_mask_memory(struct agp_bridge_data *bridge, dma_addr_t addr,
+		       int type)
 {
 	return SBA_PDIR_VALID_BIT | addr;
 }
@@ -227,9 +229,11 @@ static const struct agp_bridge_driver parisc_agp_driver = {
 	.alloc_by_type		= agp_generic_alloc_by_type,
 	.free_by_type		= agp_generic_free_by_type,
 	.agp_alloc_page		= agp_generic_alloc_page,
+	.agp_alloc_pages	= agp_generic_alloc_pages,
 	.agp_destroy_page	= agp_generic_destroy_page,
+	.agp_destroy_pages	= agp_generic_destroy_pages,
 	.agp_type_to_mask_type  = agp_generic_type_to_mask_type,
-	.cant_use_aperture	= 1,
+	.cant_use_aperture	= true,
 };
 
 static int __init
@@ -355,14 +359,25 @@ parisc_agp_setup(void __iomem *ioc_hpa, void __iomem *lba_hpa)
 	bridge->dev = fake_bridge_dev;
 
 	error = agp_add_bridge(bridge);
+	if (error)
+		goto fail;
+	return 0;
 
 fail:
+	kfree(fake_bridge_dev);
 	return error;
 }
 
-static struct device *next_device(struct klist_iter *i) {
-	struct klist_node * n = klist_next(i);
-	return n ? container_of(n, struct device, knode_parent) : NULL;
+static int
+find_quicksilver(struct device *dev, void *data)
+{
+	struct parisc_device **lba = data;
+	struct parisc_device *padev = to_parisc_device(dev);
+
+	if (IS_QUICKSILVER(padev))
+		*lba = padev;
+
+	return 0;
 }
 
 static int
@@ -373,8 +388,6 @@ parisc_agp_init(void)
 	int err = -1;
 	struct parisc_device *sba = NULL, *lba = NULL;
 	struct lba_device *lbadev = NULL;
-	struct device *dev = NULL;
-	struct klist_iter i;
 
 	if (!sba_list)
 		goto out;
@@ -387,13 +400,7 @@ parisc_agp_init(void)
 	}
 
 	/* Now search our Pluto for our precious AGP device... */
-	klist_iter_init(&sba->dev.klist_children, &i);
-	while ((dev = next_device(&i))) {
-		struct parisc_device *padev = to_parisc_device(dev);
-		if (IS_QUICKSILVER(padev))
-			lba = padev;
-	}
-	klist_iter_exit(&i);
+	device_for_each_child(&sba->dev, &lba, find_quicksilver);
 
 	if (!lba) {
 		printk(KERN_INFO DRVPFX "No AGP devices found.\n");

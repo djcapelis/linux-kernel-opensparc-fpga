@@ -32,7 +32,7 @@ CONFIG_LOG_BUF_SHIFT=14
 # CONFIG_HOTPLUG is not set
 CONFIG_KOBJECT_UEVENT=y
 # CONFIG_IKCONFIG is not set
-# CONFIG_EMBEDDED is not set
+# CONFIG_EXPERT is not set
 CONFIG_KALLSYMS=y
 # CONFIG_KALLSYMS_ALL is not set
 # CONFIG_KALLSYMS_EXTRA_PASS is not set
@@ -331,11 +331,6 @@ CONFIG_XT2000_SONIC=y
 #
 # CONFIG_IXGB is not set
 # CONFIG_S2IO is not set
-
-#
-# Token Ring devices
-#
-# CONFIG_TR is not set
 
 #
 # Wireless LAN (non-hamradio)

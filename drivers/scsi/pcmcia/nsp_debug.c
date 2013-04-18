@@ -15,7 +15,7 @@ static const char unknown[] = "UNKNOWN";
 
 static const char * group_0_commands[] = {
 /* 00-03 */ "Test Unit Ready", "Rezero Unit", unknown, "Request Sense",
-/* 04-07 */ "Format Unit", "Read Block Limits", unknown, "Reasssign Blocks",
+/* 04-07 */ "Format Unit", "Read Block Limits", unknown, "Reassign Blocks",
 /* 08-0d */ "Read (6)", unknown, "Write (6)", "Seek (6)", unknown, unknown,
 /* 0e-12 */ unknown, "Read Reverse", "Write Filemarks", "Space", "Inquiry",  
 /* 13-16 */ unknown, "Recover Buffered Data", "Mode Select", "Reserve",
@@ -90,7 +90,7 @@ static void print_commandk (unsigned char *command)
 	int i, s;
 	printk(KERN_DEBUG);
 	print_opcodek(command[0]);
-	/*printk(KERN_DEBUG "%s ", __FUNCTION__);*/
+	/*printk(KERN_DEBUG "%s ", __func__);*/
 	if ((command[0] >> 5) == 6 ||
 	    (command[0] >> 5) == 7 ) {
 		s = 12; /* vender specific */

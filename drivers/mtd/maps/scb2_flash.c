@@ -1,6 +1,5 @@
 /*
  * MTD map driver for BIOS Flash on Intel SCB2 boards
- * $Id: scb2_flash.c,v 1.12 2005/03/18 14:04:35 gleixner Exp $
  * Copyright (C) 2002 Sun Microsystems, Inc.
  * Tim Hockin <thockin@sun.com>
  *
@@ -70,8 +69,7 @@ static struct map_info scb2_map = {
 };
 static int region_fail;
 
-static int __devinit
-scb2_fixup_mtd(struct mtd_info *mtd)
+static int scb2_fixup_mtd(struct mtd_info *mtd)
 {
 	int i;
 	int done = 0;
@@ -79,7 +77,7 @@ scb2_fixup_mtd(struct mtd_info *mtd)
 	struct cfi_private *cfi = map->fldrv_priv;
 
 	/* barf if this doesn't look right */
-	if (cfi->cfiq->InterfaceDesc != 1) {
+	if (cfi->cfiq->InterfaceDesc != CFI_INTERFACE_X16_ASYNC) {
 		printk(KERN_ERR MODNAME ": unsupported InterfaceDesc: %#x\n",
 		    cfi->cfiq->InterfaceDesc);
 		return -1;
@@ -119,7 +117,8 @@ scb2_fixup_mtd(struct mtd_info *mtd)
 		struct mtd_erase_region_info *region = &mtd->eraseregions[i];
 
 		if (region->numblocks * region->erasesize > mtd->size) {
-			region->numblocks = (mtd->size / region->erasesize);
+			region->numblocks = ((unsigned long)mtd->size /
+						region->erasesize);
 			done = 1;
 		} else {
 			region->numblocks = 0;
@@ -133,8 +132,8 @@ scb2_fixup_mtd(struct mtd_info *mtd)
 /* CSB5's 'Function Control Register' has bits for decoding @ >= 0xffc00000 */
 #define CSB5_FCR	0x41
 #define CSB5_FCR_DECODE_ALL 0x0e
-static int __devinit
-scb2_flash_probe(struct pci_dev *dev, const struct pci_device_id *ent)
+static int scb2_flash_probe(struct pci_dev *dev,
+			    const struct pci_device_id *ent)
 {
 	u8 reg;
 
@@ -180,7 +179,7 @@ scb2_flash_probe(struct pci_dev *dev, const struct pci_device_id *ent)
 
 	scb2_mtd->owner = THIS_MODULE;
 	if (scb2_fixup_mtd(scb2_mtd) < 0) {
-		del_mtd_device(scb2_mtd);
+		mtd_device_unregister(scb2_mtd);
 		map_destroy(scb2_mtd);
 		iounmap(scb2_ioaddr);
 		if (!region_fail)
@@ -188,25 +187,24 @@ scb2_flash_probe(struct pci_dev *dev, const struct pci_device_id *ent)
 		return -ENODEV;
 	}
 
-	printk(KERN_NOTICE MODNAME ": chip size 0x%x at offset 0x%x\n",
-	       scb2_mtd->size, SCB2_WINDOW - scb2_mtd->size);
+	printk(KERN_NOTICE MODNAME ": chip size 0x%llx at offset 0x%llx\n",
+	       (unsigned long long)scb2_mtd->size,
+	       (unsigned long long)(SCB2_WINDOW - scb2_mtd->size));
 
-	add_mtd_device(scb2_mtd);
+	mtd_device_register(scb2_mtd, NULL, 0);
 
 	return 0;
 }
 
-static void __devexit
-scb2_flash_remove(struct pci_dev *dev)
+static void scb2_flash_remove(struct pci_dev *dev)
 {
 	if (!scb2_mtd)
 		return;
 
 	/* disable flash writes */
-	if (scb2_mtd->lock)
-		scb2_mtd->lock(scb2_mtd, 0, scb2_mtd->size);
+	mtd_lock(scb2_mtd, 0, scb2_mtd->size);
 
-	del_mtd_device(scb2_mtd);
+	mtd_device_unregister(scb2_mtd);
 	map_destroy(scb2_mtd);
 
 	iounmap(scb2_ioaddr);
@@ -231,23 +229,10 @@ static struct pci_driver scb2_flash_driver = {
 	.name =     "Intel SCB2 BIOS Flash",
 	.id_table = scb2_flash_pci_ids,
 	.probe =    scb2_flash_probe,
-	.remove =   __devexit_p(scb2_flash_remove),
+	.remove =   scb2_flash_remove,
 };
 
-static int __init
-scb2_flash_init(void)
-{
-	return pci_register_driver(&scb2_flash_driver);
-}
-
-static void __exit
-scb2_flash_exit(void)
-{
-	pci_unregister_driver(&scb2_flash_driver);
-}
-
-module_init(scb2_flash_init);
-module_exit(scb2_flash_exit);
+module_pci_driver(scb2_flash_driver);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Tim Hockin <thockin@sun.com>");

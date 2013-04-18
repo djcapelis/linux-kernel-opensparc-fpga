@@ -23,7 +23,6 @@
 #include <linux/module.h>
 #include <linux/mm.h>
 #include <asm/byteorder.h>
-#include <asm/scatterlist.h>
 #include <linux/crypto.h>
 #include <linux/types.h>
 
@@ -854,7 +853,6 @@ static struct crypto_alg khazad_alg = {
 	.cra_ctxsize		=	sizeof (struct khazad_ctx),
 	.cra_alignmask		=	7,
 	.cra_module		=	THIS_MODULE,
-	.cra_list		=	LIST_HEAD_INIT(khazad_alg.cra_list),
 	.cra_u			=	{ .cipher = {
 	.cia_min_keysize	=	KHAZAD_KEY_SIZE,
 	.cia_max_keysize	=	KHAZAD_KEY_SIZE,
@@ -863,7 +861,7 @@ static struct crypto_alg khazad_alg = {
 	.cia_decrypt		=	khazad_decrypt } }
 };
 
-static int __init init(void)
+static int __init khazad_mod_init(void)
 {
 	int ret = 0;
 	
@@ -871,14 +869,14 @@ static int __init init(void)
 	return ret;
 }
 
-static void __exit fini(void)
+static void __exit khazad_mod_fini(void)
 {
 	crypto_unregister_alg(&khazad_alg);
 }
 
 
-module_init(init);
-module_exit(fini);
+module_init(khazad_mod_init);
+module_exit(khazad_mod_fini);
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Khazad Cryptographic Algorithm");

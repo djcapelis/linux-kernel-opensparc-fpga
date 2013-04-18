@@ -13,7 +13,6 @@
 #include <linux/fcntl.h>
 #include <linux/nvram.h>
 #include <linux/init.h>
-#include <linux/smp_lock.h>
 #include <asm/uaccess.h>
 #include <asm/nvram.h>
 
@@ -21,21 +20,22 @@
 
 static loff_t nvram_llseek(struct file *file, loff_t offset, int origin)
 {
-	lock_kernel();
 	switch (origin) {
+	case 0:
+		break;
 	case 1:
 		offset += file->f_pos;
 		break;
 	case 2:
 		offset += NVRAM_SIZE;
 		break;
+	default:
+		offset = -1;
 	}
-	if (offset < 0) {
-		unlock_kernel();
+	if (offset < 0)
 		return -EINVAL;
-	}
+
 	file->f_pos = offset;
-	unlock_kernel();
 	return file->f_pos;
 }
 
@@ -76,8 +76,7 @@ static ssize_t write_nvram(struct file *file, const char __user *buf,
 	return p - buf;
 }
 
-static int nvram_ioctl(struct inode *inode, struct file *file,
-	unsigned int cmd, unsigned long arg)
+static long nvram_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	switch(cmd) {
 		case PMAC_NVRAM_GET_OFFSET:
@@ -105,7 +104,7 @@ const struct file_operations nvram_fops = {
 	.llseek		= nvram_llseek,
 	.read		= read_nvram,
 	.write		= write_nvram,
-	.ioctl		= nvram_ioctl,
+	.unlocked_ioctl	= nvram_ioctl,
 };
 
 static struct miscdevice nvram_dev = {

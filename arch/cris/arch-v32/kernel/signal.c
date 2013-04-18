@@ -4,6 +4,7 @@
 
 #include <linux/sched.h>
 #include <linux/mm.h>
+#include <linux/slab.h>
 #include <linux/kernel.h>
 #include <linux/signal.h>
 #include <linux/errno.h>
@@ -18,13 +19,10 @@
 #include <asm/processor.h>
 #include <asm/ucontext.h>
 #include <asm/uaccess.h>
-#include <asm/arch/ptrace.h>
-#include <asm/arch/hwregs/cpu_vect.h>
+#include <arch/ptrace.h>
+#include <arch/hwregs/cpu_vect.h>
 
 extern unsigned long cris_signal_return_page;
-
-/* Flag to check if a signal is blockable. */
-#define _BLOCKABLE (~(sigmask(SIGKILL) | sigmask(SIGSTOP)))
 
 /*
  * A syscall in CRIS is really a "break 13" instruction, which is 2
@@ -50,7 +48,7 @@ struct rt_signal_frame {
 	unsigned char retcode[8];	/* Trampoline code. */
 };
 
-int do_signal(int restart, sigset_t *oldset, struct pt_regs *regs);
+void do_signal(int restart, struct pt_regs *regs);
 void keep_debug_flags(unsigned long oldccs, unsigned long oldspc,
 		      struct pt_regs *regs);
 /*
@@ -58,77 +56,11 @@ void keep_debug_flags(unsigned long oldccs, unsigned long oldspc,
  * dummy arguments to be able to reach the regs argument.
  */
 int
-sys_sigsuspend(old_sigset_t mask, long r11, long r12, long r13, long mof,
-	       long srp, struct pt_regs *regs)
+sys_sigsuspend(old_sigset_t mask)
 {
-	sigset_t saveset;
-
-	mask &= _BLOCKABLE;
-
-	spin_lock_irq(&current->sighand->siglock);
-
-	saveset = current->blocked;
-
-	siginitset(&current->blocked, mask);
-
-	recalc_sigpending();
-	spin_unlock_irq(&current->sighand->siglock);
-
-	regs->r10 = -EINTR;
-
-	while (1) {
-		current->state = TASK_INTERRUPTIBLE;
-		schedule();
-
-		if (do_signal(0, &saveset, regs)) {
-			/*
-			 * This point is reached twice: once to call
-			 * the signal handler, then again to return
-			 * from the sigsuspend system call. When
-			 * calling the signal handler, R10 hold the
-			 * signal number as set by do_signal(). The
-			 * sigsuspend  call will always return with
-			 * the restored value above; -EINTR.
-			 */
-			return regs->r10;
-		}
-	}
-}
-
-/* Define some dummy arguments to be able to reach the regs argument. */
-int
-sys_rt_sigsuspend(sigset_t *unewset, size_t sigsetsize, long r12, long r13,
-		  long mof, long srp, struct pt_regs *regs)
-{
-	sigset_t saveset;
-	sigset_t newset;
-
-	if (sigsetsize != sizeof(sigset_t))
-		return -EINVAL;
-
-	if (copy_from_user(&newset, unewset, sizeof(newset)))
-		return -EFAULT;
-
-	sigdelsetmask(&newset, ~_BLOCKABLE);
-	spin_lock_irq(&current->sighand->siglock);
-
-	saveset = current->blocked;
-	current->blocked = newset;
-
-	recalc_sigpending();
-	spin_unlock_irq(&current->sighand->siglock);
-
-	regs->r10 = -EINTR;
-
-	while (1) {
-		current->state = TASK_INTERRUPTIBLE;
-		schedule();
-
-		if (do_signal(0, &saveset, regs)) {
-			/* See comment in function above. */
-			return regs->r10;
-		}
-	}
+	sigset_t blocked;
+	siginitset(&blocked, mask);
+	return sigsuspend(&blocked);
 }
 
 int
@@ -144,11 +76,11 @@ sys_sigaction(int signal, const struct old_sigaction *act,
 
 		if (!access_ok(VERIFY_READ, act, sizeof(*act)) ||
 		    __get_user(newk.sa.sa_handler, &act->sa_handler) ||
-		    __get_user(newk.sa.sa_restorer, &act->sa_restorer))
+		    __get_user(newk.sa.sa_restorer, &act->sa_restorer) ||
+		    __get_user(newk.sa.sa_flags, &act->sa_flags) ||
+		    __get_user(mask, &act->sa_mask))
 			return -EFAULT;
 
-		__get_user(newk.sa.sa_flags, &act->sa_flags);
-		__get_user(mask, &act->sa_mask);
 		siginitset(&newk.sa.sa_mask, mask);
 	}
 
@@ -157,11 +89,11 @@ sys_sigaction(int signal, const struct old_sigaction *act,
 	if (!retval && oact) {
 		if (!access_ok(VERIFY_WRITE, oact, sizeof(*oact)) ||
 		    __put_user(oldk.sa.sa_handler, &oact->sa_handler) ||
-		    __put_user(oldk.sa.sa_restorer, &oact->sa_restorer))
+		    __put_user(oldk.sa.sa_restorer, &oact->sa_restorer) ||
+		    __put_user(oldk.sa.sa_flags, &oact->sa_flags) ||
+		    __put_user(oldk.sa.sa_mask.sig[0], &oact->sa_mask))
 			return -EFAULT;
 
-		__put_user(oldk.sa.sa_flags, &oact->sa_flags);
-		__put_user(oldk.sa.sa_mask.sig[0], &oact->sa_mask);
 	}
 
 	return retval;
@@ -232,13 +164,7 @@ sys_sigreturn(long r10, long r11, long r12, long r13, long mof, long srp,
 						 sizeof(frame->extramask))))
 		goto badframe;
 
-	sigdelsetmask(&set, ~_BLOCKABLE);
-	spin_lock_irq(&current->sighand->siglock);
-
-	current->blocked = set;
-
-	recalc_sigpending();
-	spin_unlock_irq(&current->sighand->siglock);
+	set_current_blocked(&set);
 
 	if (restore_sigcontext(regs, &frame->sc))
 		goto badframe;
@@ -278,19 +204,13 @@ sys_rt_sigreturn(long r10, long r11, long r12, long r13, long mof, long srp,
 	if (__copy_from_user(&set, &frame->uc.uc_sigmask, sizeof(set)))
 		goto badframe;
 
-	sigdelsetmask(&set, ~_BLOCKABLE);
-	spin_lock_irq(&current->sighand->siglock);
-
-	current->blocked = set;
-
-	recalc_sigpending();
-	spin_unlock_irq(&current->sighand->siglock);
+	set_current_blocked(&set);
 
 	if (restore_sigcontext(regs, &frame->uc.uc_mcontext))
 		goto badframe;
 
 	if (do_sigaltstack(&frame->uc.uc_stack, NULL, rdusp()) == -EFAULT)
- 		goto badframe;
+		goto badframe;
 
 	keep_debug_flags(oldccs, oldspc, regs);
 
@@ -351,7 +271,7 @@ get_sigframe(struct k_sigaction *ka, struct pt_regs * regs, size_t frame_size)
  * which performs the syscall sigreturn(), or a provided user-mode
  * trampoline.
   */
-static void
+static int
 setup_frame(int sig, struct k_sigaction *ka,  sigset_t *set,
 	    struct pt_regs * regs)
 {
@@ -417,16 +337,14 @@ setup_frame(int sig, struct k_sigaction *ka,  sigset_t *set,
 	/* Actually move the USP to reflect the stacked frame. */
 	wrusp((unsigned long)frame);
 
-	return;
+	return 0;
 
 give_sigsegv:
-	if (sig == SIGSEGV)
-		ka->sa.sa_handler = SIG_DFL;
-
-	force_sig(SIGSEGV, current);
+	force_sigsegv(sig, current);
+	return -EFAULT;
 }
 
-static void
+static int
 setup_rt_frame(int sig, struct k_sigaction *ka, siginfo_t *info,
 	       sigset_t *set, struct pt_regs * regs)
 {
@@ -503,21 +421,22 @@ setup_rt_frame(int sig, struct k_sigaction *ka, siginfo_t *info,
 	/* Actually move the usp to reflect the stacked frame. */
 	wrusp((unsigned long)frame);
 
-	return;
+	return 0;
 
 give_sigsegv:
-	if (sig == SIGSEGV)
-		ka->sa.sa_handler = SIG_DFL;
-
-	force_sig(SIGSEGV, current);
+	force_sigsegv(sig, current);
+	return -EFAULT;
 }
 
-/* Invoke a singal handler to, well, handle the signal. */
+/* Invoke a signal handler to, well, handle the signal. */
 static inline void
 handle_signal(int canrestart, unsigned long sig,
 	      siginfo_t *info, struct k_sigaction *ka,
-              sigset_t *oldset, struct pt_regs * regs)
+              struct pt_regs * regs)
 {
+	sigset_t *oldset = sigmask_to_save();
+	int ret;
+
 	/* Check if this got called from a system call. */
 	if (canrestart) {
 		/* If so, check system call restarting. */
@@ -561,19 +480,12 @@ handle_signal(int canrestart, unsigned long sig,
 
 	/* Set up the stack frame. */
 	if (ka->sa.sa_flags & SA_SIGINFO)
-		setup_rt_frame(sig, ka, info, oldset, regs);
+		ret = setup_rt_frame(sig, ka, info, oldset, regs);
 	else
-		setup_frame(sig, ka, oldset, regs);
+		ret = setup_frame(sig, ka, oldset, regs);
 
-	if (ka->sa.sa_flags & SA_ONESHOT)
-		ka->sa.sa_handler = SIG_DFL;
-
-	spin_lock_irq(&current->sighand->siglock);
-	sigorsets(&current->blocked,&current->blocked,&ka->sa.sa_mask);
-	if (!(ka->sa.sa_flags & SA_NODEFER))
-		sigaddset(&current->blocked,sig);
-	recalc_sigpending();
-	spin_unlock_irq(&current->sighand->siglock);
+	if (ret == 0)
+		signal_delivered(sig, info, ka, regs, 0);
 }
 
 /*
@@ -587,8 +499,8 @@ handle_signal(int canrestart, unsigned long sig,
  * we can use user_mode(regs) to see if we came directly from kernel or user
  * mode below.
  */
-int
-do_signal(int canrestart, sigset_t *oldset, struct pt_regs *regs)
+void
+do_signal(int canrestart, struct pt_regs *regs)
 {
 	int signr;
 	siginfo_t info;
@@ -600,17 +512,14 @@ do_signal(int canrestart, sigset_t *oldset, struct pt_regs *regs)
 	 * without doing anything.
 	 */
 	if (!user_mode(regs))
-		return 1;
-
-	if (!oldset)
-		oldset = &current->blocked;
+		return;
 
 	signr = get_signal_to_deliver(&info, &ka, regs, NULL);
 
 	if (signr > 0) {
-		/* Deliver the signal. */
-		handle_signal(canrestart, signr, &info, &ka, oldset, regs);
-		return 1;
+		/* Whee!  Actually deliver the signal.  */
+		handle_signal(canrestart, signr, &info, &ka, regs);
+		return;
 	}
 
 	/* Got here from a system call? */
@@ -623,12 +532,14 @@ do_signal(int canrestart, sigset_t *oldset, struct pt_regs *regs)
 		}
 
 		if (regs->r10 == -ERESTART_RESTARTBLOCK){
-			regs->r10 = __NR_restart_syscall;
+			regs->r9 = __NR_restart_syscall;
 			regs->erp -= 2;
 		}
 	}
 
-	return 0;
+	/* if there's no signal to deliver, we just put the saved sigmask
+	 * back */
+	restore_saved_sigmask();
 }
 
 asmlinkage void
@@ -641,7 +552,7 @@ ugdb_trap_user(struct thread_info *ti, int sig)
 		user_regs(ti)->spc = 0;
 	}
 	/* FIXME: Filter out false h/w breakpoint hits (i.e. EDA
-	   not withing any configured h/w breakpoint range). Synchronize with
+	   not within any configured h/w breakpoint range). Synchronize with
 	   what already exists for kernel debugging.  */
 	if (((user_regs(ti)->exs & 0xff00) >> 8) == BREAK_8_INTR_VECT) {
 		/* Break 8: subtract 2 from ERP unless in a delay slot. */

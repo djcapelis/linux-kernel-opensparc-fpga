@@ -1,8 +1,6 @@
 /*
  * tcp_diag.c	Module for monitoring TCP transport protocols sockets.
  *
- * Version:	$Id: tcp_diag.c,v 1.3 2002/02/01 22:01:04 davem Exp $
- *
  * Authors:	Alexey Kuznetsov, <kuznet@ms2.inr.ac.ru>
  *
  *	This program is free software; you can redistribute it and/or
@@ -25,20 +23,34 @@ static void tcp_diag_get_info(struct sock *sk, struct inet_diag_msg *r,
 	const struct tcp_sock *tp = tcp_sk(sk);
 	struct tcp_info *info = _info;
 
-	if (sk->sk_state == TCP_LISTEN)
+	if (sk->sk_state == TCP_LISTEN) {
 		r->idiag_rqueue = sk->sk_ack_backlog;
-	else
-		r->idiag_rqueue = tp->rcv_nxt - tp->copied_seq;
-	r->idiag_wqueue = tp->write_seq - tp->snd_una;
+		r->idiag_wqueue = sk->sk_max_ack_backlog;
+	} else {
+		r->idiag_rqueue = max_t(int, tp->rcv_nxt - tp->copied_seq, 0);
+		r->idiag_wqueue = tp->write_seq - tp->snd_una;
+	}
 	if (info != NULL)
 		tcp_get_info(sk, info);
 }
 
-static struct inet_diag_handler tcp_diag_handler = {
-	.idiag_hashinfo	 = &tcp_hashinfo,
+static void tcp_diag_dump(struct sk_buff *skb, struct netlink_callback *cb,
+		struct inet_diag_req_v2 *r, struct nlattr *bc)
+{
+	inet_diag_dump_icsk(&tcp_hashinfo, skb, cb, r, bc);
+}
+
+static int tcp_diag_dump_one(struct sk_buff *in_skb, const struct nlmsghdr *nlh,
+		struct inet_diag_req_v2 *req)
+{
+	return inet_diag_dump_one_icsk(&tcp_hashinfo, in_skb, nlh, req);
+}
+
+static const struct inet_diag_handler tcp_diag_handler = {
+	.dump		 = tcp_diag_dump,
+	.dump_one	 = tcp_diag_dump_one,
 	.idiag_get_info	 = tcp_diag_get_info,
-	.idiag_type	 = TCPDIAG_GETSOCK,
-	.idiag_info_size = sizeof(struct tcp_info),
+	.idiag_type	 = IPPROTO_TCP,
 };
 
 static int __init tcp_diag_init(void)
@@ -54,3 +66,4 @@ static void __exit tcp_diag_exit(void)
 module_init(tcp_diag_init);
 module_exit(tcp_diag_exit);
 MODULE_LICENSE("GPL");
+MODULE_ALIAS_NET_PF_PROTO_TYPE(PF_NETLINK, NETLINK_SOCK_DIAG, 2-6 /* AF_INET - IPPROTO_TCP */);

@@ -2,8 +2,10 @@
 sysfs - _The_ filesystem for exporting kernel objects. 
 
 Patrick Mochel	<mochel@osdl.org>
+Mike Murphy <mamurph@cs.clemson.edu>
 
-10 January 2003
+Revised:    16 August 2011
+Original:   10 January 2003
 
 
 What it is:
@@ -21,7 +23,8 @@ interface.
 Using sysfs
 ~~~~~~~~~~~
 
-sysfs is always compiled in. You can access it by doing:
+sysfs is always compiled in if CONFIG_SYSFS is defined. You can access
+it by doing:
 
     mount -t sysfs sysfs /sys 
 
@@ -36,10 +39,12 @@ userspace. Top-level directories in sysfs represent the common
 ancestors of object hierarchies; i.e. the subsystems the objects
 belong to. 
 
-Sysfs internally stores the kobject that owns the directory in the
-->d_fsdata pointer of the directory's dentry. This allows sysfs to do
-reference counting directly on the kobject when the file is opened and
-closed. 
+Sysfs internally stores a pointer to the kobject that implements a
+directory in the sysfs_dirent object associated with the directory. In
+the past this kobject pointer has been used by sysfs to do reference
+counting directly on the kobject whenever the file is opened or closed.
+With the current sysfs implementation the kobject reference count is
+only modified directly by the function sysfs_schedule_callback().
 
 
 Attributes
@@ -51,25 +56,26 @@ for the attributes, providing a means to read and write kernel
 attributes.
 
 Attributes should be ASCII text files, preferably with only one value
-per file. It is noted that it may not be efficient to contain only
+per file. It is noted that it may not be efficient to contain only one
 value per file, so it is socially acceptable to express an array of
 values of the same type. 
 
 Mixing types, expressing multiple lines of data, and doing fancy
 formatting of data is heavily frowned upon. Doing these things may get
-you publically humiliated and your code rewritten without notice. 
+you publicly humiliated and your code rewritten without notice. 
 
 
 An attribute definition is simply:
 
 struct attribute {
         char                    * name;
-        mode_t                  mode;
+        struct module		*owner;
+        umode_t                 mode;
 };
 
 
-int sysfs_create_file(struct kobject * kobj, struct attribute * attr);
-void sysfs_remove_file(struct kobject * kobj, struct attribute * attr);
+int sysfs_create_file(struct kobject * kobj, const struct attribute * attr);
+void sysfs_remove_file(struct kobject * kobj, const struct attribute * attr);
 
 
 A bare attribute contains no means to read or write the value of the
@@ -80,22 +86,20 @@ a specific object type.
 For example, the driver model defines struct device_attribute like:
 
 struct device_attribute {
-        struct attribute        attr;
-        ssize_t (*show)(struct device * dev, char * buf);
-        ssize_t (*store)(struct device * dev, const char * buf);
+	struct attribute	attr;
+	ssize_t (*show)(struct device *dev, struct device_attribute *attr,
+			char *buf);
+	ssize_t (*store)(struct device *dev, struct device_attribute *attr,
+			 const char *buf, size_t count);
 };
 
-int device_create_file(struct device *, struct device_attribute *);
-void device_remove_file(struct device *, struct device_attribute *);
+int device_create_file(struct device *, const struct device_attribute *);
+void device_remove_file(struct device *, const struct device_attribute *);
 
 It also defines this helper for defining device attributes: 
 
-#define DEVICE_ATTR(_name, _mode, _show, _store)      \
-struct device_attribute dev_attr_##_name = {            \
-        .attr = {.name  = __stringify(_name) , .mode   = _mode },      \
-        .show   = _show,                                \
-        .store  = _store,                               \
-};
+#define DEVICE_ATTR(_name, _mode, _show, _store) \
+struct device_attribute dev_attr_##_name = __ATTR(_name, _mode, _show, _store)
 
 For example, declaring
 
@@ -107,9 +111,9 @@ static struct device_attribute dev_attr_foo = {
        .attr	= {
 		.name = "foo",
 		.mode = S_IWUSR | S_IRUGO,
+		.show = show_foo,
+		.store = store_foo,
 	},
-	.show = show_foo,
-	.store = store_foo,
 };
 
 
@@ -122,7 +126,7 @@ show and store methods of the attribute owners.
 
 struct sysfs_ops {
         ssize_t (*show)(struct kobject *, struct attribute *, char *);
-        ssize_t (*store)(struct kobject *, struct attribute *, const char *);
+        ssize_t (*store)(struct kobject *, struct attribute *, const char *, size_t);
 };
 
 [ Subsystems should have already defined a struct kobj_type as a
@@ -137,18 +141,22 @@ calls the associated methods.
 
 To illustrate:
 
+#define to_dev(obj) container_of(obj, struct device, kobj)
 #define to_dev_attr(_attr) container_of(_attr, struct device_attribute, attr)
-#define to_dev(d) container_of(d, struct device, kobj)
 
-static ssize_t
-dev_attr_show(struct kobject * kobj, struct attribute * attr, char * buf)
+static ssize_t dev_attr_show(struct kobject *kobj, struct attribute *attr,
+                             char *buf)
 {
-        struct device_attribute * dev_attr = to_dev_attr(attr);
-        struct device * dev = to_dev(kobj);
-        ssize_t ret = 0;
+        struct device_attribute *dev_attr = to_dev_attr(attr);
+        struct device *dev = to_dev(kobj);
+        ssize_t ret = -EIO;
 
         if (dev_attr->show)
-                ret = dev_attr->show(dev, buf);
+                ret = dev_attr->show(dev, dev_attr, buf);
+        if (ret >= (ssize_t)PAGE_SIZE) {
+                print_symbol("dev_attr_show: %s returned bad count\n",
+                                (unsigned long)dev_attr->show);
+        }
         return ret;
 }
 
@@ -161,10 +169,11 @@ To read or write attributes, show() or store() methods must be
 specified when declaring the attribute. The method types should be as
 simple as those defined for device attributes:
 
-        ssize_t (*show)(struct device * dev, char * buf);
-        ssize_t (*store)(struct device * dev, const char * buf);
+ssize_t (*show)(struct device *dev, struct device_attribute *attr, char *buf);
+ssize_t (*store)(struct device *dev, struct device_attribute *attr,
+                 const char *buf, size_t count);
 
-IOW, they should take only an object and a buffer as parameters. 
+IOW, they should take only an object, an attribute, and a buffer as parameters.
 
 
 sysfs allocates a buffer of size (PAGE_SIZE) and passes it to the
@@ -176,8 +185,10 @@ implementations:
   Recall that an attribute should only be exporting one value, or an
   array of similar values, so this shouldn't be that expensive. 
 
-  This allows userspace to do partial reads and seeks arbitrarily over
-  the entire file at will. 
+  This allows userspace to do partial reads and forward seeks
+  arbitrarily over the entire file at will. If userspace seeks back to
+  zero or does a pread(2) with an offset of '0' the show() method will
+  be called again, rearmed, to fill the buffer.
 
 - On write(2), sysfs expects the entire buffer to be passed during the
   first write. Sysfs then passes the entire buffer to the store()
@@ -192,16 +203,19 @@ implementations:
 
 Other notes:
 
+- Writing causes the show() method to be rearmed regardless of current
+  file position.
+
 - The buffer will always be PAGE_SIZE bytes in length. On i386, this
   is 4096. 
 
 - show() methods should return the number of bytes printed into the
-  buffer. This is the return value of snprintf().
+  buffer. This is the return value of scnprintf().
 
-- show() should always use snprintf(). 
+- show() should always use scnprintf().
 
-- store() should return the number of bytes used from the buffer. This
-  can be done using strlen().
+- store() should return the number of bytes used from the buffer. If the
+  entire buffer has been used, just return the count argument.
 
 - show() or store() can always return errors. If a bad value comes
   through, be sure to return an error.
@@ -214,15 +228,18 @@ Other notes:
 
 A very simple (and naive) implementation of a device attribute is:
 
-static ssize_t show_name(struct device *dev, struct device_attribute *attr, char *buf)
+static ssize_t show_name(struct device *dev, struct device_attribute *attr,
+                         char *buf)
 {
-	return snprintf(buf, PAGE_SIZE, "%s\n", dev->name);
+	return scnprintf(buf, PAGE_SIZE, "%s\n", dev->name);
 }
 
-static ssize_t store_name(struct device * dev, const char * buf)
+static ssize_t store_name(struct device *dev, struct device_attribute *attr,
+                          const char *buf, size_t count)
 {
-	sscanf(buf, "%20s", dev->name);
-	return strnlen(buf, PAGE_SIZE);
+        snprintf(dev->name, sizeof(dev->name), "%.*s",
+                 (int)min(count, sizeof(dev->name) - 1), buf);
+	return count;
 }
 
 static DEVICE_ATTR(name, S_IRUGO, show_name, store_name);
@@ -243,6 +260,7 @@ The top level sysfs directory looks like:
 block/
 bus/
 class/
+dev/
 devices/
 firmware/
 net/
@@ -269,6 +287,11 @@ fs/ contains a directory for some filesystems.  Currently each
 filesystem wanting to export attributes must create its own hierarchy
 below fs/ (see ./fuse.txt for an example).
 
+dev/ contains two directories char/ and block/. Inside these two
+directories there are symlinks named <major>:<minor>.  These symlinks
+point to the sysfs directory for the given device.  /sys/dev provides a
+quick way to lookup the sysfs interface for a device from the result of
+a stat(2) operation.
 
 More information can driver-model specific features can be found in
 Documentation/driver-model/. 
@@ -288,19 +311,21 @@ The following interface layers currently exist in sysfs:
 Structure:
 
 struct device_attribute {
-        struct attribute        attr;
-        ssize_t (*show)(struct device * dev, char * buf);
-        ssize_t (*store)(struct device * dev, const char * buf);
+	struct attribute	attr;
+	ssize_t (*show)(struct device *dev, struct device_attribute *attr,
+			char *buf);
+	ssize_t (*store)(struct device *dev, struct device_attribute *attr,
+			 const char *buf, size_t count);
 };
 
 Declaring:
 
-DEVICE_ATTR(_name, _str, _mode, _show, _store);
+DEVICE_ATTR(_name, _mode, _show, _store);
 
 Creation/Removal:
 
-int device_create_file(struct device *device, struct device_attribute * attr);
-void device_remove_file(struct device * dev, struct device_attribute * attr);
+int device_create_file(struct device *dev, const struct device_attribute * attr);
+void device_remove_file(struct device *dev, const struct device_attribute * attr);
 
 
 - bus drivers (include/linux/device.h)
@@ -310,7 +335,7 @@ Structure:
 struct bus_attribute {
         struct attribute        attr;
         ssize_t (*show)(struct bus_type *, char * buf);
-        ssize_t (*store)(struct bus_type *, const char * buf);
+        ssize_t (*store)(struct bus_type *, const char * buf, size_t count);
 };
 
 Declaring:
@@ -331,7 +356,8 @@ Structure:
 struct driver_attribute {
         struct attribute        attr;
         ssize_t (*show)(struct device_driver *, char * buf);
-        ssize_t (*store)(struct device_driver *, const char * buf);
+        ssize_t (*store)(struct device_driver *, const char * buf,
+                         size_t count);
 };
 
 Declaring:
@@ -340,7 +366,15 @@ DRIVER_ATTR(_name, _mode, _show, _store)
 
 Creation/Removal:
 
-int driver_create_file(struct device_driver *, struct driver_attribute *);
-void driver_remove_file(struct device_driver *, struct driver_attribute *);
+int driver_create_file(struct device_driver *, const struct driver_attribute *);
+void driver_remove_file(struct device_driver *, const struct driver_attribute *);
 
 
+Documentation
+~~~~~~~~~~~~~
+
+The sysfs directory structure and the attributes in each directory define an
+ABI between the kernel and user space. As for any ABI, it is important that
+this ABI is stable and properly documented. All new sysfs attributes must be
+documented in Documentation/ABI. See also Documentation/ABI/README for more
+information.

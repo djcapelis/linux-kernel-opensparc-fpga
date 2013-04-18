@@ -1,6 +1,5 @@
 /*
  * mtdram - a test mtd device
- * $Id: mtdram.c,v 1.37 2005/04/21 03:42:11 joern Exp $
  * Author: Alexander Larsson <alex@cendio.se>
  *
  * Copyright (c) 1999 Alexander Larsson <alex@cendio.se>
@@ -15,8 +14,8 @@
 #include <linux/ioport.h>
 #include <linux/vmalloc.h>
 #include <linux/init.h>
-#include <linux/mtd/compatmac.h>
 #include <linux/mtd/mtd.h>
+#include <linux/mtd/mtdram.h>
 
 static unsigned long total_size = CONFIG_MTDRAM_TOTAL_SIZE;
 static unsigned long erase_size = CONFIG_MTDRAM_ERASE_SIZE;
@@ -35,41 +34,42 @@ static struct mtd_info *mtd_info;
 
 static int ram_erase(struct mtd_info *mtd, struct erase_info *instr)
 {
-	if (instr->addr + instr->len > mtd->size)
-		return -EINVAL;
-
 	memset((char *)mtd->priv + instr->addr, 0xff, instr->len);
-
 	instr->state = MTD_ERASE_DONE;
 	mtd_erase_callback(instr);
-
 	return 0;
 }
 
 static int ram_point(struct mtd_info *mtd, loff_t from, size_t len,
-		size_t *retlen, u_char **mtdbuf)
+		size_t *retlen, void **virt, resource_size_t *phys)
 {
-	if (from + len > mtd->size)
-		return -EINVAL;
-
-	*mtdbuf = mtd->priv + from;
+	*virt = mtd->priv + from;
 	*retlen = len;
 	return 0;
 }
 
-static void ram_unpoint(struct mtd_info *mtd, u_char * addr, loff_t from,
-		size_t len)
+static int ram_unpoint(struct mtd_info *mtd, loff_t from, size_t len)
 {
+	return 0;
+}
+
+/*
+ * Allow NOMMU mmap() to directly map the device (if not NULL)
+ * - return the address to which the offset maps
+ * - return -ENOSYS to indicate refusal to do the mapping
+ */
+static unsigned long ram_get_unmapped_area(struct mtd_info *mtd,
+					   unsigned long len,
+					   unsigned long offset,
+					   unsigned long flags)
+{
+	return (unsigned long) mtd->priv + offset;
 }
 
 static int ram_read(struct mtd_info *mtd, loff_t from, size_t len,
 		size_t *retlen, u_char *buf)
 {
-	if (from + len > mtd->size)
-		return -EINVAL;
-
 	memcpy(buf, mtd->priv + from, len);
-
 	*retlen = len;
 	return 0;
 }
@@ -77,11 +77,7 @@ static int ram_read(struct mtd_info *mtd, loff_t from, size_t len,
 static int ram_write(struct mtd_info *mtd, loff_t to, size_t len,
 		size_t *retlen, const u_char *buf)
 {
-	if (to + len > mtd->size)
-		return -EINVAL;
-
 	memcpy((char *)mtd->priv + to, buf, len);
-
 	*retlen = len;
 	return 0;
 }
@@ -89,7 +85,7 @@ static int ram_write(struct mtd_info *mtd, loff_t to, size_t len,
 static void __exit cleanup_mtdram(void)
 {
 	if (mtd_info) {
-		del_mtd_device(mtd_info);
+		mtd_device_unregister(mtd_info);
 		vfree(mtd_info->priv);
 		kfree(mtd_info);
 	}
@@ -106,19 +102,20 @@ int mtdram_init_device(struct mtd_info *mtd, void *mapped_address,
 	mtd->flags = MTD_CAP_RAM;
 	mtd->size = size;
 	mtd->writesize = 1;
+	mtd->writebufsize = 64; /* Mimic CFI NOR flashes */
 	mtd->erasesize = MTDRAM_ERASE_SIZE;
 	mtd->priv = mapped_address;
 
 	mtd->owner = THIS_MODULE;
-	mtd->erase = ram_erase;
-	mtd->point = ram_point;
-	mtd->unpoint = ram_unpoint;
-	mtd->read = ram_read;
-	mtd->write = ram_write;
+	mtd->_erase = ram_erase;
+	mtd->_point = ram_point;
+	mtd->_unpoint = ram_unpoint;
+	mtd->_get_unmapped_area = ram_get_unmapped_area;
+	mtd->_read = ram_read;
+	mtd->_write = ram_write;
 
-	if (add_mtd_device(mtd)) {
+	if (mtd_device_register(mtd, NULL, 0))
 		return -EIO;
-	}
 
 	return 0;
 }

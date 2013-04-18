@@ -1,6 +1,6 @@
 /*
  *  Driver for Gravis UltraSound MAX soundcard
- *  Copyright (c) by Jaroslav Kysela <perex@suse.cz>
+ *  Copyright (c) by Jaroslav Kysela <perex@perex.cz>
  *
  *
  *   This program is free software; you can redistribute it and/or modify
@@ -19,29 +19,28 @@
  *
  */
 
-#include <sound/driver.h>
 #include <linux/init.h>
 #include <linux/err.h>
 #include <linux/isa.h>
 #include <linux/delay.h>
 #include <linux/time.h>
-#include <linux/moduleparam.h>
+#include <linux/module.h>
 #include <asm/dma.h>
 #include <sound/core.h>
 #include <sound/gus.h>
-#include <sound/cs4231.h>
+#include <sound/wss.h>
 #define SNDRV_LEGACY_FIND_FREE_IRQ
 #define SNDRV_LEGACY_FIND_FREE_DMA
 #include <sound/initval.h>
 
-MODULE_AUTHOR("Jaroslav Kysela <perex@suse.cz>");
+MODULE_AUTHOR("Jaroslav Kysela <perex@perex.cz>");
 MODULE_DESCRIPTION("Gravis UltraSound MAX");
 MODULE_LICENSE("GPL");
 MODULE_SUPPORTED_DEVICE("{{Gravis,UltraSound MAX}}");
 
 static int index[SNDRV_CARDS] = SNDRV_DEFAULT_IDX;	/* Index 0-MAX */
 static char *id[SNDRV_CARDS] = SNDRV_DEFAULT_STR;	/* ID for this card */
-static int enable[SNDRV_CARDS] = SNDRV_DEFAULT_ENABLE;	/* Enable this card */
+static bool enable[SNDRV_CARDS] = SNDRV_DEFAULT_ENABLE;	/* Enable this card */
 static long port[SNDRV_CARDS] = SNDRV_DEFAULT_PORT;	/* 0x220,0x230,0x240,0x250,0x260 */
 static int irq[SNDRV_CARDS] = SNDRV_DEFAULT_IRQ;	/* 2,3,5,9,11,12,15 */
 static int dma1[SNDRV_CARDS] = SNDRV_DEFAULT_DMA;	/* 1,3,5,6,7 */
@@ -76,14 +75,14 @@ struct snd_gusmax {
 	int irq;
 	struct snd_card *card;
 	struct snd_gus_card *gus;
-	struct snd_cs4231 *cs4231;
+	struct snd_wss *wss;
 	unsigned short gus_status_reg;
 	unsigned short pcm_status_reg;
 };
 
 #define PFX	"gusmax: "
 
-static int __devinit snd_gusmax_detect(struct snd_gus_card * gus)
+static int snd_gusmax_detect(struct snd_gus_card *gus)
 {
 	unsigned char d;
 
@@ -118,15 +117,15 @@ static irqreturn_t snd_gusmax_interrupt(int irq, void *dev_id)
 		}
 		if (inb(maxcard->pcm_status_reg) & 0x01) { /* IRQ bit is set? */
 			handled = 1;
-			snd_cs4231_interrupt(irq, maxcard->cs4231);
+			snd_wss_interrupt(irq, maxcard->wss);
 			loop++;
 		}
 	} while (loop && --max > 0);
 	return IRQ_RETVAL(handled);
 }
 
-static void __devinit snd_gusmax_init(int dev, struct snd_card *card,
-				      struct snd_gus_card * gus)
+static void snd_gusmax_init(int dev, struct snd_card *card,
+			    struct snd_gus_card *gus)
 {
 	gus->equal_irq = 1;
 	gus->codec_flag = 1;
@@ -141,10 +140,7 @@ static void __devinit snd_gusmax_init(int dev, struct snd_card *card,
 	outb(gus->max_cntrl_val, GUSP(gus, MAXCNTRLPORT));
 }
 
-#define CS4231_PRIVATE( left, right, shift, mute ) \
-			((left << 24)|(right << 16)|(shift<<8)|mute)
-
-static int __devinit snd_gusmax_mixer(struct snd_cs4231 *chip)
+static int snd_gusmax_mixer(struct snd_wss *chip)
 {
 	struct snd_card *card = chip->card;
 	struct snd_ctl_elem_id id1, id2;
@@ -195,7 +191,7 @@ static int __devinit snd_gusmax_mixer(struct snd_cs4231 *chip)
 
 static void snd_gusmax_free(struct snd_card *card)
 {
-	struct snd_gusmax *maxcard = (struct snd_gusmax *)card->private_data;
+	struct snd_gusmax *maxcard = card->private_data;
 	
 	if (maxcard == NULL)
 		return;
@@ -203,27 +199,27 @@ static void snd_gusmax_free(struct snd_card *card)
 		free_irq(maxcard->irq, (void *)maxcard);
 }
 
-static int __devinit snd_gusmax_match(struct device *pdev, unsigned int dev)
+static int snd_gusmax_match(struct device *pdev, unsigned int dev)
 {
 	return enable[dev];
 }
 
-static int __devinit snd_gusmax_probe(struct device *pdev, unsigned int dev)
+static int snd_gusmax_probe(struct device *pdev, unsigned int dev)
 {
 	static int possible_irqs[] = {5, 11, 12, 9, 7, 15, 3, -1};
 	static int possible_dmas[] = {5, 6, 7, 1, 3, -1};
 	int xirq, xdma1, xdma2, err;
 	struct snd_card *card;
 	struct snd_gus_card *gus = NULL;
-	struct snd_cs4231 *cs4231;
+	struct snd_wss *wss;
 	struct snd_gusmax *maxcard;
 
-	card = snd_card_new(index[dev], id[dev], THIS_MODULE,
-			    sizeof(struct snd_gusmax));
-	if (card == NULL)
-		return -ENOMEM;
+	err = snd_card_create(index[dev], id[dev], THIS_MODULE,
+			      sizeof(struct snd_gusmax), &card);
+	if (err < 0)
+		return err;
 	card->private_free = snd_gusmax_free;
-	maxcard = (struct snd_gusmax *)card->private_data;
+	maxcard = card->private_data;
 	maxcard->card = card;
 	maxcard->irq = -1;
 	
@@ -295,40 +291,46 @@ static int __devinit snd_gusmax_probe(struct device *pdev, unsigned int dev)
 		goto _err;
 	}
 
-	if (request_irq(xirq, snd_gusmax_interrupt, IRQF_DISABLED, "GUS MAX", (void *)maxcard)) {
+	if (request_irq(xirq, snd_gusmax_interrupt, 0, "GUS MAX", (void *)maxcard)) {
 		snd_printk(KERN_ERR PFX "unable to grab IRQ %d\n", xirq);
 		err = -EBUSY;
 		goto _err;
 	}
 	maxcard->irq = xirq;
 	
-	if ((err = snd_cs4231_create(card,
-				     gus->gf1.port + 0x10c, -1, xirq,
-				     xdma2 < 0 ? xdma1 : xdma2, xdma1,
-				     CS4231_HW_DETECT,
-				     CS4231_HWSHARE_IRQ |
-				     CS4231_HWSHARE_DMA1 |
-				     CS4231_HWSHARE_DMA2,
-				     &cs4231)) < 0)
+	err = snd_wss_create(card,
+			     gus->gf1.port + 0x10c, -1, xirq,
+			     xdma2 < 0 ? xdma1 : xdma2, xdma1,
+			     WSS_HW_DETECT,
+			     WSS_HWSHARE_IRQ |
+			     WSS_HWSHARE_DMA1 |
+			     WSS_HWSHARE_DMA2,
+			     &wss);
+	if (err < 0)
 		goto _err;
 
-	if ((err = snd_cs4231_pcm(cs4231, 0, NULL)) < 0)
+	err = snd_wss_pcm(wss, 0, NULL);
+	if (err < 0)
 		goto _err;
 
-	if ((err = snd_cs4231_mixer(cs4231)) < 0)
+	err = snd_wss_mixer(wss);
+	if (err < 0)
 		goto _err;
 
-	if ((err = snd_cs4231_timer(cs4231, 2, NULL)) < 0)
+	err = snd_wss_timer(wss, 2, NULL);
+	if (err < 0)
 		goto _err;
 
 	if (pcm_channels[dev] > 0) {
 		if ((err = snd_gf1_pcm_new(gus, 1, 1, NULL)) < 0)
 			goto _err;
 	}
-	if ((err = snd_gusmax_mixer(cs4231)) < 0)
+	err = snd_gusmax_mixer(wss);
+	if (err < 0)
 		goto _err;
 
-	if ((err = snd_gf1_rawmidi_new(gus, 0, NULL)) < 0)
+	err = snd_gf1_rawmidi_new(gus, 0, NULL);
+	if (err < 0)
 		goto _err;
 
 	sprintf(card->longname + strlen(card->longname), " at 0x%lx, irq %i, dma %i", gus->gf1.port, xirq, xdma1);
@@ -337,11 +339,12 @@ static int __devinit snd_gusmax_probe(struct device *pdev, unsigned int dev)
 
 	snd_card_set_dev(card, pdev);
 
-	if ((err = snd_card_register(card)) < 0)
+	err = snd_card_register(card);
+	if (err < 0)
 		goto _err;
 		
 	maxcard->gus = gus;
-	maxcard->cs4231 = cs4231;
+	maxcard->wss = wss;
 
 	dev_set_drvdata(pdev, card);
 	return 0;
@@ -351,7 +354,7 @@ static int __devinit snd_gusmax_probe(struct device *pdev, unsigned int dev)
 	return err;
 }
 
-static int __devexit snd_gusmax_remove(struct device *devptr, unsigned int dev)
+static int snd_gusmax_remove(struct device *devptr, unsigned int dev)
 {
 	snd_card_free(dev_get_drvdata(devptr));
 	dev_set_drvdata(devptr, NULL);
@@ -363,7 +366,7 @@ static int __devexit snd_gusmax_remove(struct device *devptr, unsigned int dev)
 static struct isa_driver snd_gusmax_driver = {
 	.match		= snd_gusmax_match,
 	.probe		= snd_gusmax_probe,
-	.remove		= __devexit_p(snd_gusmax_remove),
+	.remove		= snd_gusmax_remove,
 	/* FIXME: suspend/resume */
 	.driver		= {
 		.name	= DEV_NAME

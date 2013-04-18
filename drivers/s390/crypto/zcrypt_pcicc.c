@@ -1,9 +1,7 @@
 /*
- *  linux/drivers/s390/crypto/zcrypt_pcicc.c
- *
  *  zcrypt 2.1.0
  *
- *  Copyright (C)  2001, 2006 IBM Corporation
+ *  Copyright IBM Corp. 2001, 2006
  *  Author(s): Robert Burroughs
  *	       Eric Rossman (edrossma@us.ibm.com)
  *
@@ -28,8 +26,9 @@
 
 #include <linux/module.h>
 #include <linux/init.h>
+#include <linux/gfp.h>
 #include <linux/err.h>
-#include <asm/atomic.h>
+#include <linux/atomic.h>
 #include <asm/uaccess.h>
 
 #include "ap_bus.h"
@@ -42,7 +41,7 @@
 #define PCICC_MAX_MOD_SIZE_OLD	128	/* 1024 bits */
 #define PCICC_MAX_MOD_SIZE	256	/* 2048 bits */
 
-/**
+/*
  * PCICC cards need a speed rating of 0. This keeps them at the end of
  * the zcrypt device list (see zcrypt_api.c). PCICC cards are only
  * used if no other cards are present because they are slow and can only
@@ -64,13 +63,11 @@ static struct ap_device_id zcrypt_pcicc_ids[] = {
 	{ /* end of list */ },
 };
 
-#ifndef CONFIG_ZCRYPT_MONOLITHIC
 MODULE_DEVICE_TABLE(ap, zcrypt_pcicc_ids);
 MODULE_AUTHOR("IBM Corporation");
 MODULE_DESCRIPTION("PCICC Cryptographic Coprocessor device driver, "
-		   "Copyright 2001, 2006 IBM Corporation");
+		   "Copyright IBM Corp. 2001, 2006");
 MODULE_LICENSE("GPL");
-#endif
 
 static int zcrypt_pcicc_probe(struct ap_device *ap_dev);
 static void zcrypt_pcicc_remove(struct ap_device *ap_dev);
@@ -80,8 +77,8 @@ static void zcrypt_pcicc_receive(struct ap_device *, struct ap_message *,
 static struct ap_driver zcrypt_pcicc_driver = {
 	.probe = zcrypt_pcicc_probe,
 	.remove = zcrypt_pcicc_remove,
-	.receive = zcrypt_pcicc_receive,
 	.ids = zcrypt_pcicc_ids,
+	.request_timeout = PCICC_CLEANUP_TIME,
 };
 
 /**
@@ -360,26 +357,20 @@ static int convert_type86(struct zcrypt_device *zdev,
 	service_rc = le16_to_cpu(msg->cprb.ccp_rtcode);
 	if (unlikely(service_rc != 0)) {
 		service_rs = le16_to_cpu(msg->cprb.ccp_rscode);
-		if (service_rc == 8 && service_rs == 66) {
-			PDEBUG("Bad block format on PCICC\n");
+		if (service_rc == 8 && service_rs == 66)
 			return -EINVAL;
-		}
-		if (service_rc == 8 && service_rs == 65) {
-			PDEBUG("Probably an even modulus on PCICC\n");
+		if (service_rc == 8 && service_rs == 65)
 			return -EINVAL;
-		}
 		if (service_rc == 8 && service_rs == 770) {
-			PDEBUG("Invalid key length on PCICC\n");
 			zdev->max_mod_size = PCICC_MAX_MOD_SIZE_OLD;
 			return -EAGAIN;
 		}
 		if (service_rc == 8 && service_rs == 783) {
-			PDEBUG("Extended bitlengths not enabled on PCICC\n");
 			zdev->max_mod_size = PCICC_MAX_MOD_SIZE_OLD;
 			return -EAGAIN;
 		}
-		PRINTK("Unknown service rc/rs (PCICC): %d/%d\n",
-		       service_rc, service_rs);
+		if (service_rc == 8 && service_rs == 72)
+			return -EINVAL;
 		zdev->online = 0;
 		return -EAGAIN;	/* repeat the request on a different device. */
 	}
@@ -387,7 +378,7 @@ static int convert_type86(struct zcrypt_device *zdev,
 	reply_len = le16_to_cpu(msg->length) - 2;
 	if (reply_len > outputdatalength)
 		return -EINVAL;
-	/**
+	/*
 	 * For all encipher requests, the length of the ciphertext (reply_len)
 	 * will always equal the modulus length. For MEX decipher requests
 	 * the output needs to get padded. Minimum pad size is 10.
@@ -433,9 +424,6 @@ static int convert_response(struct zcrypt_device *zdev,
 					      outputdata, outputdatalength);
 		/* no break, incorrect cprb version is an unknown response */
 	default: /* Unknown response type, this should NEVER EVER happen */
-		PRINTK("Unrecognized Message Header: %08x%08x\n",
-		       *(unsigned int *) reply->message,
-		       *(unsigned int *) (reply->message+4));
 		zdev->online = 0;
 		return -EAGAIN;	/* repeat the request on a different device. */
 	}
@@ -457,19 +445,23 @@ static void zcrypt_pcicc_receive(struct ap_device *ap_dev,
 		.type = TYPE82_RSP_CODE,
 		.reply_code = REP82_ERROR_MACHINE_FAILURE,
 	};
-	struct type86_reply *t86r = reply->message;
+	struct type86_reply *t86r;
 	int length;
 
 	/* Copy the reply message to the request message buffer. */
-	if (IS_ERR(reply))
+	if (IS_ERR(reply)) {
 		memcpy(msg->message, &error_reply, sizeof(error_reply));
-	else if (t86r->hdr.type == TYPE86_RSP_CODE &&
+		goto out;
+	}
+	t86r = reply->message;
+	if (t86r->hdr.type == TYPE86_RSP_CODE &&
 		 t86r->cprb.cprb_ver_id == 0x01) {
 		length = sizeof(struct type86_reply) + t86r->length - 2;
 		length = min(PCICC_MAX_RESPONSE_SIZE, length);
 		memcpy(msg->message, reply->message, length);
 	} else
 		memcpy(msg->message, reply->message, sizeof error_reply);
+out:
 	complete((struct completion *) msg->private);
 }
 
@@ -489,9 +481,11 @@ static long zcrypt_pcicc_modexpo(struct zcrypt_device *zdev,
 	struct completion work;
 	int rc;
 
+	ap_init_message(&ap_msg);
 	ap_msg.message = (void *) get_zeroed_page(GFP_KERNEL);
 	if (!ap_msg.message)
 		return -ENOMEM;
+	ap_msg.receive = zcrypt_pcicc_receive;
 	ap_msg.length = PAGE_SIZE;
 	ap_msg.psmid = (((unsigned long long) current->pid) << 32) +
 				atomic_inc_return(&zcrypt_step);
@@ -501,18 +495,13 @@ static long zcrypt_pcicc_modexpo(struct zcrypt_device *zdev,
 		goto out_free;
 	init_completion(&work);
 	ap_queue_message(zdev->ap_dev, &ap_msg);
-	rc = wait_for_completion_interruptible_timeout(
-				&work, PCICC_CLEANUP_TIME);
-	if (rc > 0)
+	rc = wait_for_completion_interruptible(&work);
+	if (rc == 0)
 		rc = convert_response(zdev, &ap_msg, mex->outputdata,
 				      mex->outputdatalength);
-	else {
-		/* Signal pending or message timed out. */
+	else
+		/* Signal pending. */
 		ap_cancel_message(zdev->ap_dev, &ap_msg);
-		if (rc == 0)
-			/* Message timed out. */
-			rc = -ETIME;
-	}
 out_free:
 	free_page((unsigned long) ap_msg.message);
 	return rc;
@@ -532,9 +521,11 @@ static long zcrypt_pcicc_modexpo_crt(struct zcrypt_device *zdev,
 	struct completion work;
 	int rc;
 
+	ap_init_message(&ap_msg);
 	ap_msg.message = (void *) get_zeroed_page(GFP_KERNEL);
 	if (!ap_msg.message)
 		return -ENOMEM;
+	ap_msg.receive = zcrypt_pcicc_receive;
 	ap_msg.length = PAGE_SIZE;
 	ap_msg.psmid = (((unsigned long long) current->pid) << 32) +
 				atomic_inc_return(&zcrypt_step);
@@ -544,18 +535,13 @@ static long zcrypt_pcicc_modexpo_crt(struct zcrypt_device *zdev,
 		goto out_free;
 	init_completion(&work);
 	ap_queue_message(zdev->ap_dev, &ap_msg);
-	rc = wait_for_completion_interruptible_timeout(
-				&work, PCICC_CLEANUP_TIME);
-	if (rc > 0)
+	rc = wait_for_completion_interruptible(&work);
+	if (rc == 0)
 		rc = convert_response(zdev, &ap_msg, crt->outputdata,
 				      crt->outputdatalength);
-	else {
-		/* Signal pending or message timed out. */
+	else
+		/* Signal pending. */
 		ap_cancel_message(zdev->ap_dev, &ap_msg);
-		if (rc == 0)
-			/* Message timed out. */
-			rc = -ETIME;
-	}
 out_free:
 	free_page((unsigned long) ap_msg.message);
 	return rc;
@@ -590,6 +576,7 @@ static int zcrypt_pcicc_probe(struct ap_device *ap_dev)
 	zdev->min_mod_size = PCICC_MIN_MOD_SIZE;
 	zdev->max_mod_size = PCICC_MAX_MOD_SIZE;
 	zdev->speed_rating = PCICC_SPEED_RATING;
+	zdev->max_exp_bit_length = PCICC_MAX_MOD_SIZE;
 	ap_dev->reply = &zdev->reply;
 	ap_dev->private = zdev;
 	rc = zcrypt_device_register(zdev);
@@ -624,7 +611,5 @@ void zcrypt_pcicc_exit(void)
 	ap_driver_unregister(&zcrypt_pcicc_driver);
 }
 
-#ifndef CONFIG_ZCRYPT_MONOLITHIC
 module_init(zcrypt_pcicc_init);
 module_exit(zcrypt_pcicc_exit);
-#endif

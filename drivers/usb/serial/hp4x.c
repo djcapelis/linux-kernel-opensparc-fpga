@@ -9,7 +9,8 @@
  *	the Free Software Foundation; either version 2 of the License, or
  *	(at your option) any later version.
  *
- * See Documentation/usb/usb-serial.txt for more information on using this driver
+ * See Documentation/usb/usb-serial.txt for more information on using this
+ * driver
  */
 
 #include <linux/kernel.h>
@@ -19,29 +20,17 @@
 #include <linux/usb.h>
 #include <linux/usb/serial.h>
 
-/*
- * Version Information
- */
-#define DRIVER_VERSION "v1.00"
 #define DRIVER_DESC "HP4x (48/49) Generic Serial driver"
 
 #define HP_VENDOR_ID 0x03f0
 #define HP49GP_PRODUCT_ID 0x0121
 
-static struct usb_device_id id_table [] = {
+static const struct usb_device_id id_table[] = {
 	{ USB_DEVICE(HP_VENDOR_ID, HP49GP_PRODUCT_ID) },
 	{ }					/* Terminating entry */
 };
 
 MODULE_DEVICE_TABLE(usb, id_table);
-
-static struct usb_driver hp49gp_driver = {
-	.name =		"hp4X",
-	.probe =	usb_serial_probe,
-	.disconnect =	usb_serial_disconnect,
-	.id_table =	id_table,
-	.no_dynamic_id = 	1,
-};
 
 static struct usb_serial_driver hp49gp_device = {
 	.driver = {
@@ -49,39 +38,14 @@ static struct usb_serial_driver hp49gp_device = {
 		.name =		"hp4X",
 	},
 	.id_table =		id_table,
-	.usb_driver = 		&hp49gp_driver,
-	.num_interrupt_in =	NUM_DONT_CARE,
-	.num_bulk_in =		NUM_DONT_CARE,
-	.num_bulk_out =		NUM_DONT_CARE,
 	.num_ports =		1,
 };
 
-static int __init hp49gp_init(void)
-{
-	int retval;
-	retval = usb_serial_register(&hp49gp_device);
-	if (retval)
-		goto failed_usb_serial_register;
-	retval = usb_register(&hp49gp_driver);
-	if (retval)
-		goto failed_usb_register;
-	info(DRIVER_DESC " " DRIVER_VERSION);
-	return 0;
-failed_usb_register:
-	usb_serial_deregister(&hp49gp_device);
-failed_usb_serial_register:
-	return retval;
-}
+static struct usb_serial_driver * const serial_drivers[] = {
+	&hp49gp_device, NULL
+};
 
-static void __exit hp49gp_exit(void)
-{
-	usb_deregister(&hp49gp_driver);
-	usb_serial_deregister(&hp49gp_device);
-}
-
-module_init(hp49gp_init);
-module_exit(hp49gp_exit);
+module_usb_serial_driver(serial_drivers, id_table);
 
 MODULE_DESCRIPTION(DRIVER_DESC);
-MODULE_VERSION(DRIVER_VERSION);
 MODULE_LICENSE("GPL");

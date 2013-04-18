@@ -27,11 +27,13 @@
 
 #include <linux/cpufreq.h>
 #include <linux/timer.h>
+#include <linux/module.h>
 
 #include <asm/hw_irq.h>
 #include <asm/io.h>
 #include <asm/prom.h>
 #include <asm/time.h>
+#include <asm/smp.h>
 
 #define SDCASR_REG		0x0100
 #define SDCASR_REG_STRIDE	0x1000
@@ -111,7 +113,7 @@ static int get_gizmo_latency(void)
 
 static void set_astate(int cpu, unsigned int astate)
 {
-	u64 flags;
+	unsigned long flags;
 
 	/* Return if called before init has run */
 	if (unlikely(!sdcasr_mapbase))
@@ -122,6 +124,11 @@ static void set_astate(int cpu, unsigned int astate)
 	out_le32(sdcasr_mapbase + SDCASR_REG + SDCASR_REG_STRIDE*cpu, astate);
 
 	local_irq_restore(flags);
+}
+
+int check_astate(void)
+{
+	return get_cur_astate(hard_smp_processor_id());
 }
 
 void restore_astate(int cpu)
@@ -147,7 +154,10 @@ static int pas_cpufreq_cpu_init(struct cpufreq_policy *policy)
 	if (!cpu)
 		goto out;
 
-	dn = of_find_compatible_node(NULL, "sdc", "1682m-sdc");
+	dn = of_find_compatible_node(NULL, NULL, "1682m-sdc");
+	if (!dn)
+		dn = of_find_compatible_node(NULL, NULL,
+					     "pasemi,pwrficient-sdc");
 	if (!dn)
 		goto out;
 	err = of_address_to_resource(dn, 0, &res);
@@ -160,7 +170,10 @@ static int pas_cpufreq_cpu_init(struct cpufreq_policy *policy)
 		goto out;
 	}
 
-	dn = of_find_compatible_node(NULL, "gizmo", "1682m-gizmo");
+	dn = of_find_compatible_node(NULL, NULL, "1682m-gizmo");
+	if (!dn)
+		dn = of_find_compatible_node(NULL, NULL,
+					     "pasemi,pwrficient-gizmo");
 	if (!dn) {
 		err = -ENODEV;
 		goto out_unmap_sdcasr;
@@ -195,15 +208,13 @@ static int pas_cpufreq_cpu_init(struct cpufreq_policy *policy)
 		pr_debug("%d: %d\n", i, pas_freqs[i].frequency);
 	}
 
-	policy->governor = CPUFREQ_DEFAULT_GOVERNOR;
-
 	policy->cpuinfo.transition_latency = get_gizmo_latency();
 
 	cur_astate = get_cur_astate(policy->cpu);
 	pr_debug("current astate is at %d\n",cur_astate);
 
 	policy->cur = pas_freqs[cur_astate].frequency;
-	policy->cpus = cpu_online_map;
+	cpumask_copy(policy->cpus, cpu_online_mask);
 
 	ppc_proc_freq = policy->cur * 1000ul;
 
@@ -225,6 +236,13 @@ out:
 
 static int pas_cpufreq_cpu_exit(struct cpufreq_policy *policy)
 {
+	/*
+	 * We don't support CPU hotplug. Don't unmap after the system
+	 * has already made it to a running state.
+	 */
+	if (system_state != SYSTEM_BOOTING)
+		return 0;
+
 	if (sdcasr_mapbase)
 		iounmap(sdcasr_mapbase);
 	if (sdcpwr_mapbase)
@@ -294,7 +312,8 @@ static struct cpufreq_driver pas_cpufreq_driver = {
 
 static int __init pas_cpufreq_init(void)
 {
-	if (!machine_is_compatible("PA6T-1682M"))
+	if (!of_machine_is_compatible("PA6T-1682M") &&
+	    !of_machine_is_compatible("pasemi,pwrficient"))
 		return -ENODEV;
 
 	return cpufreq_register_driver(&pas_cpufreq_driver);

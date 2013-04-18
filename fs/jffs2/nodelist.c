@@ -9,13 +9,14 @@
  *
  */
 
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/fs.h>
 #include <linux/mtd/mtd.h>
 #include <linux/rbtree.h>
 #include <linux/crc32.h>
-#include <linux/slab.h>
 #include <linux/pagemap.h>
 #include "nodelist.h"
 
@@ -32,15 +33,18 @@ void jffs2_add_fd_to_list(struct jffs2_sb_info *c, struct jffs2_full_dirent *new
 		if ((*prev)->nhash == new->nhash && !strcmp((*prev)->name, new->name)) {
 			/* Duplicate. Free one */
 			if (new->version < (*prev)->version) {
-				dbg_dentlist("Eep! Marking new dirent node is obsolete, old is \"%s\", ino #%u\n",
+				dbg_dentlist("Eep! Marking new dirent node obsolete, old is \"%s\", ino #%u\n",
 					(*prev)->name, (*prev)->ino);
 				jffs2_mark_node_obsolete(c, new->raw);
 				jffs2_free_full_dirent(new);
 			} else {
-				dbg_dentlist("marking old dirent \"%s\", ino #%u bsolete\n",
+				dbg_dentlist("marking old dirent \"%s\", ino #%u obsolete\n",
 					(*prev)->name, (*prev)->ino);
 				new->next = (*prev)->next;
-				jffs2_mark_node_obsolete(c, ((*prev)->raw));
+				/* It may have been a 'placeholder' deletion dirent, 
+				   if jffs2_can_mark_obsolete() (see jffs2_do_unlink()) */
+				if ((*prev)->raw)
+					jffs2_mark_node_obsolete(c, ((*prev)->raw));
 				jffs2_free_full_dirent(*prev);
 				*prev = new;
 			}
@@ -418,7 +422,7 @@ struct jffs2_inode_cache *jffs2_get_ino_cache(struct jffs2_sb_info *c, uint32_t 
 {
 	struct jffs2_inode_cache *ret;
 
-	ret = c->inocache_list[ino % INOCACHE_HASHSIZE];
+	ret = c->inocache_list[ino % c->inocache_hashsize];
 	while (ret && ret->ino < ino) {
 		ret = ret->next;
 	}
@@ -439,7 +443,7 @@ void jffs2_add_ino_cache (struct jffs2_sb_info *c, struct jffs2_inode_cache *new
 
 	dbg_inocache("add %p (ino #%u)\n", new, new->ino);
 
-	prev = &c->inocache_list[new->ino % INOCACHE_HASHSIZE];
+	prev = &c->inocache_list[new->ino % c->inocache_hashsize];
 
 	while ((*prev) && (*prev)->ino < new->ino) {
 		prev = &(*prev)->next;
@@ -460,7 +464,7 @@ void jffs2_del_ino_cache(struct jffs2_sb_info *c, struct jffs2_inode_cache *old)
 	dbg_inocache("del %p (ino #%u)\n", old, old->ino);
 	spin_lock(&c->inocache_lock);
 
-	prev = &c->inocache_list[old->ino % INOCACHE_HASHSIZE];
+	prev = &c->inocache_list[old->ino % c->inocache_hashsize];
 
 	while ((*prev) && (*prev)->ino < old->ino) {
 		prev = &(*prev)->next;
@@ -485,7 +489,7 @@ void jffs2_free_ino_caches(struct jffs2_sb_info *c)
 	int i;
 	struct jffs2_inode_cache *this, *next;
 
-	for (i=0; i<INOCACHE_HASHSIZE; i++) {
+	for (i=0; i < c->inocache_hashsize; i++) {
 		this = c->inocache_list[i];
 		while (this) {
 			next = this->next;
@@ -685,8 +689,8 @@ int jffs2_scan_dirty_space(struct jffs2_sb_info *c, struct jffs2_eraseblock *jeb
 	if (!size)
 		return 0;
 	if (unlikely(size > jeb->free_size)) {
-		printk(KERN_CRIT "Dirty space 0x%x larger then free_size 0x%x (wasted 0x%x)\n",
-		       size, jeb->free_size, jeb->wasted_size);
+		pr_crit("Dirty space 0x%x larger then free_size 0x%x (wasted 0x%x)\n",
+			size, jeb->free_size, jeb->wasted_size);
 		BUG();
 	}
 	/* REF_EMPTY_NODE is !obsolete, so that works OK */
@@ -724,8 +728,10 @@ static inline uint32_t __ref_totlen(struct jffs2_sb_info *c,
 
 		/* Last node in block. Use free_space */
 		if (unlikely(ref != jeb->last_node)) {
-			printk(KERN_CRIT "ref %p @0x%08x is not jeb->last_node (%p @0x%08x)\n",
-			       ref, ref_offset(ref), jeb->last_node, jeb->last_node?ref_offset(jeb->last_node):0);
+			pr_crit("ref %p @0x%08x is not jeb->last_node (%p @0x%08x)\n",
+				ref, ref_offset(ref), jeb->last_node,
+				jeb->last_node ?
+				ref_offset(jeb->last_node) : 0);
 			BUG();
 		}
 		ref_end = jeb->offset + c->sector_size - jeb->free_size;
@@ -745,16 +751,20 @@ uint32_t __jffs2_ref_totlen(struct jffs2_sb_info *c, struct jffs2_eraseblock *je
 		if (!jeb)
 			jeb = &c->blocks[ref->flash_offset / c->sector_size];
 
-		printk(KERN_CRIT "Totlen for ref at %p (0x%08x-0x%08x) miscalculated as 0x%x instead of %x\n",
-		       ref, ref_offset(ref), ref_offset(ref)+ref->__totlen,
-		       ret, ref->__totlen);
+		pr_crit("Totlen for ref at %p (0x%08x-0x%08x) miscalculated as 0x%x instead of %x\n",
+			ref, ref_offset(ref), ref_offset(ref) + ref->__totlen,
+			ret, ref->__totlen);
 		if (ref_next(ref)) {
-			printk(KERN_CRIT "next %p (0x%08x-0x%08x)\n", ref_next(ref), ref_offset(ref_next(ref)),
-			       ref_offset(ref_next(ref))+ref->__totlen);
+			pr_crit("next %p (0x%08x-0x%08x)\n",
+				ref_next(ref), ref_offset(ref_next(ref)),
+				ref_offset(ref_next(ref)) + ref->__totlen);
 		} else 
-			printk(KERN_CRIT "No next ref. jeb->last_node is %p\n", jeb->last_node);
+			pr_crit("No next ref. jeb->last_node is %p\n",
+				jeb->last_node);
 
-		printk(KERN_CRIT "jeb->wasted_size %x, dirty_size %x, used_size %x, free_size %x\n", jeb->wasted_size, jeb->dirty_size, jeb->used_size, jeb->free_size);
+		pr_crit("jeb->wasted_size %x, dirty_size %x, used_size %x, free_size %x\n",
+			jeb->wasted_size, jeb->dirty_size, jeb->used_size,
+			jeb->free_size);
 
 #if defined(JFFS2_DBG_DUMPS) || defined(JFFS2_DBG_PARANOIA_CHECKS)
 		__jffs2_dbg_dump_node_refs_nolock(c, jeb);

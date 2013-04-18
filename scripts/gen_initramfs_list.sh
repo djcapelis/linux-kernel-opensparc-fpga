@@ -1,11 +1,11 @@
-#!/bin/bash
+#!/bin/sh
 # Copyright (C) Martin Schlemmer <azarah@nosferatu.za.org>
 # Copyright (C) 2006 Sam Ravnborg <sam@ravnborg.org>
 #
 # Released under the terms of the GNU GPL
 #
 # Generate a cpio packed initramfs. It uses gen_init_cpio to generate
-# the cpio archive, and gzip to pack it.
+# the cpio archive, and then compresses it.
 # The script may also be used to generate the inputfile used for gen_init_cpio
 # This script assumes that gen_init_cpio is located in usr/ directory
 
@@ -16,14 +16,14 @@ usage() {
 cat << EOF
 Usage:
 $0 [-o <file>] [-u <uid>] [-g <gid>] {-d | <cpio_source>} ...
-	-o <file>      Create gzipped initramfs file named <file> using
-		       gen_init_cpio and gzip
+	-o <file>      Create compressed initramfs file named <file> using
+		       gen_init_cpio and compressor depending on the extension
 	-u <uid>       User ID to map to user ID 0 (root).
-		       <uid> is only meaningful if <cpio_source>
-		       is a directory.
+		       <uid> is only meaningful if <cpio_source> is a
+		       directory.  "squash" forces all files to uid 0.
 	-g <gid>       Group ID to map to group ID 0 (root).
-		       <gid> is only meaningful if <cpio_source>
-		       is a directory.
+		       <gid> is only meaningful if <cpio_source> is a
+		       directory.  "squash" forces all files to gid 0.
 	<cpio_source>  File list or directory for cpio archive.
 		       If <cpio_source> is a .cpio file it will be used
 		       as direct input to initramfs.
@@ -97,7 +97,7 @@ print_mtime() {
 }
 
 list_parse() {
-	echo "$1 \\"
+	[ ! -L "$1" ] && echo "$1 \\" || :
 }
 
 # for each file print a line in following format
@@ -105,20 +105,20 @@ list_parse() {
 # for links, devices etc the format differs. See gen_init_cpio for details
 parse() {
 	local location="$1"
-	local name="${location/${srcdir}//}"
+	local name="/${location#${srcdir}}"
 	# change '//' into '/'
-	name="${name//\/\///}"
+	name=$(echo "$name" | sed -e 's://*:/:g')
 	local mode="$2"
 	local uid="$3"
 	local gid="$4"
 	local ftype=$(filetype "${location}")
 	# remap uid/gid to 0 if necessary
-	[ "$uid" -eq "$root_uid" ] && uid=0
-	[ "$gid" -eq "$root_gid" ] && gid=0
+	[ "$root_uid" = "squash" ] && uid=0 || [ "$uid" -eq "$root_uid" ] && uid=0
+	[ "$root_gid" = "squash" ] && gid=0 || [ "$gid" -eq "$root_gid" ] && gid=0
 	local str="${mode} ${uid} ${gid}"
 
-	[ "${ftype}" == "invalid" ] && return 0
-	[ "${location}" == "${srcdir}" ] && return 0
+	[ "${ftype}" = "invalid" ] && return 0
+	[ "${location}" = "${srcdir}" ] && return 0
 
 	case "${ftype}" in
 		"file")
@@ -135,7 +135,7 @@ parse() {
 			str="${ftype} ${name} ${str} ${dev} ${maj} ${min}"
 			;;
 		"slink")
-			local target=`field 11 $(LC_ALL=C ls -l "${location}")`
+			local target=`readlink "${location}"`
 			str="${ftype} ${name} ${target} ${str}"
 			;;
 		*)
@@ -192,7 +192,7 @@ input_file() {
 	if [ -f "$1" ]; then
 		${dep_list}header "$1"
 		is_cpio="$(echo "$1" | sed 's/^.*\.cpio\(\..*\)\?/cpio/')"
-		if [ $2 -eq 0 -a ${is_cpio} == "cpio" ]; then
+		if [ $2 -eq 0 -a ${is_cpio} = "cpio" ]; then
 			cpio_file=$1
 			echo "$1" | grep -q '^.*\.cpio\..*' && is_cpio_compressed="compressed"
 			[ ! -z ${dep_list} ] && echo "$1"
@@ -202,8 +202,9 @@ input_file() {
 			print_mtime "$1" >> ${output}
 			cat "$1"         >> ${output}
 		else
+		        echo "$1 \\"
 			cat "$1" | while read type dir file perm ; do
-				if [ "$type" == "file" ]; then
+				if [ "$type" = "file" ]; then
 					echo "$file \\";
 				fi
 			done
@@ -225,19 +226,27 @@ cpio_list=
 output="/dev/stdout"
 output_file=""
 is_cpio_compressed=
+compr="gzip -n -9 -f"
 
 arg="$1"
 case "$arg" in
 	"-l")	# files included in initramfs - used by kbuild
 		dep_list="list_"
-		echo "deps_initramfs := \\"
+		echo "deps_initramfs := $0 \\"
 		shift
 		;;
-	"-o")	# generate gzipped cpio image named $1
+	"-o")	# generate compressed cpio image named $1
 		shift
 		output_file="$1"
 		cpio_list="$(mktemp ${TMPDIR:-/tmp}/cpiolist.XXXXXX)"
 		output=${cpio_list}
+		echo "$output_file" | grep -q "\.gz$" && compr="gzip -n -9 -f"
+		echo "$output_file" | grep -q "\.bz2$" && compr="bzip2 -9 -f"
+		echo "$output_file" | grep -q "\.lzma$" && compr="lzma -9 -f"
+		echo "$output_file" | grep -q "\.xz$" && \
+				compr="xz --check=crc32 --lzma2=dict=1MiB"
+		echo "$output_file" | grep -q "\.lzo$" && compr="lzop -9 -f"
+		echo "$output_file" | grep -q "\.cpio$" && compr="cat"
 		shift
 		;;
 esac
@@ -274,12 +283,19 @@ while [ $# -gt 0 ]; do
 	esac
 done
 
-# If output_file is set we will generate cpio archive and gzip it
-# we are carefull to delete tmp files
+# If output_file is set we will generate cpio archive and compress it
+# we are careful to delete tmp files
 if [ ! -z ${output_file} ]; then
 	if [ -z ${cpio_file} ]; then
+		timestamp=
+		if test -n "$KBUILD_BUILD_TIMESTAMP"; then
+			timestamp="$(date -d"$KBUILD_BUILD_TIMESTAMP" +%s || :)"
+			if test -n "$timestamp"; then
+				timestamp="-t $timestamp"
+			fi
+		fi
 		cpio_tfile="$(mktemp ${TMPDIR:-/tmp}/cpiofile.XXXXXX)"
-		usr/gen_init_cpio ${cpio_list} > ${cpio_tfile}
+		usr/gen_init_cpio $timestamp ${cpio_list} > ${cpio_tfile}
 	else
 		cpio_tfile=${cpio_file}
 	fi
@@ -287,7 +303,8 @@ if [ ! -z ${output_file} ]; then
 	if [ "${is_cpio_compressed}" = "compressed" ]; then
 		cat ${cpio_tfile} > ${output_file}
 	else
-		cat ${cpio_tfile} | gzip -f -9 - > ${output_file}
+		(cat ${cpio_tfile} | ${compr}  - > ${output_file}) \
+		|| (rm -f ${output_file} ; false)
 	fi
 	[ -z ${cpio_file} ] && rm ${cpio_tfile}
 fi

@@ -31,6 +31,9 @@
  * 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
+#include <linux/module.h>
+#include <linux/slab.h>
+
 #include <scsi/scsi.h>
 #include <scsi/scsi_cmnd.h>
 #include <scsi/scsi_device.h>
@@ -39,7 +42,79 @@
 #include "transport.h"
 #include "protocol.h"
 #include "debug.h"
-#include "alauda.h"
+
+MODULE_DESCRIPTION("Driver for Alauda-based card readers");
+MODULE_AUTHOR("Daniel Drake <dsd@gentoo.org>");
+MODULE_LICENSE("GPL");
+
+/*
+ * Status bytes
+ */
+#define ALAUDA_STATUS_ERROR		0x01
+#define ALAUDA_STATUS_READY		0x40
+
+/*
+ * Control opcodes (for request field)
+ */
+#define ALAUDA_GET_XD_MEDIA_STATUS	0x08
+#define ALAUDA_GET_SM_MEDIA_STATUS	0x98
+#define ALAUDA_ACK_XD_MEDIA_CHANGE	0x0a
+#define ALAUDA_ACK_SM_MEDIA_CHANGE	0x9a
+#define ALAUDA_GET_XD_MEDIA_SIG		0x86
+#define ALAUDA_GET_SM_MEDIA_SIG		0x96
+
+/*
+ * Bulk command identity (byte 0)
+ */
+#define ALAUDA_BULK_CMD			0x40
+
+/*
+ * Bulk opcodes (byte 1)
+ */
+#define ALAUDA_BULK_GET_REDU_DATA	0x85
+#define ALAUDA_BULK_READ_BLOCK		0x94
+#define ALAUDA_BULK_ERASE_BLOCK		0xa3
+#define ALAUDA_BULK_WRITE_BLOCK		0xb4
+#define ALAUDA_BULK_GET_STATUS2		0xb7
+#define ALAUDA_BULK_RESET_MEDIA		0xe0
+
+/*
+ * Port to operate on (byte 8)
+ */
+#define ALAUDA_PORT_XD			0x00
+#define ALAUDA_PORT_SM			0x01
+
+/*
+ * LBA and PBA are unsigned ints. Special values.
+ */
+#define UNDEF    0xffff
+#define SPARE    0xfffe
+#define UNUSABLE 0xfffd
+
+struct alauda_media_info {
+	unsigned long capacity;		/* total media size in bytes */
+	unsigned int pagesize;		/* page size in bytes */
+	unsigned int blocksize;		/* number of pages per block */
+	unsigned int uzonesize;		/* number of usable blocks per zone */
+	unsigned int zonesize;		/* number of blocks per zone */
+	unsigned int blockmask;		/* mask to get page from address */
+
+	unsigned char pageshift;
+	unsigned char blockshift;
+	unsigned char zoneshift;
+
+	u16 **lba_to_pba;		/* logical to physical block map */
+	u16 **pba_to_lba;		/* physical to logical block map */
+};
+
+struct alauda_info {
+	struct alauda_media_info port[2];
+	int wr_ep;			/* endpoint to write data out of */
+
+	unsigned char sense_key;
+	unsigned long sense_asc;	/* additional sense code */
+	unsigned long sense_ascq;	/* additional sense code qualifier */
+};
 
 #define short_pack(lsb,msb) ( ((u16)(lsb)) | ( ((u16)(msb))<<8 ) )
 #define LSB_of(s) ((s)&0xFF)
@@ -51,6 +126,48 @@
 #define PBA_LO(pba) ((pba & 0xF) << 5)
 #define PBA_HI(pba) (pba >> 3)
 #define PBA_ZONE(pba) (pba >> 11)
+
+static int init_alauda(struct us_data *us);
+
+
+/*
+ * The table of devices
+ */
+#define UNUSUAL_DEV(id_vendor, id_product, bcdDeviceMin, bcdDeviceMax, \
+		    vendorName, productName, useProtocol, useTransport, \
+		    initFunction, flags) \
+{ USB_DEVICE_VER(id_vendor, id_product, bcdDeviceMin, bcdDeviceMax), \
+  .driver_info = (flags) }
+
+static struct usb_device_id alauda_usb_ids[] = {
+#	include "unusual_alauda.h"
+	{ }		/* Terminating entry */
+};
+MODULE_DEVICE_TABLE(usb, alauda_usb_ids);
+
+#undef UNUSUAL_DEV
+
+/*
+ * The flags table
+ */
+#define UNUSUAL_DEV(idVendor, idProduct, bcdDeviceMin, bcdDeviceMax, \
+		    vendor_name, product_name, use_protocol, use_transport, \
+		    init_function, Flags) \
+{ \
+	.vendorName = vendor_name,	\
+	.productName = product_name,	\
+	.useProtocol = use_protocol,	\
+	.useTransport = use_transport,	\
+	.initFunction = init_function,	\
+}
+
+static struct us_unusual_dev alauda_unusual_dev_list[] = {
+#	include "unusual_alauda.h"
+	{ }		/* Terminating entry */
+};
+
+#undef UNUSUAL_DEV
+
 
 /*
  * Media handling
@@ -307,7 +424,8 @@ static int alauda_init_media(struct us_data *us)
 		data[0], data[1], data[2], data[3]);
 	media_info = alauda_card_find_id(data[1]);
 	if (media_info == NULL) {
-		printk("alauda_init_media: Unrecognised media signature: "
+		printk(KERN_WARNING
+			"alauda_init_media: Unrecognised media signature: "
 			"%02X %02X %02X %02X\n",
 			data[0], data[1], data[2], data[3]);
 		return USB_STOR_TRANSPORT_ERROR;
@@ -518,7 +636,8 @@ static int alauda_read_map(struct us_data *us, unsigned int zone)
 
 		/* check even parity */
 		if (parity[data[6] ^ data[7]]) {
-			printk("alauda_read_map: Bad parity in LBA for block %d"
+			printk(KERN_WARNING
+			       "alauda_read_map: Bad parity in LBA for block %d"
 			       " (%02X %02X)\n", i, data[6], data[7]);
 			pba_to_lba[i] = UNUSABLE;
 			continue;
@@ -538,13 +657,16 @@ static int alauda_read_map(struct us_data *us, unsigned int zone)
 		 */
 
 		if (lba_offset >= uzonesize) {
-			printk("alauda_read_map: Bad low LBA %d for block %d\n",
+			printk(KERN_WARNING
+			       "alauda_read_map: Bad low LBA %d for block %d\n",
 			       lba_real, blocknum);
 			continue;
 		}
 
 		if (lba_to_pba[lba_offset] != UNDEF) {
-			printk("alauda_read_map: LBA %d seen for PBA %d and %d\n",
+			printk(KERN_WARNING
+			       "alauda_read_map: "
+			       "LBA %d seen for PBA %d and %d\n",
 			       lba_real, lba_to_pba[lba_offset], blocknum);
 			continue;
 		}
@@ -712,13 +834,15 @@ static int alauda_write_lba(struct us_data *us, u16 lba,
 	if (pba == 1) {
 		/* Maybe it is impossible to write to PBA 1.
 		   Fake success, but don't do anything. */
-		printk("alauda_write_lba: avoid writing to pba 1\n");
+		printk(KERN_WARNING
+		       "alauda_write_lba: avoid writing to pba 1\n");
 		return USB_STOR_TRANSPORT_GOOD;
 	}
 
 	new_pba = alauda_find_unused_pba(&MEDIA_INFO(us), zone);
 	if (!new_pba) {
-		printk("alauda_write_lba: Out of unused blocks\n");
+		printk(KERN_WARNING
+		       "alauda_write_lba: Out of unused blocks\n");
 		return USB_STOR_TRANSPORT_ERROR;
 	}
 
@@ -798,12 +922,13 @@ static int alauda_read_data(struct us_data *us, unsigned long address,
 {
 	unsigned char *buffer;
 	u16 lba, max_lba;
-	unsigned int page, len, index, offset;
+	unsigned int page, len, offset;
 	unsigned int blockshift = MEDIA_INFO(us).blockshift;
 	unsigned int pageshift = MEDIA_INFO(us).pageshift;
 	unsigned int blocksize = MEDIA_INFO(us).blocksize;
 	unsigned int pagesize = MEDIA_INFO(us).pagesize;
 	unsigned int uzonesize = MEDIA_INFO(us).uzonesize;
+	struct scatterlist *sg;
 	int result;
 
 	/*
@@ -817,7 +942,7 @@ static int alauda_read_data(struct us_data *us, unsigned long address,
 	len = min(sectors, blocksize) * (pagesize + 64);
 	buffer = kmalloc(len, GFP_NOIO);
 	if (buffer == NULL) {
-		printk("alauda_read_data: Out of memory\n");
+		printk(KERN_WARNING "alauda_read_data: Out of memory\n");
 		return USB_STOR_TRANSPORT_ERROR;
 	}
 
@@ -827,7 +952,8 @@ static int alauda_read_data(struct us_data *us, unsigned long address,
 	max_lba = MEDIA_INFO(us).capacity >> (blockshift + pageshift);
 
 	result = USB_STOR_TRANSPORT_GOOD;
-	index = offset = 0;
+	offset = 0;
+	sg = NULL;
 
 	while (sectors > 0) {
 		unsigned int zone = lba / uzonesize; /* integer division */
@@ -873,7 +999,7 @@ static int alauda_read_data(struct us_data *us, unsigned long address,
 
 		/* Store the data in the transfer buffer */
 		usb_stor_access_xfer_buf(buffer, len, us->srb,
-				&index, &offset, TO_XFER_BUF);
+				&sg, &offset, TO_XFER_BUF);
 
 		page = 0;
 		lba++;
@@ -891,11 +1017,12 @@ static int alauda_write_data(struct us_data *us, unsigned long address,
 		unsigned int sectors)
 {
 	unsigned char *buffer, *blockbuffer;
-	unsigned int page, len, index, offset;
+	unsigned int page, len, offset;
 	unsigned int blockshift = MEDIA_INFO(us).blockshift;
 	unsigned int pageshift = MEDIA_INFO(us).pageshift;
 	unsigned int blocksize = MEDIA_INFO(us).blocksize;
 	unsigned int pagesize = MEDIA_INFO(us).pagesize;
+	struct scatterlist *sg;
 	u16 lba, max_lba;
 	int result;
 
@@ -908,7 +1035,7 @@ static int alauda_write_data(struct us_data *us, unsigned long address,
 	len = min(sectors, blocksize) * pagesize;
 	buffer = kmalloc(len, GFP_NOIO);
 	if (buffer == NULL) {
-		printk("alauda_write_data: Out of memory\n");
+		printk(KERN_WARNING "alauda_write_data: Out of memory\n");
 		return USB_STOR_TRANSPORT_ERROR;
 	}
 
@@ -918,7 +1045,7 @@ static int alauda_write_data(struct us_data *us, unsigned long address,
 	 */
 	blockbuffer = kmalloc((pagesize + 64) * blocksize, GFP_NOIO);
 	if (blockbuffer == NULL) {
-		printk("alauda_write_data: Out of memory\n");
+		printk(KERN_WARNING "alauda_write_data: Out of memory\n");
 		kfree(buffer);
 		return USB_STOR_TRANSPORT_ERROR;
 	}
@@ -929,7 +1056,8 @@ static int alauda_write_data(struct us_data *us, unsigned long address,
 	max_lba = MEDIA_INFO(us).capacity >> (pageshift + blockshift);
 
 	result = USB_STOR_TRANSPORT_GOOD;
-	index = offset = 0;
+	offset = 0;
+	sg = NULL;
 
 	while (sectors > 0) {
 		/* Write as many sectors as possible in this block */
@@ -946,7 +1074,7 @@ static int alauda_write_data(struct us_data *us, unsigned long address,
 
 		/* Get the data from the transfer buffer */
 		usb_stor_access_xfer_buf(buffer, len, us->srb,
-				&index, &offset, FROM_XFER_BUF);
+				&sg, &offset, FROM_XFER_BUF);
 
 		result = alauda_write_lba(us, lba, page, pages, buffer,
 			blockbuffer);
@@ -987,7 +1115,7 @@ static void alauda_info_destructor(void *extra)
 /*
  * Initialize alauda_info struct and find the data-write endpoint
  */
-int init_alauda(struct us_data *us)
+static int init_alauda(struct us_data *us)
 {
 	struct alauda_info *info;
 	struct usb_host_interface *altsetting = us->pusb_intf->cur_altsetting;
@@ -1009,7 +1137,7 @@ int init_alauda(struct us_data *us)
 	return USB_STOR_TRANSPORT_GOOD;
 }
 
-int alauda_transport(struct scsi_cmnd *srb, struct us_data *us)
+static int alauda_transport(struct scsi_cmnd *srb, struct us_data *us)
 {
 	int rc;
 	struct alauda_info *info = (struct alauda_info *) us->extra;
@@ -1117,3 +1245,38 @@ int alauda_transport(struct scsi_cmnd *srb, struct us_data *us)
 	return USB_STOR_TRANSPORT_FAILED;
 }
 
+static int alauda_probe(struct usb_interface *intf,
+			 const struct usb_device_id *id)
+{
+	struct us_data *us;
+	int result;
+
+	result = usb_stor_probe1(&us, intf, id,
+			(id - alauda_usb_ids) + alauda_unusual_dev_list);
+	if (result)
+		return result;
+
+	us->transport_name  = "Alauda Control/Bulk";
+	us->transport = alauda_transport;
+	us->transport_reset = usb_stor_Bulk_reset;
+	us->max_lun = 1;
+
+	result = usb_stor_probe2(us);
+	return result;
+}
+
+static struct usb_driver alauda_driver = {
+	.name =		"ums-alauda",
+	.probe =	alauda_probe,
+	.disconnect =	usb_stor_disconnect,
+	.suspend =	usb_stor_suspend,
+	.resume =	usb_stor_resume,
+	.reset_resume =	usb_stor_reset_resume,
+	.pre_reset =	usb_stor_pre_reset,
+	.post_reset =	usb_stor_post_reset,
+	.id_table =	alauda_usb_ids,
+	.soft_unbind =	1,
+	.no_dynamic_id = 1,
+};
+
+module_usb_driver(alauda_driver);

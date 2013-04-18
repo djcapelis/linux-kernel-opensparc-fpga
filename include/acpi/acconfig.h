@@ -5,7 +5,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2007, R. Byron Moore
+ * Copyright (C) 2000 - 2012, Intel Corp.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -61,10 +61,6 @@
  *
  */
 
-/* Current ACPICA subsystem version in YYYYMMDD format */
-
-#define ACPI_CA_VERSION                 0x20070126
-
 /*
  * OS name, used for the _OS object.  The _OS object is essentially obsolete,
  * but there is a large base of ASL/AML code in existing machines that check
@@ -89,6 +85,23 @@
  */
 #define ACPI_CHECKSUM_ABORT             FALSE
 
+/*
+ * Generate a version of ACPICA that only supports "reduced hardware"
+ * platforms (as defined in ACPI 5.0). Set to TRUE to generate a specialized
+ * version of ACPICA that ONLY supports the ACPI 5.0 "reduced hardware"
+ * model. In other words, no ACPI hardware is supported.
+ *
+ * If TRUE, this means no support for the following:
+ *      PM Event and Control registers
+ *      SCI interrupt (and handler)
+ *      Fixed Events
+ *      General Purpose Events (GPEs)
+ *      Global Lock
+ *      ACPI PM timer
+ *      FACS table (Waking vectors and Global Lock)
+ */
+#define ACPI_REDUCED_HARDWARE           FALSE
+
 /******************************************************************************
  *
  * Subsystem Constants
@@ -97,7 +110,7 @@
 
 /* Version of ACPI supported */
 
-#define ACPI_CA_SUPPORT_LEVEL           3
+#define ACPI_CA_SUPPORT_LEVEL           5
 
 /* Maximum count for a semaphore object */
 
@@ -107,9 +120,9 @@
 
 #define ACPI_MAX_REFERENCE_COUNT        0x1000
 
-/* Size of cached memory mapping for system memory operation region */
+/* Default page size for use in mapping memory for operation regions */
 
-#define ACPI_SYSMEM_REGION_WINDOW_SIZE  4096
+#define ACPI_DEFAULT_PAGE_SIZE          4096	/* Must be power of 2 */
 
 /* owner_id tracking. 8 entries allows for 255 owner_ids */
 
@@ -118,6 +131,18 @@
 /* Size of the root table array is increased by this increment */
 
 #define ACPI_ROOT_TABLE_SIZE_INCREMENT  4
+
+/* Maximum number of While() loop iterations before forced abort */
+
+#define ACPI_MAX_LOOP_ITERATIONS        0xFFFF
+
+/* Maximum sleep allowed via Sleep() operator */
+
+#define ACPI_MAX_SLEEP                  2000	/* Two seconds */
+
+/* Address Range lists are per-space_id (Memory and I/O only) */
+
+#define ACPI_ADDRESS_RANGE_MAX          2
 
 /******************************************************************************
  *
@@ -150,6 +175,17 @@
 #define ACPI_OBJ_NUM_OPERANDS           8
 #define ACPI_OBJ_MAX_OPERAND            7
 
+/* Number of elements in the Result Stack frame, can be an arbitrary value */
+
+#define ACPI_RESULTS_FRAME_OBJ_NUM      8
+
+/*
+ * Maximal number of elements the Result Stack can contain,
+ * it may be an arbitray value not exceeding the types of
+ * result_size and result_count (now u8).
+ */
+#define ACPI_RESULTS_OBJ_NUM_MAX        255
+
 /* Names within the namespace are 4 bytes long */
 
 #define ACPI_NAME_SIZE                  4
@@ -172,7 +208,6 @@
 
 /* Operation regions */
 
-#define ACPI_NUM_PREDEFINED_REGIONS     8
 #define ACPI_USER_REGION_BEGIN          0x80
 
 /* Maximum space_ids for Operation Regions */
@@ -188,9 +223,16 @@
 #define ACPI_RSDP_CHECKSUM_LENGTH       20
 #define ACPI_RSDP_XCHECKSUM_LENGTH      36
 
-/* SMBus bidirectional buffer size */
+/* SMBus, GSBus and IPMI bidirectional buffer size */
 
 #define ACPI_SMBUS_BUFFER_SIZE          34
+#define ACPI_GSBUS_BUFFER_SIZE          34
+#define ACPI_IPMI_BUFFER_SIZE           66
+
+/* _sx_d and _sx_w control methods */
+
+#define ACPI_NUM_sx_d_METHODS           4
+#define ACPI_NUM_sx_w_METHODS           5
 
 /******************************************************************************
  *
@@ -199,6 +241,7 @@
  *****************************************************************************/
 
 #define ACPI_DEBUGGER_MAX_ARGS          8	/* Must be max method args + 1 */
+#define ACPI_DB_LINE_BUFFER_SIZE	512
 
 #define ACPI_DEBUGGER_COMMAND_PROMPT    '-'
 #define ACPI_DEBUGGER_EXECUTE_PROMPT    '%'

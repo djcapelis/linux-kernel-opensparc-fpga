@@ -7,13 +7,13 @@
  *		2 of the License, or (at your option) any later version.
  *
  * Authors:	Thomas Graf <tgraf@suug.ch>
- * 		Pablo Neira Ayuso <pablo@eurodev.net>
+ * 		Pablo Neira Ayuso <pablo@netfilter.org>
  *
  * ==========================================================================
  *
  * INTRODUCTION
  *
- *   The textsearch infrastructure provides text searching facitilies for
+ *   The textsearch infrastructure provides text searching facilities for
  *   both linear and non-linear data. Individual search algorithms are
  *   implemented in modules and chosen by the user.
  *
@@ -43,7 +43,7 @@
  *       to the algorithm to store persistent variables.
  *   (4) Core eventually resets the search offset and forwards the find()
  *       request to the algorithm.
- *   (5) Algorithm calls get_next_block() provided by the user continously
+ *   (5) Algorithm calls get_next_block() provided by the user continuously
  *       to fetch the data to be searched in block by block.
  *   (6) Algorithm invokes finish() after the last call to get_next_block
  *       to clean up any leftovers from get_next_block. (Optional)
@@ -54,16 +54,19 @@
  * USAGE
  *
  *   Before a search can be performed, a configuration must be created
- *   by calling textsearch_prepare() specyfing the searching algorithm and
- *   the pattern to look for. The returned configuration may then be used
- *   for an arbitary amount of times and even in parallel as long as a
- *   separate struct ts_state variable is provided to every instance.
+ *   by calling textsearch_prepare() specifying the searching algorithm,
+ *   the pattern to look for and flags. As a flag, you can set TS_IGNORECASE
+ *   to perform case insensitive matching. But it might slow down
+ *   performance of algorithm, so you should use it at own your risk.
+ *   The returned configuration may then be used for an arbitrary
+ *   amount of times and even in parallel as long as a separate struct
+ *   ts_state variable is provided to every instance.
  *
  *   The actual search is performed by either calling textsearch_find_-
  *   continuous() for linear data or by providing an own get_next_block()
  *   implementation and calling textsearch_find(). Both functions return
- *   the position of the first occurrence of the patern or UINT_MAX if
- *   no match was found. Subsequent occurences can be found by calling
+ *   the position of the first occurrence of the pattern or UINT_MAX if
+ *   no match was found. Subsequent occurrences can be found by calling
  *   textsearch_next() regardless of the linearity of the data.
  *
  *   Once you're done using a configuration it must be given back via
@@ -89,7 +92,6 @@
  *       panic("Oh my god, dancing chickens at %d\n", pos);
  *
  *   textsearch_destroy(conf);
- *
  * ==========================================================================
  */
 
@@ -97,9 +99,11 @@
 #include <linux/types.h>
 #include <linux/string.h>
 #include <linux/init.h>
+#include <linux/rculist.h>
 #include <linux/rcupdate.h>
 #include <linux/err.h>
 #include <linux/textsearch.h>
+#include <linux/slab.h>
 
 static LIST_HEAD(ts_ops);
 static DEFINE_SPINLOCK(ts_mod_lock);
@@ -250,7 +254,8 @@ unsigned int textsearch_find_continuous(struct ts_config *conf,
  *       the various search algorithms.
  *
  * Returns a new textsearch configuration according to the specified
- *         parameters or a ERR_PTR().
+ * parameters or a ERR_PTR(). If a zero length pattern is passed, this
+ * function returns EINVAL.
  */
 struct ts_config *textsearch_prepare(const char *algo, const void *pattern,
 				     unsigned int len, gfp_t gfp_mask, int flags)
@@ -259,8 +264,11 @@ struct ts_config *textsearch_prepare(const char *algo, const void *pattern,
 	struct ts_config *conf;
 	struct ts_ops *ops;
 	
+	if (len == 0)
+		return ERR_PTR(-EINVAL);
+
 	ops = lookup_ts_algo(algo);
-#ifdef CONFIG_KMOD
+#ifdef CONFIG_MODULES
 	/*
 	 * Why not always autoload you may ask. Some users are
 	 * in a situation where requesting a module may deadlock,
@@ -275,7 +283,7 @@ struct ts_config *textsearch_prepare(const char *algo, const void *pattern,
 	if (ops == NULL)
 		goto errout;
 
-	conf = ops->init(pattern, len, gfp_mask);
+	conf = ops->init(pattern, len, gfp_mask, flags);
 	if (IS_ERR(conf)) {
 		err = PTR_ERR(conf);
 		goto errout;

@@ -21,10 +21,8 @@
 
 #include <linux/i2o-dev.h>
 
-#include <asm/semaphore.h> /* Needed for MUTEX init macros */
-#include <linux/version.h>
 #include <linux/notifier.h>
-#include <asm/atomic.h>
+#include <linux/atomic.h>
 
 
 /*

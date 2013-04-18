@@ -15,7 +15,6 @@
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/mm.h>
-#include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/fb.h>
 #include <linux/init.h>
@@ -30,7 +29,7 @@ static int  crt_option = 1;
 static char panel_option[32] = "";
 
 /* Modes relevant to the GX1 (taken from modedb.c) */
-static const struct fb_videomode __initdata gx1_modedb[] = {
+static const struct fb_videomode gx1_modedb[] = {
 	/* 640x480-60 VESA */
 	{ NULL, 60, 640, 480, 39682,  48, 16, 33, 10, 96, 2,
 	  0, FB_VMODE_NONINTERLACED, FB_MODE_IS_VESA },
@@ -136,13 +135,10 @@ static int gx1fb_set_par(struct fb_info *info)
 {
 	struct geodefb_par *par = info->par;
 
-	if (info->var.bits_per_pixel == 16) {
+	if (info->var.bits_per_pixel == 16)
 		info->fix.visual = FB_VISUAL_TRUECOLOR;
-		fb_dealloc_cmap(&info->cmap);
-	} else {
+	else
 		info->fix.visual = FB_VISUAL_PSEUDOCOLOR;
-		fb_alloc_cmap(&info->cmap, 1<<info->var.bits_per_pixel, 0);
-	}
 
 	info->fix.line_length = gx1_line_delta(info->var.xres, info->var.bits_per_pixel);
 
@@ -199,7 +195,7 @@ static int gx1fb_blank(int blank_mode, struct fb_info *info)
 	return par->vid_ops->blank_display(info, blank_mode);
 }
 
-static int __init gx1fb_map_video_memory(struct fb_info *info, struct pci_dev *dev)
+static int gx1fb_map_video_memory(struct fb_info *info, struct pci_dev *dev)
 {
 	struct geodefb_par *par = info->par;
 	unsigned gx_base;
@@ -217,8 +213,7 @@ static int __init gx1fb_map_video_memory(struct fb_info *info, struct pci_dev *d
 	ret = pci_request_region(dev, 0, "gx1fb (video)");
 	if (ret < 0)
 		return ret;
-	par->vid_regs = ioremap(pci_resource_start(dev, 0),
-				pci_resource_len(dev, 0));
+	par->vid_regs = pci_ioremap_bar(dev, 0);
 	if (!par->vid_regs)
 		return -ENOMEM;
 
@@ -273,7 +268,7 @@ static struct fb_ops gx1fb_ops = {
 	.fb_imageblit	= cfb_imageblit,
 };
 
-static struct fb_info * __init gx1fb_init_fbinfo(struct device *dev)
+static struct fb_info *gx1fb_init_fbinfo(struct device *dev)
 {
 	struct geodefb_par *par;
 	struct fb_info *info;
@@ -316,10 +311,14 @@ static struct fb_info * __init gx1fb_init_fbinfo(struct device *dev)
 	if (!par->panel_x)
 		par->enable_crt = 1; /* fall back to CRT if no panel is specified */
 
+	if (fb_alloc_cmap(&info->cmap, 256, 0) < 0) {
+		framebuffer_release(info);
+		return NULL;
+	}
 	return info;
 }
 
-static int __init gx1fb_probe(struct pci_dev *pdev, const struct pci_device_id *id)
+static int gx1fb_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 {
 	struct geodefb_par *par;
 	struct fb_info *info;
@@ -375,8 +374,11 @@ static int __init gx1fb_probe(struct pci_dev *pdev, const struct pci_device_id *
 		release_mem_region(gx1_gx_base() + 0x8300, 0x100);
 	}
 
-	if (info)
+	if (info) {
+		fb_dealloc_cmap(&info->cmap);
 		framebuffer_release(info);
+	}
+
 	return ret;
 }
 
@@ -396,6 +398,7 @@ static void gx1fb_remove(struct pci_dev *pdev)
 	iounmap(par->dc_regs);
 	release_mem_region(gx1_gx_base() + 0x8300, 0x100);
 
+	fb_dealloc_cmap(&info->cmap);
 	pci_set_drvdata(pdev, NULL);
 
 	framebuffer_release(info);
@@ -453,7 +456,7 @@ static int __init gx1fb_init(void)
 	return pci_register_driver(&gx1fb_driver);
 }
 
-static void __exit gx1fb_cleanup(void)
+static void gx1fb_cleanup(void)
 {
 	pci_unregister_driver(&gx1fb_driver);
 }

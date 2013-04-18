@@ -17,7 +17,6 @@
     Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
 */
 
-#include <sound/driver.h>
 #include <linux/delay.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
@@ -38,7 +37,7 @@ static inline int snd_ad1816a_busy_wait(struct snd_ad1816a *chip)
 		if (inb(AD1816A_REG(AD1816A_CHIP_STATUS)) & AD1816A_READY)
 			return 0;
 
-	snd_printk("chip busy.\n");
+	snd_printk(KERN_WARNING "chip busy.\n");
 	return -EBUSY;
 }
 
@@ -197,7 +196,7 @@ static int snd_ad1816a_trigger(struct snd_ad1816a *chip, unsigned char what,
 		spin_unlock(&chip->lock);
 		break;
 	default:
-		snd_printk("invalid trigger mode 0x%x.\n", what);
+		snd_printk(KERN_WARNING "invalid trigger mode 0x%x.\n", what);
 		error = -EINVAL;
 	}
 
@@ -378,7 +377,6 @@ static struct snd_pcm_hardware snd_ad1816a_capture = {
 	.fifo_size =		0,
 };
 
-#if 0 /* not used now */
 static int snd_ad1816a_timer_close(struct snd_timer *timer)
 {
 	struct snd_ad1816a *chip = snd_timer_chip(timer);
@@ -395,7 +393,8 @@ static int snd_ad1816a_timer_open(struct snd_timer *timer)
 
 static unsigned long snd_ad1816a_timer_resolution(struct snd_timer *timer)
 {
-	snd_assert(timer != NULL, return 0);
+	if (snd_BUG_ON(!timer))
+		return 0;
 
 	return 10000;
 }
@@ -442,8 +441,6 @@ static struct snd_timer_hardware snd_ad1816a_timer_table = {
 	.start =	snd_ad1816a_timer_start,
 	.stop =		snd_ad1816a_timer_stop,
 };
-#endif /* not used now */
-
 
 static int snd_ad1816a_playback_open(struct snd_pcm_substream *substream)
 {
@@ -453,7 +450,6 @@ static int snd_ad1816a_playback_open(struct snd_pcm_substream *substream)
 
 	if ((error = snd_ad1816a_open(chip, AD1816A_MODE_PLAYBACK)) < 0)
 		return error;
-	snd_pcm_set_sync(substream);
 	runtime->hw = snd_ad1816a_playback;
 	snd_pcm_limit_isa_dma_size(chip->dma1, &runtime->hw.buffer_bytes_max);
 	snd_pcm_limit_isa_dma_size(chip->dma1, &runtime->hw.period_bytes_max);
@@ -469,7 +465,6 @@ static int snd_ad1816a_capture_open(struct snd_pcm_substream *substream)
 
 	if ((error = snd_ad1816a_open(chip, AD1816A_MODE_CAPTURE)) < 0)
 		return error;
-	snd_pcm_set_sync(substream);
 	runtime->hw = snd_ad1816a_capture;
 	snd_pcm_limit_isa_dma_size(chip->dma2, &runtime->hw.buffer_bytes_max);
 	snd_pcm_limit_isa_dma_size(chip->dma2, &runtime->hw.period_bytes_max);
@@ -496,7 +491,7 @@ static int snd_ad1816a_capture_close(struct snd_pcm_substream *substream)
 }
 
 
-static void __devinit snd_ad1816a_init(struct snd_ad1816a *chip)
+static void snd_ad1816a_init(struct snd_ad1816a *chip)
 {
 	unsigned long flags;
 
@@ -516,7 +511,33 @@ static void __devinit snd_ad1816a_init(struct snd_ad1816a *chip)
 	spin_unlock_irqrestore(&chip->lock, flags);
 }
 
-static int __devinit snd_ad1816a_probe(struct snd_ad1816a *chip)
+#ifdef CONFIG_PM
+void snd_ad1816a_suspend(struct snd_ad1816a *chip)
+{
+	int reg;
+	unsigned long flags;
+
+	snd_pcm_suspend_all(chip->pcm);
+	spin_lock_irqsave(&chip->lock, flags);
+	for (reg = 0; reg < 48; reg++)
+		chip->image[reg] = snd_ad1816a_read(chip, reg);
+	spin_unlock_irqrestore(&chip->lock, flags);
+}
+
+void snd_ad1816a_resume(struct snd_ad1816a *chip)
+{
+	int reg;
+	unsigned long flags;
+
+	snd_ad1816a_init(chip);
+	spin_lock_irqsave(&chip->lock, flags);
+	for (reg = 0; reg < 48; reg++)
+		snd_ad1816a_write(chip, reg, chip->image[reg]);
+	spin_unlock_irqrestore(&chip->lock, flags);
+}
+#endif
+
+static int snd_ad1816a_probe(struct snd_ad1816a *chip)
 {
 	unsigned long flags;
 
@@ -553,7 +574,6 @@ static int snd_ad1816a_free(struct snd_ad1816a *chip)
 		snd_dma_disable(chip->dma2);
 		free_dma(chip->dma2);
 	}
-	kfree(chip);
 	return 0;
 }
 
@@ -563,34 +583,28 @@ static int snd_ad1816a_dev_free(struct snd_device *device)
 	return snd_ad1816a_free(chip);
 }
 
-static const char __devinit *snd_ad1816a_chip_id(struct snd_ad1816a *chip)
+static const char *snd_ad1816a_chip_id(struct snd_ad1816a *chip)
 {
 	switch (chip->hardware) {
 	case AD1816A_HW_AD1816A: return "AD1816A";
 	case AD1816A_HW_AD1815:	return "AD1815";
 	case AD1816A_HW_AD18MAX10: return "AD18max10";
 	default:
-		snd_printk("Unknown chip version %d:%d.\n",
+		snd_printk(KERN_WARNING "Unknown chip version %d:%d.\n",
 			chip->version, chip->hardware);
 		return "AD1816A - unknown";
 	}
 }
 
-int __devinit snd_ad1816a_create(struct snd_card *card,
-				 unsigned long port, int irq, int dma1, int dma2,
-				 struct snd_ad1816a **rchip)
+int snd_ad1816a_create(struct snd_card *card,
+		       unsigned long port, int irq, int dma1, int dma2,
+		       struct snd_ad1816a *chip)
 {
         static struct snd_device_ops ops = {
 		.dev_free =	snd_ad1816a_dev_free,
 	};
 	int error;
-	struct snd_ad1816a *chip;
 
-	*rchip = NULL;
-
-	chip = kzalloc(sizeof(*chip), GFP_KERNEL);
-	if (chip == NULL)
-		return -ENOMEM;
 	chip->irq = -1;
 	chip->dma1 = -1;
 	chip->dma2 = -1;
@@ -600,7 +614,7 @@ int __devinit snd_ad1816a_create(struct snd_card *card,
 		snd_ad1816a_free(chip);
 		return -EBUSY;
 	}
-	if (request_irq(irq, snd_ad1816a_interrupt, IRQF_DISABLED, "AD1816A", (void *) chip)) {
+	if (request_irq(irq, snd_ad1816a_interrupt, 0, "AD1816A", (void *) chip)) {
 		snd_printk(KERN_ERR "ad1816a: can't grab IRQ %d\n", irq);
 		snd_ad1816a_free(chip);
 		return -EBUSY;
@@ -636,7 +650,6 @@ int __devinit snd_ad1816a_create(struct snd_card *card,
 		return error;
 	}
 
-	*rchip = chip;
 	return 0;
 }
 
@@ -662,7 +675,7 @@ static struct snd_pcm_ops snd_ad1816a_capture_ops = {
 	.pointer =	snd_ad1816a_capture_pointer,
 };
 
-int __devinit snd_ad1816a_pcm(struct snd_ad1816a *chip, int device, struct snd_pcm **rpcm)
+int snd_ad1816a_pcm(struct snd_ad1816a *chip, int device, struct snd_pcm **rpcm)
 {
 	int error;
 	struct snd_pcm *pcm;
@@ -689,8 +702,8 @@ int __devinit snd_ad1816a_pcm(struct snd_ad1816a *chip, int device, struct snd_p
 	return 0;
 }
 
-#if 0 /* not used now */
-int __devinit snd_ad1816a_timer(struct snd_ad1816a *chip, int device, struct snd_timer **rtimer)
+int snd_ad1816a_timer(struct snd_ad1816a *chip, int device,
+		      struct snd_timer **rtimer)
 {
 	struct snd_timer *timer;
 	struct snd_timer_id tid;
@@ -711,7 +724,6 @@ int __devinit snd_ad1816a_timer(struct snd_ad1816a *chip, int device, struct snd
 		*rtimer = timer;
 	return 0;
 }
-#endif /* not used now */
 
 /*
  *
@@ -912,7 +924,7 @@ static const DECLARE_TLV_DB_SCALE(db_scale_6bit, -9450, 150, 0);
 static const DECLARE_TLV_DB_SCALE(db_scale_5bit_12db_max, -3450, 150, 0);
 static const DECLARE_TLV_DB_SCALE(db_scale_rec_gain, 0, 150, 0);
 
-static struct snd_kcontrol_new snd_ad1816a_controls[] __devinitdata = {
+static struct snd_kcontrol_new snd_ad1816a_controls[] = {
 AD1816A_DOUBLE("Master Playback Switch", AD1816A_MASTER_ATT, 15, 7, 1, 1),
 AD1816A_DOUBLE_TLV("Master Playback Volume", AD1816A_MASTER_ATT, 8, 0, 31, 1,
 		   db_scale_5bit),
@@ -958,13 +970,14 @@ AD1816A_SINGLE("3D Control - Switch", AD1816A_3D_PHAT_CTRL, 15, 1, 1),
 AD1816A_SINGLE("3D Control - Level", AD1816A_3D_PHAT_CTRL, 0, 15, 0),
 };
                                         
-int __devinit snd_ad1816a_mixer(struct snd_ad1816a *chip)
+int snd_ad1816a_mixer(struct snd_ad1816a *chip)
 {
 	struct snd_card *card;
 	unsigned int idx;
 	int err;
 
-	snd_assert(chip != NULL && chip->card != NULL, return -EINVAL);
+	if (snd_BUG_ON(!chip || !chip->card))
+		return -EINVAL;
 
 	card = chip->card;
 

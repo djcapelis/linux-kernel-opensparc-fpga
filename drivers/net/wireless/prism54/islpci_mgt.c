@@ -20,9 +20,10 @@
 #include <linux/netdevice.h>
 #include <linux/module.h>
 #include <linux/pci.h>
+#include <linux/sched.h>
+#include <linux/slab.h>
 
 #include <asm/io.h>
-#include <asm/system.h>
 #include <linux/if_arp.h>
 
 #include "prismcompat.h"
@@ -112,7 +113,7 @@ islpci_mgmt_rx_fill(struct net_device *ndev)
 	u32 curr = le32_to_cpu(cb->driver_curr_frag[ISL38XX_CB_RX_MGMTQ]);
 
 #if VERBOSE > SHOW_ERROR_MESSAGES
-	DEBUG(SHOW_FUNCTION_CALLS, "islpci_mgmt_rx_fill \n");
+	DEBUG(SHOW_FUNCTION_CALLS, "islpci_mgmt_rx_fill\n");
 #endif
 
 	while (curr - priv->index_mgmt_rx < ISL38XX_CB_MGMT_QSIZE) {
@@ -190,11 +191,9 @@ islpci_mgt_transmit(struct net_device *ndev, int operation, unsigned long oid,
 
 	err = -ENOMEM;
 	p = buf.mem = kmalloc(frag_len, GFP_KERNEL);
-	if (!buf.mem) {
-		printk(KERN_DEBUG "%s: cannot allocate mgmt frame\n",
-		       ndev->name);
+	if (!buf.mem)
 		goto error;
-	}
+
 	buf.size = frag_len;
 
 	/* create the header directly in the fragment data area */
@@ -210,7 +209,7 @@ islpci_mgt_transmit(struct net_device *ndev, int operation, unsigned long oid,
 	{
 		pimfor_header_t *h = buf.mem;
 		DEBUG(SHOW_PIMFOR_FRAMES,
-		      "PIMFOR: op %i, oid 0x%08lx, device %i, flags 0x%x length 0x%x \n",
+		      "PIMFOR: op %i, oid 0x%08lx, device %i, flags 0x%x length 0x%x\n",
 		      h->operation, oid, h->device_id, h->flags, length);
 
 		/* display the buffer contents for debugging */
@@ -278,7 +277,7 @@ islpci_mgt_receive(struct net_device *ndev)
 	u32 curr_frag;
 
 #if VERBOSE > SHOW_ERROR_MESSAGES
-	DEBUG(SHOW_FUNCTION_CALLS, "islpci_mgt_receive \n");
+	DEBUG(SHOW_FUNCTION_CALLS, "islpci_mgt_receive\n");
 #endif
 
 	/* Only once per interrupt, determine fragment range to
@@ -337,7 +336,7 @@ islpci_mgt_receive(struct net_device *ndev)
 
 #if VERBOSE > SHOW_ERROR_MESSAGES
 		DEBUG(SHOW_PIMFOR_FRAMES,
-		      "PIMFOR: op %i, oid 0x%08x, device %i, flags 0x%x length 0x%x \n",
+		      "PIMFOR: op %i, oid 0x%08x, device %i, flags 0x%x length 0x%x\n",
 		      header->operation, header->oid, header->device_id,
 		      header->flags, header->length);
 
@@ -460,7 +459,7 @@ islpci_mgt_transaction(struct net_device *ndev,
 
 	*recvframe = NULL;
 
-	if (down_interruptible(&priv->mgmt_sem))
+	if (mutex_lock_interruptible(&priv->mgmt_lock))
 		return -ERESTARTSYS;
 
 	prepare_to_wait(&priv->mgmt_wqueue, &wait, TASK_UNINTERRUPTIBLE);
@@ -504,7 +503,7 @@ islpci_mgt_transaction(struct net_device *ndev,
 	/* TODO: we should reset the device here */
  out:
 	finish_wait(&priv->mgmt_wqueue, &wait);
-	up(&priv->mgmt_sem);
+	mutex_unlock(&priv->mgmt_lock);
 	return err;
 }
 

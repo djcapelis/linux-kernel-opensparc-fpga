@@ -656,7 +656,7 @@ static int wf_pm112_probe(struct platform_device *dev)
 	return 0;
 }
 
-static int __devexit wf_pm112_remove(struct platform_device *dev)
+static int wf_pm112_remove(struct platform_device *dev)
 {
 	wf_unregister_client(&pm112_events);
 	/* should release all sensors and controls */
@@ -665,10 +665,10 @@ static int __devexit wf_pm112_remove(struct platform_device *dev)
 
 static struct platform_driver wf_pm112_driver = {
 	.probe = wf_pm112_probe,
-	.remove = __devexit_p(wf_pm112_remove),
+	.remove = wf_pm112_remove,
 	.driver = {
 		.name = "windfarm",
-		.bus = &platform_bus_type,
+		.owner	= THIS_MODULE,
 	},
 };
 
@@ -676,7 +676,7 @@ static int __init wf_pm112_init(void)
 {
 	struct device_node *cpu;
 
-	if (!machine_is_compatible("PowerMac11,2"))
+	if (!of_machine_is_compatible("PowerMac11,2"))
 		return -ENODEV;
 
 	/* Count the number of CPU cores */
@@ -711,3 +711,4 @@ module_exit(wf_pm112_exit);
 MODULE_AUTHOR("Paul Mackerras <paulus@samba.org>");
 MODULE_DESCRIPTION("Thermal control for PowerMac11,2");
 MODULE_LICENSE("GPL");
+MODULE_ALIAS("platform:windfarm");

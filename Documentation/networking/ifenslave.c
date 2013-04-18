@@ -260,7 +260,7 @@ int main(int argc, char *argv[])
 		case 'V': opt_V++; exclusive++; break;
 
 		case '?':
-			fprintf(stderr, usage_msg);
+			fprintf(stderr, "%s", usage_msg);
 			res = 2;
 			goto out;
 		}
@@ -268,13 +268,13 @@ int main(int argc, char *argv[])
 
 	/* options check */
 	if (exclusive > 1) {
-		fprintf(stderr, usage_msg);
+		fprintf(stderr, "%s", usage_msg);
 		res = 2;
 		goto out;
 	}
 
 	if (opt_v || opt_V) {
-		printf(version);
+		printf("%s", version);
 		if (opt_V) {
 			res = 0;
 			goto out;
@@ -282,14 +282,14 @@ int main(int argc, char *argv[])
 	}
 
 	if (opt_u) {
-		printf(usage_msg);
+		printf("%s", usage_msg);
 		res = 0;
 		goto out;
 	}
 
 	if (opt_h) {
-		printf(usage_msg);
-		printf(help_msg);
+		printf("%s", usage_msg);
+		printf("%s", help_msg);
 		res = 0;
 		goto out;
 	}
@@ -309,7 +309,7 @@ int main(int argc, char *argv[])
 			goto out;
 		} else {
 			/* Just show usage */
-			fprintf(stderr, usage_msg);
+			fprintf(stderr, "%s", usage_msg);
 			res = 2;
 			goto out;
 		}
@@ -320,7 +320,7 @@ int main(int argc, char *argv[])
 	master_ifname = *spp++;
 
 	if (master_ifname == NULL) {
-		fprintf(stderr, usage_msg);
+		fprintf(stderr, "%s", usage_msg);
 		res = 2;
 		goto out;
 	}
@@ -339,7 +339,7 @@ int main(int argc, char *argv[])
 
 	if (slave_ifname == NULL) {
 		if (opt_d || opt_c) {
-			fprintf(stderr, usage_msg);
+			fprintf(stderr, "%s", usage_msg);
 			res = 2;
 			goto out;
 		}
@@ -539,12 +539,14 @@ static int if_getconfig(char *ifname)
 		metric = 0;
 	} else
 		metric = ifr.ifr_metric;
+	printf("The result of SIOCGIFMETRIC is %d\n", metric);
 
 	strcpy(ifr.ifr_name, ifname);
 	if (ioctl(skfd, SIOCGIFMTU, &ifr) < 0)
 		mtu = 0;
 	else
 		mtu = ifr.ifr_mtu;
+	printf("The result of SIOCGIFMTU is %d\n", mtu);
 
 	strcpy(ifr.ifr_name, ifname);
 	if (ioctl(skfd, SIOCGIFDSTADDR, &ifr) < 0) {
@@ -756,7 +758,7 @@ static int enslave(char *master_ifname, char *slave_ifname)
 		 */
 		if (abi_ver < 1) {
 			/* For old ABI, the master needs to be
-			 * down before setting it's hwaddr
+			 * down before setting its hwaddr
 			 */
 			res = set_if_down(master_ifname, master_flags.ifr_flags);
 			if (res) {
@@ -1081,7 +1083,7 @@ static int set_if_addr(char *master_ifname, char *slave_ifname)
 
 		}
 
-		ipaddr = ifr.ifr_addr.sa_data;
+		ipaddr = (unsigned char *)ifr.ifr_addr.sa_data;
 		v_print("Interface '%s': set IP %s to %d.%d.%d.%d\n",
 			slave_ifname, ifra[i].desc,
 			ipaddr[0], ipaddr[1], ipaddr[2], ipaddr[3]);

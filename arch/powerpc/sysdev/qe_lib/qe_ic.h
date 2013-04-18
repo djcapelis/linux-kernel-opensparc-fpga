@@ -3,7 +3,7 @@
  *
  * QUICC ENGINE Interrupt Controller Header
  *
- * Copyright (C) 2006 Freescale Semicondutor, Inc. All rights reserved.
+ * Copyright (C) 2006 Freescale Semiconductor, Inc. All rights reserved.
  *
  * Author: Li Yang <leoli@freescale.com>
  * Based on code from Shlomi Gridish <gridish@freescale.com>
@@ -79,13 +79,10 @@ struct qe_ic {
 	volatile u32 __iomem *regs;
 
 	/* The remapper for this QEIC */
-	struct irq_host *irqhost;
+	struct irq_domain *irqhost;
 
 	/* The "linux" controller struct */
 	struct irq_chip hc_irq;
-
-	/* The device node of the interrupt controller */
-	struct device_node *of_node;
 
 	/* VIRQ numbers of QE high/low irqs */
 	unsigned int virq_high;

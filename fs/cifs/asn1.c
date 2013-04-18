@@ -1,7 +1,7 @@
-/* 
+/*
  * The ASB.1/BER parsing code is derived from ip_nat_snmp_basic.c which was in
  * turn derived from the gxsnmp package by Gregory McLean & Jochen Friedrich
- *      
+ *
  * Copyright (c) 2000 RP Internet (www.rpi.net.au).
  *
  * This program is free software; you can redistribute it and/or modify
@@ -49,6 +49,7 @@
 #define ASN1_OJI	6	/* Object Identifier  */
 #define ASN1_OJD	7	/* Object Description */
 #define ASN1_EXT	8	/* External */
+#define ASN1_ENUM	10	/* Enumerated */
 #define ASN1_SEQ	16	/* Sequence */
 #define ASN1_SET	17	/* Set */
 #define ASN1_NUMSTR	18	/* Numerical String */
@@ -77,10 +78,16 @@
 
 #define SPNEGO_OID_LEN 7
 #define NTLMSSP_OID_LEN  10
+#define KRB5_OID_LEN  7
+#define KRB5U2U_OID_LEN  8
+#define MSKRB5_OID_LEN  7
 static unsigned long SPNEGO_OID[7] = { 1, 3, 6, 1, 5, 5, 2 };
 static unsigned long NTLMSSP_OID[10] = { 1, 3, 6, 1, 4, 1, 311, 2, 2, 10 };
+static unsigned long KRB5_OID[7] = { 1, 2, 840, 113554, 1, 2, 2 };
+static unsigned long KRB5U2U_OID[8] = { 1, 2, 840, 113554, 1, 2, 2, 3 };
+static unsigned long MSKRB5_OID[7] = { 1, 2, 840, 48018, 1, 2, 2 };
 
-/* 
+/*
  * ASN.1 context.
  */
 struct asn1_ctx {
@@ -117,6 +124,28 @@ asn1_octet_decode(struct asn1_ctx *ctx, unsigned char *ch)
 	*ch = *(ctx->pointer)++;
 	return 1;
 }
+
+#if 0 /* will be needed later by spnego decoding/encoding of ntlmssp */
+static unsigned char
+asn1_enum_decode(struct asn1_ctx *ctx, __le32 *val)
+{
+	unsigned char ch;
+
+	if (ctx->pointer >= ctx->end) {
+		ctx->error = ASN1_ERR_DEC_EMPTY;
+		return 0;
+	}
+
+	ch = *(ctx->pointer)++; /* ch has 0xa, ptr points to length octet */
+	if ((ch) == ASN1_ENUM)  /* if ch value is ENUM, 0xa */
+		*val = *(++(ctx->pointer)); /* value has enum value */
+	else
+		return 0;
+
+	ctx->pointer++;
+	return 1;
+}
+#endif
 
 static unsigned char
 asn1_tag_decode(struct asn1_ctx *ctx, unsigned int *tag)
@@ -182,6 +211,11 @@ asn1_length_decode(struct asn1_ctx *ctx, unsigned int *def, unsigned int *len)
 			}
 		}
 	}
+
+	/* don't trust len bigger than ctx buffer */
+	if (*len > ctx->end - ctx->pointer)
+		return 0;
+
 	return 1;
 }
 
@@ -190,13 +224,17 @@ asn1_header_decode(struct asn1_ctx *ctx,
 		   unsigned char **eoc,
 		   unsigned int *cls, unsigned int *con, unsigned int *tag)
 {
-	unsigned int def = 0; 
+	unsigned int def = 0;
 	unsigned int len = 0;
 
 	if (!asn1_id_decode(ctx, cls, con, tag))
 		return 0;
 
 	if (!asn1_length_decode(ctx, &def, &len))
+		return 0;
+
+	/* primitive shall be definite, indefinite shall be constructed */
+	if (*con == ASN1_PRI && !def)
 		return 0;
 
 	if (def)
@@ -331,7 +369,7 @@ static unsigned char asn1_ulong_decode(struct asn1_ctx *ctx,
 		*integer |= ch;
 	}
 	return 1;
-} 
+}
 
 static unsigned char
 asn1_octets_decode(struct asn1_ctx *ctx,
@@ -376,7 +414,7 @@ asn1_subid_decode(struct asn1_ctx *ctx, unsigned long *subid)
 	return 1;
 }
 
-static int 
+static int
 asn1_oid_decode(struct asn1_ctx *ctx,
 		unsigned char *eoc, unsigned long **oid, unsigned int *len)
 {
@@ -385,10 +423,14 @@ asn1_oid_decode(struct asn1_ctx *ctx,
 	unsigned long *optr;
 
 	size = eoc - ctx->pointer + 1;
-	*oid = kmalloc(size * sizeof (unsigned long), GFP_ATOMIC);
-	if (*oid == NULL) {
+
+	/* first subid actually encodes first two subids */
+	if (size < 2 || size > UINT_MAX/sizeof(unsigned long))
 		return 0;
-	}
+
+	*oid = kmalloc(size * sizeof(unsigned long), GFP_ATOMIC);
+	if (*oid == NULL)
+		return 0;
 
 	optr = *oid;
 
@@ -450,168 +492,132 @@ compare_oid(unsigned long *oid1, unsigned int oid1len,
 
 int
 decode_negTokenInit(unsigned char *security_blob, int length,
-		    enum securityEnum *secType)
+		    struct TCP_Server_Info *server)
 {
 	struct asn1_ctx ctx;
 	unsigned char *end;
 	unsigned char *sequence_end;
 	unsigned long *oid = NULL;
 	unsigned int cls, con, tag, oidlen, rc;
-	int use_ntlmssp = FALSE;
-
-	*secType = NTLM; /* BB eventually make Kerberos or NLTMSSP the default */
 
 	/* cifs_dump_mem(" Received SecBlob ", security_blob, length); */
 
 	asn1_open(&ctx, security_blob, length);
 
+	/* GSSAPI header */
 	if (asn1_header_decode(&ctx, &end, &cls, &con, &tag) == 0) {
-		cFYI(1, ("Error decoding negTokenInit header"));
+		cFYI(1, "Error decoding negTokenInit header");
 		return 0;
 	} else if ((cls != ASN1_APL) || (con != ASN1_CON)
 		   || (tag != ASN1_EOC)) {
-		cFYI(1, ("cls = %d con = %d tag = %d", cls, con, tag));
+		cFYI(1, "cls = %d con = %d tag = %d", cls, con, tag);
 		return 0;
-	} else {
-		/*      remember to free obj->oid */
+	}
+
+	/* Check for SPNEGO OID -- remember to free obj->oid */
+	rc = asn1_header_decode(&ctx, &end, &cls, &con, &tag);
+	if (rc) {
+		if ((tag == ASN1_OJI) && (con == ASN1_PRI) &&
+		    (cls == ASN1_UNI)) {
+			rc = asn1_oid_decode(&ctx, end, &oid, &oidlen);
+			if (rc) {
+				rc = compare_oid(oid, oidlen, SPNEGO_OID,
+						 SPNEGO_OID_LEN);
+				kfree(oid);
+			}
+		} else
+			rc = 0;
+	}
+
+	/* SPNEGO OID not present or garbled -- bail out */
+	if (!rc) {
+		cFYI(1, "Error decoding negTokenInit header");
+		return 0;
+	}
+
+	/* SPNEGO */
+	if (asn1_header_decode(&ctx, &end, &cls, &con, &tag) == 0) {
+		cFYI(1, "Error decoding negTokenInit");
+		return 0;
+	} else if ((cls != ASN1_CTX) || (con != ASN1_CON)
+		   || (tag != ASN1_EOC)) {
+		cFYI(1, "cls = %d con = %d tag = %d end = %p (%d) exit 0",
+		     cls, con, tag, end, *end);
+		return 0;
+	}
+
+	/* negTokenInit */
+	if (asn1_header_decode(&ctx, &end, &cls, &con, &tag) == 0) {
+		cFYI(1, "Error decoding negTokenInit");
+		return 0;
+	} else if ((cls != ASN1_UNI) || (con != ASN1_CON)
+		   || (tag != ASN1_SEQ)) {
+		cFYI(1, "cls = %d con = %d tag = %d end = %p (%d) exit 1",
+		     cls, con, tag, end, *end);
+		return 0;
+	}
+
+	/* sequence */
+	if (asn1_header_decode(&ctx, &end, &cls, &con, &tag) == 0) {
+		cFYI(1, "Error decoding 2nd part of negTokenInit");
+		return 0;
+	} else if ((cls != ASN1_CTX) || (con != ASN1_CON)
+		   || (tag != ASN1_EOC)) {
+		cFYI(1, "cls = %d con = %d tag = %d end = %p (%d) exit 0",
+		     cls, con, tag, end, *end);
+		return 0;
+	}
+
+	/* sequence of */
+	if (asn1_header_decode
+	    (&ctx, &sequence_end, &cls, &con, &tag) == 0) {
+		cFYI(1, "Error decoding 2nd part of negTokenInit");
+		return 0;
+	} else if ((cls != ASN1_UNI) || (con != ASN1_CON)
+		   || (tag != ASN1_SEQ)) {
+		cFYI(1, "cls = %d con = %d tag = %d end = %p (%d) exit 1",
+		     cls, con, tag, end, *end);
+		return 0;
+	}
+
+	/* list of security mechanisms */
+	while (!asn1_eoc_decode(&ctx, sequence_end)) {
 		rc = asn1_header_decode(&ctx, &end, &cls, &con, &tag);
-		if (rc) {
-			if ((tag == ASN1_OJI) && (cls == ASN1_PRI)) {
-				rc = asn1_oid_decode(&ctx, end, &oid, &oidlen);
-				if (rc) {
-					rc = compare_oid(oid, oidlen,
-							 SPNEGO_OID,
-							 SPNEGO_OID_LEN);
-					kfree(oid);
-				}
-			} else
-				rc = 0;
-		}
-
 		if (!rc) {
-			cFYI(1, ("Error decoding negTokenInit header"));
+			cFYI(1, "Error decoding negTokenInit hdr exit2");
 			return 0;
 		}
+		if ((tag == ASN1_OJI) && (con == ASN1_PRI)) {
+			if (asn1_oid_decode(&ctx, end, &oid, &oidlen)) {
 
-		if (asn1_header_decode(&ctx, &end, &cls, &con, &tag) == 0) {
-			cFYI(1, ("Error decoding negTokenInit"));
-			return 0;
-		} else if ((cls != ASN1_CTX) || (con != ASN1_CON)
-			   || (tag != ASN1_EOC)) {
-			cFYI(1,("cls = %d con = %d tag = %d end = %p (%d) exit 0",
-			      cls, con, tag, end, *end));
-			return 0;
-		}
+				cFYI(1, "OID len = %d oid = 0x%lx 0x%lx "
+					"0x%lx 0x%lx", oidlen, *oid,
+					*(oid + 1), *(oid + 2), *(oid + 3));
 
-		if (asn1_header_decode(&ctx, &end, &cls, &con, &tag) == 0) {
-			cFYI(1, ("Error decoding negTokenInit"));
-			return 0;
-		} else if ((cls != ASN1_UNI) || (con != ASN1_CON)
-			   || (tag != ASN1_SEQ)) {
-			cFYI(1,("cls = %d con = %d tag = %d end = %p (%d) exit 1",
-			      cls, con, tag, end, *end));
-			return 0;
-		}
+				if (compare_oid(oid, oidlen, MSKRB5_OID,
+						MSKRB5_OID_LEN))
+					server->sec_mskerberos = true;
+				else if (compare_oid(oid, oidlen, KRB5U2U_OID,
+						     KRB5U2U_OID_LEN))
+					server->sec_kerberosu2u = true;
+				else if (compare_oid(oid, oidlen, KRB5_OID,
+						     KRB5_OID_LEN))
+					server->sec_kerberos = true;
+				else if (compare_oid(oid, oidlen, NTLMSSP_OID,
+						     NTLMSSP_OID_LEN))
+					server->sec_ntlmssp = true;
 
-		if (asn1_header_decode(&ctx, &end, &cls, &con, &tag) == 0) {
-			cFYI(1, ("Error decoding 2nd part of negTokenInit"));
-			return 0;
-		} else if ((cls != ASN1_CTX) || (con != ASN1_CON)
-			   || (tag != ASN1_EOC)) {
-			cFYI(1,
-			     ("cls = %d con = %d tag = %d end = %p (%d) exit 0",
-			      cls, con, tag, end, *end));
-			return 0;
-		}
-
-		if (asn1_header_decode
-		    (&ctx, &sequence_end, &cls, &con, &tag) == 0) {
-			cFYI(1, ("Error decoding 2nd part of negTokenInit"));
-			return 0;
-		} else if ((cls != ASN1_UNI) || (con != ASN1_CON)
-			   || (tag != ASN1_SEQ)) {
-			cFYI(1,
-			     ("cls = %d con = %d tag = %d end = %p (%d) exit 1",
-			      cls, con, tag, end, *end));
-			return 0;
-		}
-
-		while (!asn1_eoc_decode(&ctx, sequence_end)) {
-			rc = asn1_header_decode(&ctx, &end, &cls, &con, &tag);
-			if (!rc) {
-				cFYI(1,
-				     ("Error 1 decoding negTokenInit header exit 2"));
-				return 0;
+				kfree(oid);
 			}
-			if ((tag == ASN1_OJI) && (con == ASN1_PRI)) {
-				rc = asn1_oid_decode(&ctx, end, &oid, &oidlen);
-				if(rc) {		
-					cFYI(1,
-					  ("OID len = %d oid = 0x%lx 0x%lx 0x%lx 0x%lx",
-					   oidlen, *oid, *(oid + 1), *(oid + 2),
-					   *(oid + 3)));
-					rc = compare_oid(oid, oidlen, NTLMSSP_OID,
-						 NTLMSSP_OID_LEN);
-					kfree(oid);
-					if (rc)
-						use_ntlmssp = TRUE;
-				}
-			} else {
-				cFYI(1,("This should be an oid what is going on? "));
-			}
+		} else {
+			cFYI(1, "Should be an oid what is going on?");
 		}
-
-		if (asn1_header_decode(&ctx, &end, &cls, &con, &tag) == 0) {
-			cFYI(1,
-			     ("Error decoding last part of negTokenInit exit 3"));
-			return 0;
-		} else if ((cls != ASN1_CTX) || (con != ASN1_CON)) {	/* tag = 3 indicating mechListMIC */
-			cFYI(1,
-			     ("Exit 4 cls = %d con = %d tag = %d end = %p (%d)",
-			      cls, con, tag, end, *end));
-			return 0;
-		}
-		if (asn1_header_decode(&ctx, &end, &cls, &con, &tag) == 0) {
-			cFYI(1,
-			     ("Error decoding last part of negTokenInit exit 5"));
-			return 0;
-		} else if ((cls != ASN1_UNI) || (con != ASN1_CON)
-			   || (tag != ASN1_SEQ)) {
-			cFYI(1,
-			     ("Exit 6 cls = %d con = %d tag = %d end = %p (%d)",
-			      cls, con, tag, end, *end));
-		}
-
-		if (asn1_header_decode(&ctx, &end, &cls, &con, &tag) == 0) {
-			cFYI(1,
-			     ("Error decoding last part of negTokenInit exit 7"));
-			return 0;
-		} else if ((cls != ASN1_CTX) || (con != ASN1_CON)) {
-			cFYI(1,
-			     ("Exit 8 cls = %d con = %d tag = %d end = %p (%d)",
-			      cls, con, tag, end, *end));
-			return 0;
-		}
-		if (asn1_header_decode(&ctx, &end, &cls, &con, &tag) == 0) {
-			cFYI(1,
-			     ("Error decoding last part of negTokenInit exit 9"));
-			return 0;
-		} else if ((cls != ASN1_UNI) || (con != ASN1_PRI)
-			   || (tag != ASN1_GENSTR)) {
-			cFYI(1,
-			     ("Exit 10 cls = %d con = %d tag = %d end = %p (%d)",
-			      cls, con, tag, end, *end));
-			return 0;
-		}
-		cFYI(1, ("Need to call asn1_octets_decode() function for this %s", ctx.pointer));	/* is this UTF-8 or ASCII? */
 	}
 
-	/* if (use_kerberos) 
-	   *secType = Kerberos 
-	   else */
-	if (use_ntlmssp) {
-		*secType = NTLMSSP;
-	}
-
+	/*
+	 * We currently ignore anything at the end of the SPNEGO blob after
+	 * the mechTypes have been parsed, since none of that info is
+	 * used at the moment.
+	 */
 	return 1;
 }

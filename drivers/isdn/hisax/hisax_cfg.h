@@ -54,11 +54,13 @@ typedef struct IsdnCardState	IsdnCardState_t;
 typedef struct IsdnCard		IsdnCard_t;
 
 struct IsdnCard {
-	int		typ;
-	int 		protocol;	/* EDSS1, 1TR6 or NI1 */
-	unsigned long	para[4];
+	int typ;
+	int protocol;	/* EDSS1, 1TR6 or NI1 */
+	unsigned long para[4];
 	IsdnCardState_t	*cs;
 };
+
+typedef int (*hisax_setup_func_t)(struct IsdnCard *card);
 
 extern void	HiSax_closecard(int);
 extern int	hisax_init_pcmcia(void *, int *, IsdnCard_t *);

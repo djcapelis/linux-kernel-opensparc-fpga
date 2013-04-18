@@ -1,9 +1,7 @@
 /*
  * rfd_ftl.c -- resident flash disk (flash translation layer)
  *
- * Copyright (C) 2005  Sean Young <sean@mess.org>
- *
- * $Id: rfd_ftl.c,v 1.8 2006/01/15 12:51:44 sean Exp $
+ * Copyright © 2005  Sean Young <sean@mess.org>
  *
  * This type of flash translation layer (FTL) is used by the Embedded BIOS
  * by General Software. It is known as the Resident Flash Disk (RFD), see:
@@ -20,10 +18,9 @@
 #include <linux/vmalloc.h>
 #include <linux/slab.h>
 #include <linux/jiffies.h>
+#include <linux/module.h>
 
 #include <asm/types.h>
-
-#define const_cpu_to_le16	__constant_cpu_to_le16
 
 static int block_size = 0;
 module_param(block_size, int, 0);
@@ -158,7 +155,7 @@ static int scan_header(struct partition *part)
 	size_t retlen;
 
 	sectors_per_block = part->block_size / SECTOR_SIZE;
-	part->total_blocks = part->mbd.mtd->size / part->block_size;
+	part->total_blocks = (u32)part->mbd.mtd->size / part->block_size;
 
 	if (part->total_blocks < 2)
 		return -ENOENT;
@@ -203,9 +200,9 @@ static int scan_header(struct partition *part)
 		part->sector_map[i] = -1;
 
 	for (i=0, blocks_found=0; i<part->total_blocks; i++) {
-		rc = part->mbd.mtd->read(part->mbd.mtd,
-				i * part->block_size, part->header_size,
-				&retlen, (u_char*)part->header_cache);
+		rc = mtd_read(part->mbd.mtd, i * part->block_size,
+			      part->header_size, &retlen,
+			      (u_char *)part->header_cache);
 
 		if (!rc && retlen != part->header_size)
 			rc = -EIO;
@@ -253,8 +250,8 @@ static int rfd_ftl_readsect(struct mtd_blktrans_dev *dev, u_long sector, char *b
 
 	addr = part->sector_map[sector];
 	if (addr != -1) {
-		rc = part->mbd.mtd->read(part->mbd.mtd, addr, SECTOR_SIZE,
-						&retlen, (u_char*)buf);
+		rc = mtd_read(part->mbd.mtd, addr, SECTOR_SIZE, &retlen,
+			      (u_char *)buf);
 		if (!rc && retlen != SECTOR_SIZE)
 			rc = -EIO;
 
@@ -278,16 +275,17 @@ static void erase_callback(struct erase_info *erase)
 
 	part = (struct partition*)erase->priv;
 
-	i = erase->addr / part->block_size;
-	if (i >= part->total_blocks || part->blocks[i].offset != erase->addr) {
-		printk(KERN_ERR PREFIX "erase callback for unknown offset %x "
-				"on '%s'\n", erase->addr, part->mbd.mtd->name);
+	i = (u32)erase->addr / part->block_size;
+	if (i >= part->total_blocks || part->blocks[i].offset != erase->addr ||
+	    erase->addr > UINT_MAX) {
+		printk(KERN_ERR PREFIX "erase callback for unknown offset %llx "
+				"on '%s'\n", (unsigned long long)erase->addr, part->mbd.mtd->name);
 		return;
 	}
 
 	if (erase->state != MTD_ERASE_DONE) {
-		printk(KERN_WARNING PREFIX "erase failed at 0x%x on '%s', "
-				"state %d\n", erase->addr,
+		printk(KERN_WARNING PREFIX "erase failed at 0x%llx on '%s', "
+				"state %d\n", (unsigned long long)erase->addr,
 				part->mbd.mtd->name, erase->state);
 
 		part->blocks[i].state = BLOCK_FAILED;
@@ -299,16 +297,15 @@ static void erase_callback(struct erase_info *erase)
 		return;
 	}
 
-	magic = const_cpu_to_le16(RFD_MAGIC);
+	magic = cpu_to_le16(RFD_MAGIC);
 
 	part->blocks[i].state = BLOCK_ERASED;
 	part->blocks[i].free_sectors = part->data_sectors_per_block;
 	part->blocks[i].used_sectors = 0;
 	part->blocks[i].erases++;
 
-	rc = part->mbd.mtd->write(part->mbd.mtd,
-		part->blocks[i].offset, sizeof(magic), &retlen,
-		(u_char*)&magic);
+	rc = mtd_write(part->mbd.mtd, part->blocks[i].offset, sizeof(magic),
+		       &retlen, (u_char *)&magic);
 
 	if (!rc && retlen != sizeof(magic))
 		rc = -EIO;
@@ -344,12 +341,12 @@ static int erase_block(struct partition *part, int block)
 	part->blocks[block].state = BLOCK_ERASING;
 	part->blocks[block].free_sectors = 0;
 
-	rc = part->mbd.mtd->erase(part->mbd.mtd, erase);
+	rc = mtd_erase(part->mbd.mtd, erase);
 
 	if (rc) {
-		printk(KERN_ERR PREFIX "erase of region %x,%x on '%s' "
-				"failed\n", erase->addr, erase->len,
-				part->mbd.mtd->name);
+		printk(KERN_ERR PREFIX "erase of region %llx,%llx on '%s' "
+				"failed\n", (unsigned long long)erase->addr,
+				(unsigned long long)erase->len, part->mbd.mtd->name);
 		kfree(erase);
 	}
 
@@ -374,9 +371,8 @@ static int move_block_contents(struct partition *part, int block_no, u_long *old
 	if (!map)
 		goto err2;
 
-	rc = part->mbd.mtd->read(part->mbd.mtd,
-		part->blocks[block_no].offset, part->header_size,
-		&retlen, (u_char*)map);
+	rc = mtd_read(part->mbd.mtd, part->blocks[block_no].offset,
+		      part->header_size, &retlen, (u_char *)map);
 
 	if (!rc && retlen != part->header_size)
 		rc = -EIO;
@@ -415,8 +411,8 @@ static int move_block_contents(struct partition *part, int block_no, u_long *old
 			}
 			continue;
 		}
-		rc = part->mbd.mtd->read(part->mbd.mtd, addr,
-			SECTOR_SIZE, &retlen, sector_data);
+		rc = mtd_read(part->mbd.mtd, addr, SECTOR_SIZE, &retlen,
+			      sector_data);
 
 		if (!rc && retlen != SECTOR_SIZE)
 			rc = -EIO;
@@ -452,8 +448,7 @@ static int reclaim_block(struct partition *part, u_long *old_sector)
 	int rc;
 
 	/* we have a race if sync doesn't exist */
-	if (part->mbd.mtd->sync)
-		part->mbd.mtd->sync(part->mbd.mtd);
+	mtd_sync(part->mbd.mtd);
 
 	score = 0x7fffffff; /* MAX_INT */
 	best_block = -1;
@@ -565,8 +560,9 @@ static int find_writable_block(struct partition *part, u_long *old_sector)
 		}
 	}
 
-	rc = part->mbd.mtd->read(part->mbd.mtd, part->blocks[block].offset,
-		part->header_size, &retlen, (u_char*)part->header_cache);
+	rc = mtd_read(part->mbd.mtd, part->blocks[block].offset,
+		      part->header_size, &retlen,
+		      (u_char *)part->header_cache);
 
 	if (!rc && retlen != part->header_size)
 		rc = -EIO;
@@ -589,7 +585,7 @@ static int mark_sector_deleted(struct partition *part, u_long old_addr)
 	int block, offset, rc;
 	u_long addr;
 	size_t retlen;
-	u16 del = const_cpu_to_le16(SECTOR_DELETED);
+	u16 del = cpu_to_le16(SECTOR_DELETED);
 
 	block = old_addr / part->block_size;
 	offset = (old_addr % part->block_size) / SECTOR_SIZE -
@@ -597,8 +593,8 @@ static int mark_sector_deleted(struct partition *part, u_long old_addr)
 
 	addr = part->blocks[block].offset +
 			(HEADER_MAP_OFFSET + offset) * sizeof(u16);
-	rc = part->mbd.mtd->write(part->mbd.mtd, addr,
-		sizeof(del), &retlen, (u_char*)&del);
+	rc = mtd_write(part->mbd.mtd, addr, sizeof(del), &retlen,
+		       (u_char *)&del);
 
 	if (!rc && retlen != sizeof(del))
 		rc = -EIO;
@@ -670,8 +666,8 @@ static int do_writesect(struct mtd_blktrans_dev *dev, u_long sector, char *buf, 
 
 	addr = (i + part->header_sectors_per_block) * SECTOR_SIZE +
 		block->offset;
-	rc = part->mbd.mtd->write(part->mbd.mtd,
-		addr, SECTOR_SIZE, &retlen, (u_char*)buf);
+	rc = mtd_write(part->mbd.mtd, addr, SECTOR_SIZE, &retlen,
+		       (u_char *)buf);
 
 	if (!rc && retlen != SECTOR_SIZE)
 		rc = -EIO;
@@ -690,8 +686,8 @@ static int do_writesect(struct mtd_blktrans_dev *dev, u_long sector, char *buf, 
 	part->header_cache[i + HEADER_MAP_OFFSET] = entry;
 
 	addr = block->offset + (HEADER_MAP_OFFSET + i) * sizeof(u16);
-	rc = part->mbd.mtd->write(part->mbd.mtd, addr,
-			sizeof(entry), &retlen, (u_char*)&entry);
+	rc = mtd_write(part->mbd.mtd, addr, sizeof(entry), &retlen,
+		       (u_char *)&entry);
 
 	if (!rc && retlen != sizeof(entry))
 		rc = -EIO;
@@ -765,7 +761,7 @@ static void rfd_ftl_add_mtd(struct mtd_blktrans_ops *tr, struct mtd_info *mtd)
 {
 	struct partition *part;
 
-	if (mtd->type != MTD_NORFLASH)
+	if (mtd->type != MTD_NORFLASH || mtd->size > UINT_MAX)
 		return;
 
 	part = kzalloc(sizeof(struct partition), GFP_KERNEL);
@@ -779,9 +775,8 @@ static void rfd_ftl_add_mtd(struct mtd_blktrans_ops *tr, struct mtd_info *mtd)
 	else {
 		if (!mtd->erasesize) {
 			printk(KERN_WARNING PREFIX "please provide block_size");
-			return;
-		}
-		else
+			goto out;
+		} else
 			part->block_size = mtd->erasesize;
 	}
 
@@ -803,7 +798,7 @@ static void rfd_ftl_add_mtd(struct mtd_blktrans_ops *tr, struct mtd_info *mtd)
 		if (!add_mtd_blktrans_dev((void*)part))
 			return;
 	}
-
+out:
 	kfree(part);
 }
 
@@ -821,10 +816,9 @@ static void rfd_ftl_remove_dev(struct mtd_blktrans_dev *dev)
 	vfree(part->sector_map);
 	kfree(part->header_cache);
 	kfree(part->blocks);
-	kfree(part);
 }
 
-struct mtd_blktrans_ops rfd_ftl_tr = {
+static struct mtd_blktrans_ops rfd_ftl_tr = {
 	.name		= "rfd",
 	.major		= RFD_FTL_MAJOR,
 	.part_bits	= PART_BITS,

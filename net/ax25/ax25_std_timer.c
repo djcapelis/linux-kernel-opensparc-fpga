@@ -25,14 +25,13 @@
 #include <net/sock.h>
 #include <net/tcp_states.h>
 #include <asm/uaccess.h>
-#include <asm/system.h>
 #include <linux/fcntl.h>
 #include <linux/mm.h>
 #include <linux/interrupt.h>
 
 void ax25_std_heartbeat_expiry(ax25_cb *ax25)
 {
-	struct sock *sk=ax25->sk;
+	struct sock *sk = ax25->sk;
 
 	if (sk)
 		bh_lock_sock(sk);
@@ -62,7 +61,7 @@ void ax25_std_heartbeat_expiry(ax25_cb *ax25)
 		 */
 		if (sk != NULL) {
 			if (atomic_read(&sk->sk_rmem_alloc) <
-			    (sk->sk_rcvbuf / 2) &&
+			    (sk->sk_rcvbuf >> 1) &&
 			    (ax25->condition & AX25_COND_OWN_RX_BUSY)) {
 				ax25->condition &= ~AX25_COND_OWN_RX_BUSY;
 				ax25->condition &= ~AX25_COND_ACK_PENDING;

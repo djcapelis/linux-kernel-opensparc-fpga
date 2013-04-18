@@ -45,7 +45,6 @@
 #include <linux/spinlock.h>
 #include <linux/dma-mapping.h>
 
-#include <sound/driver.h>
 #include <sound/core.h>
 #include <sound/pcm.h>
 #include <sound/control.h>
@@ -625,6 +624,9 @@ snd_harmony_pcm_init(struct snd_harmony *h)
 	struct snd_pcm *pcm;
 	int err;
 
+	if (snd_BUG_ON(!h))
+		return -EINVAL;
+
 	harmony_disable_interrupts(h);
 	
    	err = snd_pcm_new(h->card, "harmony", 0, 1, 1, &pcm);
@@ -854,7 +856,7 @@ static struct snd_kcontrol_new snd_harmony_controls[] = {
 		       HARMONY_GAIN_HE_SHIFT, 1, 0),
 };
 
-static void __devinit
+static void
 snd_harmony_mixer_reset(struct snd_harmony *h)
 {
 	harmony_mute(h);
@@ -863,13 +865,15 @@ snd_harmony_mixer_reset(struct snd_harmony *h)
 	harmony_unmute(h);
 }
 
-static int __devinit
+static int
 snd_harmony_mixer_init(struct snd_harmony *h)
 {
-	struct snd_card *card = h->card;
+	struct snd_card *card;
 	int idx, err;
 
-	snd_assert(h != NULL, return -EINVAL);
+	if (snd_BUG_ON(!h))
+		return -EINVAL;
+	card = h->card;
 	strcpy(card->mixername, "Harmony Gain control interface");
 
 	for (idx = 0; idx < HARMONY_CONTROLS; idx++) {
@@ -911,7 +915,7 @@ snd_harmony_dev_free(struct snd_device *dev)
 	return snd_harmony_free(h);
 }
 
-static int __devinit
+static int
 snd_harmony_create(struct snd_card *card, 
 		   struct parisc_device *padev, 
 		   struct snd_harmony **rchip)
@@ -935,7 +939,7 @@ snd_harmony_create(struct snd_card *card,
 	h->iobase = ioremap_nocache(padev->hpa.start, HARMONY_SIZE);
 	if (h->iobase == NULL) {
 		printk(KERN_ERR PFX "unable to remap hpa 0x%lx\n",
-		       padev->hpa.start);
+		       (unsigned long)padev->hpa.start);
 		err = -EBUSY;
 		goto free_and_ret;
 	}
@@ -968,16 +972,16 @@ free_and_ret:
 	return err;
 }
 
-static int __devinit
+static int
 snd_harmony_probe(struct parisc_device *padev)
 {
 	int err;
 	struct snd_card *card;
 	struct snd_harmony *h;
 
-	card = snd_card_new(index, id, THIS_MODULE, 0);
-	if (card == NULL)
-		return -ENOMEM;
+	err = snd_card_create(index, id, THIS_MODULE, 0, &card);
+	if (err < 0)
+		return err;
 
 	err = snd_harmony_create(card, padev, &h);
 	if (err < 0)
@@ -1008,7 +1012,7 @@ free_and_ret:
 	return err;
 }
 
-static int __devexit
+static int
 snd_harmony_remove(struct parisc_device *padev)
 {
 	snd_card_free(parisc_get_drvdata(padev));

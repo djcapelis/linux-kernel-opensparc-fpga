@@ -22,7 +22,10 @@
 #include <linux/types.h>
 #include <linux/string.h>
 #include <linux/ctype.h>
-#include <linux/module.h>
+#include <linux/kernel.h>
+#include <linux/export.h>
+#include <linux/bug.h>
+#include <linux/errno.h>
 
 #ifndef __HAVE_ARCH_STRNICMP
 /**
@@ -36,25 +39,21 @@ int strnicmp(const char *s1, const char *s2, size_t len)
 	/* Yes, Virginia, it had better be unsigned */
 	unsigned char c1, c2;
 
-	c1 = c2 = 0;
-	if (len) {
-		do {
-			c1 = *s1;
-			c2 = *s2;
-			s1++;
-			s2++;
-			if (!c1)
-				break;
-			if (!c2)
-				break;
-			if (c1 == c2)
-				continue;
-			c1 = tolower(c1);
-			c2 = tolower(c2);
-			if (c1 != c2)
-				break;
-		} while (--len);
-	}
+	if (!len)
+		return 0;
+
+	do {
+		c1 = *s1++;
+		c2 = *s2++;
+		if (!c1 || !c2)
+			break;
+		if (c1 == c2)
+			continue;
+		c1 = tolower(c1);
+		c2 = tolower(c2);
+		if (c1 != c2)
+			break;
+	} while (--len);
 	return (int)c1 - (int)c2;
 }
 EXPORT_SYMBOL(strnicmp);
@@ -246,13 +245,17 @@ EXPORT_SYMBOL(strlcat);
 #undef strcmp
 int strcmp(const char *cs, const char *ct)
 {
-	signed char __res;
+	unsigned char c1, c2;
 
 	while (1) {
-		if ((__res = *cs - *ct++) != 0 || !*cs++)
+		c1 = *cs++;
+		c2 = *ct++;
+		if (c1 != c2)
+			return c1 < c2 ? -1 : 1;
+		if (!c1)
 			break;
 	}
-	return __res;
+	return 0;
 }
 EXPORT_SYMBOL(strcmp);
 #endif
@@ -266,14 +269,18 @@ EXPORT_SYMBOL(strcmp);
  */
 int strncmp(const char *cs, const char *ct, size_t count)
 {
-	signed char __res = 0;
+	unsigned char c1, c2;
 
 	while (count) {
-		if ((__res = *cs - *ct++) != 0 || !*cs++)
+		c1 = *cs++;
+		c2 = *ct++;
+		if (c1 != c2)
+			return c1 < c2 ? -1 : 1;
+		if (!c1)
 			break;
 		count--;
 	}
-	return __res;
+	return 0;
 }
 EXPORT_SYMBOL(strncmp);
 #endif
@@ -330,20 +337,33 @@ EXPORT_SYMBOL(strnchr);
 #endif
 
 /**
- * strstrip - Removes leading and trailing whitespace from @s.
+ * skip_spaces - Removes leading whitespace from @str.
+ * @str: The string to be stripped.
+ *
+ * Returns a pointer to the first non-whitespace character in @str.
+ */
+char *skip_spaces(const char *str)
+{
+	while (isspace(*str))
+		++str;
+	return (char *)str;
+}
+EXPORT_SYMBOL(skip_spaces);
+
+/**
+ * strim - Removes leading and trailing whitespace from @s.
  * @s: The string to be stripped.
  *
  * Note that the first trailing whitespace is replaced with a %NUL-terminator
  * in the given string @s. Returns a pointer to the first non-whitespace
  * character in @s.
  */
-char *strstrip(char *s)
+char *strim(char *s)
 {
 	size_t size;
 	char *end;
 
 	size = strlen(s);
-
 	if (!size)
 		return s;
 
@@ -352,12 +372,9 @@ char *strstrip(char *s)
 		end--;
 	*(end + 1) = '\0';
 
-	while (*s && isspace(*s))
-		s++;
-
-	return s;
+	return skip_spaces(s);
 }
-EXPORT_SYMBOL(strstrip);
+EXPORT_SYMBOL(strim);
 
 #ifndef __HAVE_ARCH_STRLEN
 /**
@@ -493,6 +510,62 @@ char *strsep(char **s, const char *ct)
 EXPORT_SYMBOL(strsep);
 #endif
 
+/**
+ * sysfs_streq - return true if strings are equal, modulo trailing newline
+ * @s1: one string
+ * @s2: another string
+ *
+ * This routine returns true iff two strings are equal, treating both
+ * NUL and newline-then-NUL as equivalent string terminations.  It's
+ * geared for use with sysfs input strings, which generally terminate
+ * with newlines but are compared against values without newlines.
+ */
+bool sysfs_streq(const char *s1, const char *s2)
+{
+	while (*s1 && *s1 == *s2) {
+		s1++;
+		s2++;
+	}
+
+	if (*s1 == *s2)
+		return true;
+	if (!*s1 && *s2 == '\n' && !s2[1])
+		return true;
+	if (*s1 == '\n' && !s1[1] && !*s2)
+		return true;
+	return false;
+}
+EXPORT_SYMBOL(sysfs_streq);
+
+/**
+ * strtobool - convert common user inputs into boolean values
+ * @s: input string
+ * @res: result
+ *
+ * This routine returns 0 iff the first character is one of 'Yy1Nn0'.
+ * Otherwise it will return -EINVAL.  Value pointed to by res is
+ * updated upon finding a match.
+ */
+int strtobool(const char *s, bool *res)
+{
+	switch (s[0]) {
+	case 'y':
+	case 'Y':
+	case '1':
+		*res = true;
+		break;
+	case 'n':
+	case 'N':
+	case '0':
+		*res = false;
+		break;
+	default:
+		return -EINVAL;
+	}
+	return 0;
+}
+EXPORT_SYMBOL(strtobool);
+
 #ifndef __HAVE_ARCH_MEMSET
 /**
  * memset - Fill a region of memory with the given value
@@ -621,7 +694,7 @@ EXPORT_SYMBOL(memscan);
  */
 char *strstr(const char *s1, const char *s2)
 {
-	int l1, l2;
+	size_t l1, l2;
 
 	l2 = strlen(s2);
 	if (!l2)
@@ -636,6 +709,31 @@ char *strstr(const char *s1, const char *s2)
 	return NULL;
 }
 EXPORT_SYMBOL(strstr);
+#endif
+
+#ifndef __HAVE_ARCH_STRNSTR
+/**
+ * strnstr - Find the first substring in a length-limited string
+ * @s1: The string to be searched
+ * @s2: The string to search for
+ * @len: the maximum number of characters to search
+ */
+char *strnstr(const char *s1, const char *s2, size_t len)
+{
+	size_t l2;
+
+	l2 = strlen(s2);
+	if (!l2)
+		return (char *)s1;
+	while (len >= l2) {
+		len--;
+		if (!memcmp(s1, s2, l2))
+			return (char *)s1;
+		s1++;
+	}
+	return NULL;
+}
+EXPORT_SYMBOL(strnstr);
 #endif
 
 #ifndef __HAVE_ARCH_MEMCHR
@@ -660,3 +758,69 @@ void *memchr(const void *s, int c, size_t n)
 }
 EXPORT_SYMBOL(memchr);
 #endif
+
+static void *check_bytes8(const u8 *start, u8 value, unsigned int bytes)
+{
+	while (bytes) {
+		if (*start != value)
+			return (void *)start;
+		start++;
+		bytes--;
+	}
+	return NULL;
+}
+
+/**
+ * memchr_inv - Find an unmatching character in an area of memory.
+ * @start: The memory area
+ * @c: Find a character other than c
+ * @bytes: The size of the area.
+ *
+ * returns the address of the first character other than @c, or %NULL
+ * if the whole buffer contains just @c.
+ */
+void *memchr_inv(const void *start, int c, size_t bytes)
+{
+	u8 value = c;
+	u64 value64;
+	unsigned int words, prefix;
+
+	if (bytes <= 16)
+		return check_bytes8(start, value, bytes);
+
+	value64 = value;
+#if defined(ARCH_HAS_FAST_MULTIPLIER) && BITS_PER_LONG == 64
+	value64 *= 0x0101010101010101;
+#elif defined(ARCH_HAS_FAST_MULTIPLIER)
+	value64 *= 0x01010101;
+	value64 |= value64 << 32;
+#else
+	value64 |= value64 << 8;
+	value64 |= value64 << 16;
+	value64 |= value64 << 32;
+#endif
+
+	prefix = (unsigned long)start % 8;
+	if (prefix) {
+		u8 *r;
+
+		prefix = 8 - prefix;
+		r = check_bytes8(start, value, prefix);
+		if (r)
+			return r;
+		start += prefix;
+		bytes -= prefix;
+	}
+
+	words = bytes / 8;
+
+	while (words) {
+		if (*(u64 *)start != value64)
+			return check_bytes8(start, value, 8);
+		start += 8;
+		words--;
+	}
+
+	return check_bytes8(start, value, bytes % 8);
+}
+EXPORT_SYMBOL(memchr_inv);

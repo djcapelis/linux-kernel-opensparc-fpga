@@ -16,7 +16,9 @@
  */
 #include <linux/bootmem.h>
 #include <linux/efi.h>
+#include <linux/memblock.h>
 #include <linux/mm.h>
+#include <linux/nmi.h>
 #include <linux/swap.h>
 
 #include <asm/meminit.h>
@@ -35,7 +37,7 @@ static unsigned long max_gap;
  * Shows a simple page count of reserved and used pages in the system.
  * For discontig machines, it does this on a per-pgdat basis.
  */
-void show_mem(void)
+void show_mem(unsigned int filter)
 {
 	int i, total_reserved = 0;
 	int total_shared = 0, total_cached = 0;
@@ -43,19 +45,22 @@ void show_mem(void)
 	pg_data_t *pgdat;
 
 	printk(KERN_INFO "Mem-info:\n");
-	show_free_areas();
-	printk(KERN_INFO "Free swap:       %6ldkB\n",
-	       nr_swap_pages<<(PAGE_SHIFT-10));
+	show_free_areas(filter);
 	printk(KERN_INFO "Node memory in pages:\n");
 	for_each_online_pgdat(pgdat) {
 		unsigned long present;
 		unsigned long flags;
 		int shared = 0, cached = 0, reserved = 0;
+		int nid = pgdat->node_id;
 
+		if (skip_free_areas_node(filter, nid))
+			continue;
 		pgdat_resize_lock(pgdat, &flags);
 		present = pgdat->node_present_pages;
 		for(i = 0; i < pgdat->node_spanned_pages; i++) {
 			struct page *page;
+			if (unlikely(i % MAX_ORDER_NR_PAGES == 0))
+				touch_nmi_watchdog();
 			if (pfn_valid(pgdat->node_start_pfn + i))
 				page = pfn_to_page(pgdat->node_start_pfn + i);
 			else {
@@ -63,8 +68,7 @@ void show_mem(void)
 				if (max_gap < LARGE_GAP)
 					continue;
 #endif
-				i = vmemmap_find_next_valid_pfn(pgdat->node_id,
-					 i) - 1;
+				i = vmemmap_find_next_valid_pfn(nid, i) - 1;
 				continue;
 			}
 			if (PageReserved(page))
@@ -80,7 +84,7 @@ void show_mem(void)
 		total_cached += cached;
 		total_shared += shared;
 		printk(KERN_INFO "Node %4d:  RAM: %11ld, rsvd: %8d, "
-		       "shrd: %10d, swpd: %10d\n", pgdat->node_id,
+		       "shrd: %10d, swpd: %10d\n", nid,
 		       present, reserved, shared, cached);
 	}
 	printk(KERN_INFO "%ld pages of RAM\n", total_present);
@@ -106,10 +110,10 @@ unsigned long bootmap_start;
  * bootmap_start.  This address must be page-aligned.
  */
 static int __init
-find_bootmap_location (unsigned long start, unsigned long end, void *arg)
+find_bootmap_location (u64 start, u64 end, void *arg)
 {
-	unsigned long needed = *(unsigned long *)arg;
-	unsigned long range_start, range_end, free_start;
+	u64 needed = *(unsigned long *)arg;
+	u64 range_start, range_end, free_start;
 	int i;
 
 #if IGNORE_PFN0
@@ -143,6 +147,113 @@ find_bootmap_location (unsigned long start, unsigned long end, void *arg)
 	return 0;
 }
 
+#ifdef CONFIG_SMP
+static void *cpu_data;
+/**
+ * per_cpu_init - setup per-cpu variables
+ *
+ * Allocate and setup per-cpu data areas.
+ */
+void * __cpuinit
+per_cpu_init (void)
+{
+	static bool first_time = true;
+	void *cpu0_data = __cpu0_per_cpu;
+	unsigned int cpu;
+
+	if (!first_time)
+		goto skip;
+	first_time = false;
+
+	/*
+	 * get_free_pages() cannot be used before cpu_init() done.
+	 * BSP allocates PERCPU_PAGE_SIZE bytes for all possible CPUs
+	 * to avoid that AP calls get_zeroed_page().
+	 */
+	for_each_possible_cpu(cpu) {
+		void *src = cpu == 0 ? cpu0_data : __phys_per_cpu_start;
+
+		memcpy(cpu_data, src, __per_cpu_end - __per_cpu_start);
+		__per_cpu_offset[cpu] = (char *)cpu_data - __per_cpu_start;
+		per_cpu(local_per_cpu_offset, cpu) = __per_cpu_offset[cpu];
+
+		/*
+		 * percpu area for cpu0 is moved from the __init area
+		 * which is setup by head.S and used till this point.
+		 * Update ar.k3.  This move is ensures that percpu
+		 * area for cpu0 is on the correct node and its
+		 * virtual address isn't insanely far from other
+		 * percpu areas which is important for congruent
+		 * percpu allocator.
+		 */
+		if (cpu == 0)
+			ia64_set_kr(IA64_KR_PER_CPU_DATA, __pa(cpu_data) -
+				    (unsigned long)__per_cpu_start);
+
+		cpu_data += PERCPU_PAGE_SIZE;
+	}
+skip:
+	return __per_cpu_start + __per_cpu_offset[smp_processor_id()];
+}
+
+static inline void
+alloc_per_cpu_data(void)
+{
+	cpu_data = __alloc_bootmem(PERCPU_PAGE_SIZE * num_possible_cpus(),
+				   PERCPU_PAGE_SIZE, __pa(MAX_DMA_ADDRESS));
+}
+
+/**
+ * setup_per_cpu_areas - setup percpu areas
+ *
+ * Arch code has already allocated and initialized percpu areas.  All
+ * this function has to do is to teach the determined layout to the
+ * dynamic percpu allocator, which happens to be more complex than
+ * creating whole new ones using helpers.
+ */
+void __init
+setup_per_cpu_areas(void)
+{
+	struct pcpu_alloc_info *ai;
+	struct pcpu_group_info *gi;
+	unsigned int cpu;
+	ssize_t static_size, reserved_size, dyn_size;
+	int rc;
+
+	ai = pcpu_alloc_alloc_info(1, num_possible_cpus());
+	if (!ai)
+		panic("failed to allocate pcpu_alloc_info");
+	gi = &ai->groups[0];
+
+	/* units are assigned consecutively to possible cpus */
+	for_each_possible_cpu(cpu)
+		gi->cpu_map[gi->nr_units++] = cpu;
+
+	/* set parameters */
+	static_size = __per_cpu_end - __per_cpu_start;
+	reserved_size = PERCPU_MODULE_RESERVE;
+	dyn_size = PERCPU_PAGE_SIZE - static_size - reserved_size;
+	if (dyn_size < 0)
+		panic("percpu area overflow static=%zd reserved=%zd\n",
+		      static_size, reserved_size);
+
+	ai->static_size		= static_size;
+	ai->reserved_size	= reserved_size;
+	ai->dyn_size		= dyn_size;
+	ai->unit_size		= PERCPU_PAGE_SIZE;
+	ai->atom_size		= PAGE_SIZE;
+	ai->alloc_size		= PERCPU_PAGE_SIZE;
+
+	rc = pcpu_setup_first_chunk(ai, __per_cpu_start + __per_cpu_offset[0]);
+	if (rc)
+		panic("failed to setup percpu area (err=%d)", rc);
+
+	pcpu_free_alloc_info(ai);
+}
+#else
+#define alloc_per_cpu_data() do { } while (0)
+#endif /* CONFIG_SMP */
+
 /**
  * find_memory - setup memory map
  *
@@ -175,47 +286,14 @@ find_memory (void)
 
 	/* Free all available memory, then mark bootmem-map as being in use. */
 	efi_memmap_walk(filter_rsvd_memory, free_bootmem);
-	reserve_bootmem(bootmap_start, bootmap_size);
+	reserve_bootmem(bootmap_start, bootmap_size, BOOTMEM_DEFAULT);
 
 	find_initrd();
 
+	alloc_per_cpu_data();
 }
 
-#ifdef CONFIG_SMP
-/**
- * per_cpu_init - setup per-cpu variables
- *
- * Allocate and setup per-cpu data areas.
- */
-void * __cpuinit
-per_cpu_init (void)
-{
-	void *cpu_data;
-	int cpu;
-	static int first_time=1;
-
-	/*
-	 * get_free_pages() cannot be used before cpu_init() done.  BSP
-	 * allocates "NR_CPUS" pages for all CPUs to avoid that AP calls
-	 * get_zeroed_page().
-	 */
-	if (first_time) {
-		first_time=0;
-		cpu_data = __alloc_bootmem(PERCPU_PAGE_SIZE * NR_CPUS,
-					   PERCPU_PAGE_SIZE, __pa(MAX_DMA_ADDRESS));
-		for (cpu = 0; cpu < NR_CPUS; cpu++) {
-			memcpy(cpu_data, __phys_per_cpu_start, __per_cpu_end - __per_cpu_start);
-			__per_cpu_offset[cpu] = (char *) cpu_data - __per_cpu_start;
-			cpu_data += PERCPU_PAGE_SIZE;
-			per_cpu(local_per_cpu_offset, cpu) = __per_cpu_offset[cpu];
-		}
-	}
-	return __per_cpu_start + __per_cpu_offset[smp_processor_id()];
-}
-#endif /* CONFIG_SMP */
-
-static int
-count_pages (u64 start, u64 end, void *arg)
+static int count_pages(u64 start, u64 end, void *arg)
 {
 	unsigned long *count = arg;
 
@@ -244,7 +322,7 @@ paging_init (void)
 	max_zone_pfns[ZONE_NORMAL] = max_low_pfn;
 
 #ifdef CONFIG_VIRTUAL_MEM_MAP
-	efi_memmap_walk(register_active_ranges, NULL);
+	efi_memmap_walk(filter_memory, register_active_ranges);
 	efi_memmap_walk(find_largest_hole, (u64 *)&max_gap);
 	if (max_gap < LARGE_GAP) {
 		vmem_map = (struct page *) 0;
@@ -256,8 +334,8 @@ paging_init (void)
 
 		map_size = PAGE_ALIGN(ALIGN(max_low_pfn, MAX_ORDER_NR_PAGES) *
 			sizeof(struct page));
-		vmalloc_end -= map_size;
-		vmem_map = (struct page *) vmalloc_end;
+		VMALLOC_END -= map_size;
+		vmem_map = (struct page *) VMALLOC_END;
 		efi_memmap_walk(create_mem_map_page_table, NULL);
 
 		/*
@@ -271,7 +349,7 @@ paging_init (void)
 		printk("Virtual mem_map starts at 0x%p\n", mem_map);
 	}
 #else /* !CONFIG_VIRTUAL_MEM_MAP */
-	add_active_range(0, 0, max_low_pfn);
+	memblock_add_node(0, PFN_PHYS(max_low_pfn), 0);
 	free_area_init_nodes(max_zone_pfns);
 #endif /* !CONFIG_VIRTUAL_MEM_MAP */
 	zero_page_memmap_ptr = virt_to_page(ia64_imva(empty_zero_page));

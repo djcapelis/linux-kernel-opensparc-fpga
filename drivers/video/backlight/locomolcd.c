@@ -2,11 +2,11 @@
  * Backlight control code for Sharp Zaurus SL-5500
  *
  * Copyright 2005 John Lenz <lenz@cs.wisc.edu>
- * Maintainer: Pavel Machek <pavel@suse.cz> (unless John wants to :-)
+ * Maintainer: Pavel Machek <pavel@ucw.cz> (unless John wants to :-)
  * GPL v2
  *
  * This driver assumes single CPU. That's okay, because collie is
- * slightly old hardware, and noone is going to retrofit second CPU to
+ * slightly old hardware, and no one is going to retrofit second CPU to
  * old PDA.
  */
 
@@ -107,7 +107,6 @@ void locomolcd_power(int on)
 }
 EXPORT_SYMBOL(locomolcd_power);
 
-
 static int current_intensity;
 
 static int locomolcd_set_intensity(struct backlight_device *bd)
@@ -122,13 +121,25 @@ static int locomolcd_set_intensity(struct backlight_device *bd)
 		intensity = 0;
 
 	switch (intensity) {
-	/* AC and non-AC are handled differently, but produce same results in sharp code? */
-	case 0: locomo_frontlight_set(locomolcd_dev, 0, 0, 161); break;
-	case 1: locomo_frontlight_set(locomolcd_dev, 117, 0, 161); break;
-	case 2: locomo_frontlight_set(locomolcd_dev, 163, 0, 148); break;
-	case 3: locomo_frontlight_set(locomolcd_dev, 194, 0, 161); break;
-	case 4: locomo_frontlight_set(locomolcd_dev, 194, 1, 161); break;
-
+	/*
+	 * AC and non-AC are handled differently,
+	 * but produce same results in sharp code?
+	 */
+	case 0:
+		locomo_frontlight_set(locomolcd_dev, 0, 0, 161);
+		break;
+	case 1:
+		locomo_frontlight_set(locomolcd_dev, 117, 0, 161);
+		break;
+	case 2:
+		locomo_frontlight_set(locomolcd_dev, 163, 0, 148);
+		break;
+	case 3:
+		locomo_frontlight_set(locomolcd_dev, 194, 0, 161);
+		break;
+	case 4:
+		locomo_frontlight_set(locomolcd_dev, 194, 1, 161);
+		break;
 	default:
 		return -ENODEV;
 	}
@@ -141,7 +152,7 @@ static int locomolcd_get_intensity(struct backlight_device *bd)
 	return current_intensity;
 }
 
-static struct backlight_ops locomobl_data = {
+static const struct backlight_ops locomobl_data = {
 	.get_brightness = locomolcd_get_intensity,
 	.update_status  = locomolcd_set_intensity,
 };
@@ -167,6 +178,7 @@ static int locomolcd_resume(struct locomo_dev *dev)
 
 static int locomolcd_probe(struct locomo_dev *ldev)
 {
+	struct backlight_properties props;
 	unsigned long flags;
 
 	local_irq_save(flags);
@@ -174,21 +186,27 @@ static int locomolcd_probe(struct locomo_dev *ldev)
 
 	locomo_gpio_set_dir(ldev->dev.parent, LOCOMO_GPIO_FL_VR, 0);
 
-	/* the poodle_lcd_power function is called for the first time
+	/*
+	 * the poodle_lcd_power function is called for the first time
 	 * from fs_initcall, which is before locomo is activated.
-	 * We need to recall poodle_lcd_power here*/
+	 * We need to recall poodle_lcd_power here
+	 */
 	if (machine_is_poodle())
 		locomolcd_power(1);
 
 	local_irq_restore(flags);
 
-	locomolcd_bl_device = backlight_device_register("locomo-bl", &ldev->dev, NULL, &locomobl_data);
+	memset(&props, 0, sizeof(struct backlight_properties));
+	props.type = BACKLIGHT_RAW;
+	props.max_brightness = 4;
+	locomolcd_bl_device = backlight_device_register("locomo-bl",
+							&ldev->dev, NULL,
+							&locomobl_data, &props);
 
-	if (IS_ERR (locomolcd_bl_device))
-		return PTR_ERR (locomolcd_bl_device);
+	if (IS_ERR(locomolcd_bl_device))
+		return PTR_ERR(locomolcd_bl_device);
 
 	/* Set up frontlight so that screen is readable */
-	locomolcd_bl_device->props.max_brightness = 4,
 	locomolcd_bl_device->props.brightness = 2;
 	locomolcd_set_intensity(locomolcd_bl_device);
 
@@ -221,17 +239,9 @@ static struct locomo_driver poodle_lcd_driver = {
 	.resume = locomolcd_resume,
 };
 
-
 static int __init locomolcd_init(void)
 {
-	int ret = locomo_driver_register(&poodle_lcd_driver);
-	if (ret)
-		return ret;
-
-#ifdef CONFIG_SA1100_COLLIE
-	sa1100fb_lcd_power = locomolcd_power;
-#endif
-	return 0;
+	return locomo_driver_register(&poodle_lcd_driver);
 }
 
 static void __exit locomolcd_exit(void)
@@ -242,6 +252,6 @@ static void __exit locomolcd_exit(void)
 module_init(locomolcd_init);
 module_exit(locomolcd_exit);
 
-MODULE_AUTHOR("John Lenz <lenz@cs.wisc.edu>, Pavel Machek <pavel@suse.cz>");
+MODULE_AUTHOR("John Lenz <lenz@cs.wisc.edu>, Pavel Machek <pavel@ucw.cz>");
 MODULE_DESCRIPTION("Collie LCD driver");
 MODULE_LICENSE("GPL");

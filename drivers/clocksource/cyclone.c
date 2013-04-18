@@ -7,7 +7,7 @@
 #include <asm/pgtable.h>
 #include <asm/io.h>
 
-#include "mach_timer.h"
+#include <asm/mach_timer.h>
 
 #define CYCLONE_CBAR_ADDR	0xFEB00CD0	/* base address ptr */
 #define CYCLONE_PMCC_OFFSET	0x51A0		/* offset to control register */
@@ -19,7 +19,7 @@
 int use_cyclone = 0;
 static void __iomem *cyclone_ptr;
 
-static cycle_t read_cyclone(void)
+static cycle_t read_cyclone(struct clocksource *cs)
 {
 	return (cycle_t)readl(cyclone_ptr);
 }
@@ -29,8 +29,6 @@ static struct clocksource clocksource_cyclone = {
 	.rating		= 250,
 	.read		= read_cyclone,
 	.mask		= CYCLONE_TIMER_MASK,
-	.mult		= 10,
-	.shift		= 0,
 	.flags		= CLOCK_SOURCE_IS_CONTINUOUS,
 };
 
@@ -57,11 +55,11 @@ static int __init init_cyclone_clocksource(void)
 	}
 	/* even on 64bit systems, this is only 32bits: */
 	base = readl(reg);
+	iounmap(reg);
 	if (!base) {
 		printk(KERN_ERR "Summit chipset: Could not find valid CBAR value.\n");
 		return -ENODEV;
 	}
-	iounmap(reg);
 
 	/* setup PMCC: */
 	offset = base + CYCLONE_PMCC_OFFSET;
@@ -108,12 +106,8 @@ static int __init init_cyclone_clocksource(void)
 	}
 	cyclone_ptr = cyclone_timer;
 
-	/* sort out mult/shift values: */
-	clocksource_cyclone.shift = 22;
-	clocksource_cyclone.mult = clocksource_hz2mult(CYCLONE_TIMER_FREQ,
-						clocksource_cyclone.shift);
-
-	return clocksource_register(&clocksource_cyclone);
+	return clocksource_register_hz(&clocksource_cyclone,
+					CYCLONE_TIMER_FREQ);
 }
 
 arch_initcall(init_cyclone_clocksource);

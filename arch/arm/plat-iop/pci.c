@@ -17,11 +17,10 @@
 #include <linux/mm.h>
 #include <linux/init.h>
 #include <linux/ioport.h>
-#include <asm/io.h>
+#include <linux/io.h>
 #include <asm/irq.h>
 #include <asm/signal.h>
-#include <asm/system.h>
-#include <asm/hardware.h>
+#include <mach/hardware.h>
 #include <asm/mach/pci.h>
 #include <asm/hardware/iop3xx.h>
 
@@ -161,7 +160,7 @@ iop3xx_write_config(struct pci_bus *bus, unsigned int devfn, int where,
 	return PCIBIOS_SUCCESSFUL;
 }
 
-static struct pci_ops iop3xx_ops = {
+struct pci_ops iop3xx_ops = {
 	.read	= iop3xx_read_config,
 	.write	= iop3xx_write_config,
 };
@@ -193,35 +192,26 @@ int iop3xx_pci_setup(int nr, struct pci_sys_data *sys)
 	if (nr != 0)
 		return 0;
 
-	res = kzalloc(2 * sizeof(struct resource), GFP_KERNEL);
+	res = kzalloc(sizeof(struct resource), GFP_KERNEL);
 	if (!res)
 		panic("PCI: unable to alloc resources");
 
-	res[0].start = IOP3XX_PCI_LOWER_IO_PA;
-	res[0].end   = IOP3XX_PCI_LOWER_IO_PA + IOP3XX_PCI_IO_WINDOW_SIZE - 1;
-	res[0].name  = "IOP3XX PCI I/O Space";
-	res[0].flags = IORESOURCE_IO;
-	request_resource(&ioport_resource, &res[0]);
+	res->start = IOP3XX_PCI_LOWER_MEM_PA;
+	res->end   = IOP3XX_PCI_LOWER_MEM_PA + IOP3XX_PCI_MEM_WINDOW_SIZE - 1;
+	res->name  = "IOP3XX PCI Memory Space";
+	res->flags = IORESOURCE_MEM;
+	request_resource(&iomem_resource, res);
 
-	res[1].start = IOP3XX_PCI_LOWER_MEM_PA;
-	res[1].end   = IOP3XX_PCI_LOWER_MEM_PA + IOP3XX_PCI_MEM_WINDOW_SIZE - 1;
-	res[1].name  = "IOP3XX PCI Memory Space";
-	res[1].flags = IORESOURCE_MEM;
-	request_resource(&iomem_resource, &res[1]);
+	/*
+	 * Use whatever translation is already setup.
+	 */
+	sys->mem_offset = IOP3XX_PCI_LOWER_MEM_PA - *IOP3XX_OMWTVR0;
 
-	sys->mem_offset = IOP3XX_PCI_LOWER_MEM_PA - IOP3XX_PCI_LOWER_MEM_BA;
-	sys->io_offset  = IOP3XX_PCI_LOWER_IO_PA - IOP3XX_PCI_LOWER_IO_BA;
+	pci_add_resource_offset(&sys->resources, res, sys->mem_offset);
 
-	sys->resource[0] = &res[0];
-	sys->resource[1] = &res[1];
-	sys->resource[2] = NULL;
+	pci_ioremap_io(0, IOP3XX_PCI_LOWER_IO_PA);
 
 	return 1;
-}
-
-struct pci_bus *iop3xx_pci_scan_bus(int nr, struct pci_sys_data *sys)
-{
-	return pci_scan_bus(sys->busnr, &iop3xx_ops, sys);
 }
 
 void __init iop3xx_atu_setup(void)
@@ -250,11 +240,12 @@ void __init iop3xx_atu_setup(void)
 	*IOP3XX_IATVR2 = PHYS_OFFSET;
 
 	/* Outbound window 0 */
-	*IOP3XX_OMWTVR0 = IOP3XX_PCI_LOWER_MEM_PA;
+	*IOP3XX_OMWTVR0 = IOP3XX_PCI_LOWER_MEM_BA;
 	*IOP3XX_OUMWTVR0 = 0;
 
 	/* Outbound window 1 */
-	*IOP3XX_OMWTVR1 = IOP3XX_PCI_LOWER_MEM_PA + IOP3XX_PCI_MEM_WINDOW_SIZE;
+	*IOP3XX_OMWTVR1 = IOP3XX_PCI_LOWER_MEM_BA +
+			  IOP3XX_PCI_MEM_WINDOW_SIZE / 2;
 	*IOP3XX_OUMWTVR1 = 0;
 
 	/* BAR 3 ( Disabled ) */
@@ -265,7 +256,7 @@ void __init iop3xx_atu_setup(void)
 
 	/* Setup the I/O Bar
 	 */
-	*IOP3XX_OIOWTVR = IOP3XX_PCI_LOWER_IO_PA;;
+	*IOP3XX_OIOWTVR = IOP3XX_PCI_LOWER_IO_BA;
 
 	/* Enable inbound and outbound cycles
 	 */
@@ -322,32 +313,59 @@ void __init iop3xx_atu_disable(void)
 /* Flag to determine whether the ATU is initialized and the PCI bus scanned */
 int init_atu;
 
-void __init iop3xx_pci_preinit(void)
+int iop3xx_get_init_atu(void) {
+	/* check if default has been overridden */
+	if (init_atu != IOP3XX_INIT_ATU_DEFAULT)
+		return init_atu;
+	else
+		return IOP3XX_INIT_ATU_DISABLE;
+}
+
+static void __init iop3xx_atu_debug(void)
+{
+	DBG("PCI: Intel IOP3xx PCI init.\n");
+	DBG("PCI: Outbound memory window 0: PCI 0x%08x%08x\n",
+		*IOP3XX_OUMWTVR0, *IOP3XX_OMWTVR0);
+	DBG("PCI: Outbound memory window 1: PCI 0x%08x%08x\n",
+		*IOP3XX_OUMWTVR1, *IOP3XX_OMWTVR1);
+	DBG("PCI: Outbound IO window: PCI 0x%08x\n",
+		*IOP3XX_OIOWTVR);
+
+	DBG("PCI: Inbound memory window 0: PCI 0x%08x%08x 0x%08x -> 0x%08x\n",
+		*IOP3XX_IAUBAR0, *IOP3XX_IABAR0, *IOP3XX_IALR0, *IOP3XX_IATVR0);
+	DBG("PCI: Inbound memory window 1: PCI 0x%08x%08x 0x%08x\n",
+		*IOP3XX_IAUBAR1, *IOP3XX_IABAR1, *IOP3XX_IALR1);
+	DBG("PCI: Inbound memory window 2: PCI 0x%08x%08x 0x%08x -> 0x%08x\n",
+		*IOP3XX_IAUBAR2, *IOP3XX_IABAR2, *IOP3XX_IALR2, *IOP3XX_IATVR2);
+	DBG("PCI: Inbound memory window 3: PCI 0x%08x%08x 0x%08x -> 0x%08x\n",
+		*IOP3XX_IAUBAR3, *IOP3XX_IABAR3, *IOP3XX_IALR3, *IOP3XX_IATVR3);
+
+	DBG("PCI: Expansion ROM window: PCI 0x%08x%08x 0x%08x -> 0x%08x\n",
+		0, *IOP3XX_ERBAR, *IOP3XX_ERLR, *IOP3XX_ERTVR);
+
+	DBG("ATU: IOP3XX_ATUCMD=0x%04x\n", *IOP3XX_ATUCMD);
+	DBG("ATU: IOP3XX_ATUCR=0x%08x\n", *IOP3XX_ATUCR);
+
+	hook_fault_code(16+6, iop3xx_pci_abort, SIGBUS, 0, "imprecise external abort");
+}
+
+/* for platforms that might be host-bus-adapters */
+void __init iop3xx_pci_preinit_cond(void)
 {
 	if (iop3xx_get_init_atu() == IOP3XX_INIT_ATU_ENABLE) {
 		iop3xx_atu_disable();
 		iop3xx_atu_setup();
+		iop3xx_atu_debug();
 	}
+}
 
-	DBG("PCI:  Intel 803xx PCI init code.\n");
-	DBG("ATU: IOP3XX_ATUCMD=0x%04x\n", *IOP3XX_ATUCMD);
-	DBG("ATU: IOP3XX_OMWTVR0=0x%04x, IOP3XX_OIOWTVR=0x%04x\n",
-			*IOP3XX_OMWTVR0,
-			*IOP3XX_OIOWTVR);
-	DBG("ATU: IOP3XX_ATUCR=0x%08x\n", *IOP3XX_ATUCR);
-	DBG("ATU: IOP3XX_IABAR0=0x%08x IOP3XX_IALR0=0x%08x IOP3XX_IATVR0=%08x\n",
-			*IOP3XX_IABAR0, *IOP3XX_IALR0, *IOP3XX_IATVR0);
-	DBG("ATU: IOP3XX_OMWTVR0=0x%08x\n", *IOP3XX_OMWTVR0);
-	DBG("ATU: IOP3XX_IABAR1=0x%08x IOP3XX_IALR1=0x%08x\n",
-			*IOP3XX_IABAR1, *IOP3XX_IALR1);
-	DBG("ATU: IOP3XX_ERBAR=0x%08x IOP3XX_ERLR=0x%08x IOP3XX_ERTVR=%08x\n",
-			*IOP3XX_ERBAR, *IOP3XX_ERLR, *IOP3XX_ERTVR);
-	DBG("ATU: IOP3XX_IABAR2=0x%08x IOP3XX_IALR2=0x%08x IOP3XX_IATVR2=%08x\n",
-			*IOP3XX_IABAR2, *IOP3XX_IALR2, *IOP3XX_IATVR2);
-	DBG("ATU: IOP3XX_IABAR3=0x%08x IOP3XX_IALR3=0x%08x IOP3XX_IATVR3=%08x\n",
-			*IOP3XX_IABAR3, *IOP3XX_IALR3, *IOP3XX_IATVR3);
+void __init iop3xx_pci_preinit(void)
+{
+	pcibios_min_mem = 0;
 
-	hook_fault_code(16+6, iop3xx_pci_abort, SIGBUS, "imprecise external abort");
+	iop3xx_atu_disable();
+	iop3xx_atu_setup();
+	iop3xx_atu_debug();
 }
 
 /* allow init_atu to be user overridden */
@@ -371,7 +389,7 @@ static int __init iop3xx_init_atu_setup(char *str)
 			default:
 				printk(KERN_DEBUG "\"%s\" malformed at "
 					    "character: \'%c\'",
-					    __FUNCTION__,
+					    __func__,
 					    *str);
 				*(str + 1) = '\0';
 			}

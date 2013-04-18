@@ -13,9 +13,12 @@
  *  Overview:
  *   This is a device driver for the NAND flash controller found on
  *   the AMD CS5535/CS5536 companion chipsets for the Geode processor.
+ *   mtd-id for command line partitioning is cs553x_nand_cs[0-3]
+ *   where 0-3 reflects the chip select for NAND.
  *
  */
 
+#include <linux/kernel.h>
 #include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/module.h>
@@ -234,15 +237,18 @@ static int __init cs553x_init_one(int cs, int mmio, unsigned long adr)
 	this->ecc.hwctl  = cs_enable_hwecc;
 	this->ecc.calculate = cs_calculate_ecc;
 	this->ecc.correct  = nand_correct_data;
+	this->ecc.strength = 1;
 
 	/* Enable the following for a flash based bad block table */
-	this->options = NAND_USE_FLASH_BBT | NAND_NO_AUTOINCR;
+	this->bbt_options = NAND_BBT_USE_FLASH;
 
-	/* Scan to find existance of the device */
+	/* Scan to find existence of the device */
 	if (nand_scan(new_mtd, 1)) {
 		err = -ENXIO;
 		goto out_ior;
 	}
+
+	new_mtd->name = kasprintf(GFP_KERNEL, "cs553x_nand_cs%d", cs);
 
 	cs553x_mtd[cs] = new_mtd;
 	goto out;
@@ -290,7 +296,7 @@ static int __init cs553x_init(void)
 
 	/* If it doesn't have the NAND controller enabled, abort */
 	rdmsrl(MSR_DIVIL_BALL_OPTS, val);
-	if (val & 1) {
+	if (val & PIN_OPT_IDE) {
 		printk(KERN_INFO "CS553x NAND controller: Flash I/O not enabled in MSR_DIVIL_BALL_OPTS.\n");
 		return -ENXIO;
 	}
@@ -306,9 +312,9 @@ static int __init cs553x_init(void)
 	   do mtdconcat etc. if we want to. */
 	for (i = 0; i < NR_CS553X_CONTROLLERS; i++) {
 		if (cs553x_mtd[i]) {
-			add_mtd_device(cs553x_mtd[i]);
-
 			/* If any devices registered, return success. Else the last error. */
+			mtd_device_parse_register(cs553x_mtd[i], NULL, NULL,
+						  NULL, 0);
 			err = 0;
 		}
 	}
@@ -328,16 +334,17 @@ static void __exit cs553x_cleanup(void)
 		void __iomem *mmio_base;
 
 		if (!mtd)
-			break;
+			continue;
 
 		this = cs553x_mtd[i]->priv;
 		mmio_base = this->IO_ADDR_R;
 
 		/* Release resources, unregister device */
 		nand_release(cs553x_mtd[i]);
+		kfree(cs553x_mtd[i]->name);
 		cs553x_mtd[i] = NULL;
 
-		/* unmap physical adress */
+		/* unmap physical address */
 		iounmap(mmio_base);
 
 		/* Free the MTD device structure */

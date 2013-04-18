@@ -1,7 +1,5 @@
 /* Driver for Lexar "Jumpshot" Compact Flash reader
  *
- * $Id: jumpshot.c,v 1.7 2002/02/25 00:40:13 mdharm Exp $
- *
  * jumpshot driver v0.1:
  *
  * First release
@@ -48,6 +46,7 @@
   */
 
 #include <linux/errno.h>
+#include <linux/module.h>
 #include <linux/slab.h>
 
 #include <scsi/scsi.h>
@@ -57,8 +56,60 @@
 #include "transport.h"
 #include "protocol.h"
 #include "debug.h"
-#include "jumpshot.h"
 
+
+MODULE_DESCRIPTION("Driver for Lexar \"Jumpshot\" Compact Flash reader");
+MODULE_AUTHOR("Jimmie Mayfield <mayfield+usb@sackheads.org>");
+MODULE_LICENSE("GPL");
+
+/*
+ * The table of devices
+ */
+#define UNUSUAL_DEV(id_vendor, id_product, bcdDeviceMin, bcdDeviceMax, \
+		    vendorName, productName, useProtocol, useTransport, \
+		    initFunction, flags) \
+{ USB_DEVICE_VER(id_vendor, id_product, bcdDeviceMin, bcdDeviceMax), \
+  .driver_info = (flags) }
+
+static struct usb_device_id jumpshot_usb_ids[] = {
+#	include "unusual_jumpshot.h"
+	{ }		/* Terminating entry */
+};
+MODULE_DEVICE_TABLE(usb, jumpshot_usb_ids);
+
+#undef UNUSUAL_DEV
+
+/*
+ * The flags table
+ */
+#define UNUSUAL_DEV(idVendor, idProduct, bcdDeviceMin, bcdDeviceMax, \
+		    vendor_name, product_name, use_protocol, use_transport, \
+		    init_function, Flags) \
+{ \
+	.vendorName = vendor_name,	\
+	.productName = product_name,	\
+	.useProtocol = use_protocol,	\
+	.useTransport = use_transport,	\
+	.initFunction = init_function,	\
+}
+
+static struct us_unusual_dev jumpshot_unusual_dev_list[] = {
+#	include "unusual_jumpshot.h"
+	{ }		/* Terminating entry */
+};
+
+#undef UNUSUAL_DEV
+
+
+struct jumpshot_info {
+   unsigned long   sectors;     /* total sector count */
+   unsigned long   ssize;       /* sector size in bytes */
+
+   /* the following aren't used yet */
+   unsigned char   sense_key;
+   unsigned long   sense_asc;   /* additional sense code */
+   unsigned long   sense_ascq;  /* additional sense code qualifier */
+};
 
 static inline int jumpshot_bulk_read(struct us_data *us,
 				     unsigned char *data, 
@@ -119,7 +170,8 @@ static int jumpshot_read_data(struct us_data *us,
 	unsigned char  thistime;
 	unsigned int totallen, alloclen;
 	int len, result;
-	unsigned int sg_idx = 0, sg_offset = 0;
+	unsigned int sg_offset = 0;
+	struct scatterlist *sg = NULL;
 
 	// we're working in LBA mode.  according to the ATA spec, 
 	// we can support up to 28-bit addressing.  I don't know if Jumpshot
@@ -170,7 +222,7 @@ static int jumpshot_read_data(struct us_data *us,
 
 		// Store the data in the transfer buffer
 		usb_stor_access_xfer_buf(buffer, len, us->srb,
-				 &sg_idx, &sg_offset, TO_XFER_BUF);
+				 &sg, &sg_offset, TO_XFER_BUF);
 
 		sector += thistime;
 		totallen -= len;
@@ -195,7 +247,8 @@ static int jumpshot_write_data(struct us_data *us,
 	unsigned char  thistime;
 	unsigned int totallen, alloclen;
 	int len, result, waitcount;
-	unsigned int sg_idx = 0, sg_offset = 0;
+	unsigned int sg_offset = 0;
+	struct scatterlist *sg = NULL;
 
 	// we're working in LBA mode.  according to the ATA spec, 
 	// we can support up to 28-bit addressing.  I don't know if Jumpshot
@@ -225,7 +278,7 @@ static int jumpshot_write_data(struct us_data *us,
 
 		// Get the data from the transfer buffer
 		usb_stor_access_xfer_buf(buffer, len, us->srb,
-				&sg_idx, &sg_offset, FROM_XFER_BUF);
+				&sg, &sg_offset, FROM_XFER_BUF);
 
 		command[0] = 0;
 		command[1] = thistime;
@@ -282,7 +335,7 @@ static int jumpshot_id_device(struct us_data *us,
 	unsigned char *reply;
 	int 	 rc;
 
-	if (!us || !info)
+	if (!info)
 		return USB_STOR_TRANSPORT_ERROR;
 
 	command[0] = 0xE0;
@@ -429,7 +482,7 @@ static void jumpshot_info_destructor(void *extra)
 
 // Transport for the Lexar 'Jumpshot'
 //
-int jumpshot_transport(struct scsi_cmnd * srb, struct us_data *us)
+static int jumpshot_transport(struct scsi_cmnd *srb, struct us_data *us)
 {
 	struct jumpshot_info *info;
 	int rc;
@@ -592,3 +645,39 @@ int jumpshot_transport(struct scsi_cmnd * srb, struct us_data *us)
 	info->sense_ascq = 0x00;
 	return USB_STOR_TRANSPORT_FAILED;
 }
+
+static int jumpshot_probe(struct usb_interface *intf,
+			 const struct usb_device_id *id)
+{
+	struct us_data *us;
+	int result;
+
+	result = usb_stor_probe1(&us, intf, id,
+			(id - jumpshot_usb_ids) + jumpshot_unusual_dev_list);
+	if (result)
+		return result;
+
+	us->transport_name  = "Lexar Jumpshot Control/Bulk";
+	us->transport = jumpshot_transport;
+	us->transport_reset = usb_stor_Bulk_reset;
+	us->max_lun = 1;
+
+	result = usb_stor_probe2(us);
+	return result;
+}
+
+static struct usb_driver jumpshot_driver = {
+	.name =		"ums-jumpshot",
+	.probe =	jumpshot_probe,
+	.disconnect =	usb_stor_disconnect,
+	.suspend =	usb_stor_suspend,
+	.resume =	usb_stor_resume,
+	.reset_resume =	usb_stor_reset_resume,
+	.pre_reset =	usb_stor_pre_reset,
+	.post_reset =	usb_stor_post_reset,
+	.id_table =	jumpshot_usb_ids,
+	.soft_unbind =	1,
+	.no_dynamic_id = 1,
+};
+
+module_usb_driver(jumpshot_driver);

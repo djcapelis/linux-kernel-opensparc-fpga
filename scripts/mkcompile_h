@@ -1,8 +1,12 @@
+#!/bin/sh
+
 TARGET=$1
 ARCH=$2
 SMP=$3
 PREEMPT=$4
 CC=$5
+
+vecho() { [ "${quiet}" = "silent_" ] || echo "$@" ; }
 
 # If compile.h exists already and we don't own autoconf.h
 # (i.e. we're not the same user who did make *config), don't
@@ -10,8 +14,8 @@ CC=$5
 # So "sudo make install" won't change the "compiled by <user>"
 # do "compiled by root"
 
-if [ -r $TARGET -a ! -O include/linux/autoconf.h ]; then
-  echo "  SKIPPED $TARGET"
+if [ -r $TARGET -a ! -O include/generated/autoconf.h ]; then
+  vecho "  SKIPPED $TARGET"
   exit 0
 fi
 
@@ -38,6 +42,16 @@ if [ -z "$KBUILD_BUILD_TIMESTAMP" ]; then
 else
 	TIMESTAMP=$KBUILD_BUILD_TIMESTAMP
 fi
+if test -z "$KBUILD_BUILD_USER"; then
+	LINUX_COMPILE_BY=$(whoami | sed 's/\\/\\\\/')
+else
+	LINUX_COMPILE_BY=$KBUILD_BUILD_USER
+fi
+if test -z "$KBUILD_BUILD_HOST"; then
+	LINUX_COMPILE_HOST=`hostname`
+else
+	LINUX_COMPILE_HOST=$KBUILD_BUILD_HOST
+fi
 
 UTS_VERSION="#$VERSION"
 CONFIG_FLAGS=""
@@ -48,7 +62,7 @@ UTS_VERSION="$UTS_VERSION $CONFIG_FLAGS $TIMESTAMP"
 # Truncate to maximum length
 
 UTS_LEN=64
-UTS_TRUNCATE="sed -e s/\(.\{1,$UTS_LEN\}\).*/\1/"
+UTS_TRUNCATE="cut -b -$UTS_LEN"
 
 # Generate a temporary compile.h
 
@@ -59,17 +73,8 @@ UTS_TRUNCATE="sed -e s/\(.\{1,$UTS_LEN\}\).*/\1/"
 
   echo \#define UTS_VERSION \"`echo $UTS_VERSION | $UTS_TRUNCATE`\"
 
-  echo \#define LINUX_COMPILE_TIME \"`date +%T`\"
-  echo \#define LINUX_COMPILE_BY \"`whoami`\"
-  echo \#define LINUX_COMPILE_HOST \"`hostname | $UTS_TRUNCATE`\"
-
-  if [ -x /bin/dnsdomainname ]; then
-    echo \#define LINUX_COMPILE_DOMAIN \"`dnsdomainname | $UTS_TRUNCATE`\"
-  elif [ -x /bin/domainname ]; then
-    echo \#define LINUX_COMPILE_DOMAIN \"`domainname | $UTS_TRUNCATE`\"
-  else
-    echo \#define LINUX_COMPILE_DOMAIN
-  fi
+  echo \#define LINUX_COMPILE_BY \"`echo $LINUX_COMPILE_BY | $UTS_TRUNCATE`\"
+  echo \#define LINUX_COMPILE_HOST \"`echo $LINUX_COMPILE_HOST | $UTS_TRUNCATE`\"
 
   echo \#define LINUX_COMPILER \"`$CC -v 2>&1 | tail -n 1`\"
 ) > .tmpcompile
@@ -84,12 +89,12 @@ UTS_TRUNCATE="sed -e s/\(.\{1,$UTS_LEN\}\).*/\1/"
 # first line.
 
 if [ -r $TARGET ] && \
-      grep -v 'UTS_VERSION\|LINUX_COMPILE_TIME' $TARGET > .tmpver.1 && \
-      grep -v 'UTS_VERSION\|LINUX_COMPILE_TIME' .tmpcompile > .tmpver.2 && \
+      grep -v 'UTS_VERSION' $TARGET > .tmpver.1 && \
+      grep -v 'UTS_VERSION' .tmpcompile > .tmpver.2 && \
       cmp -s .tmpver.1 .tmpver.2; then
    rm -f .tmpcompile
 else
-   echo "  UPD     $TARGET"
+   vecho "  UPD     $TARGET"
    mv -f .tmpcompile $TARGET
 fi
 rm -f .tmpver.1 .tmpver.2

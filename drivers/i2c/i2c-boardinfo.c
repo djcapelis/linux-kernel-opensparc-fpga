@@ -1,5 +1,5 @@
 /*
- * i2c-boardinfo.h - collect pre-declarations of I2C devices
+ * i2c-boardinfo.c - collect pre-declarations of I2C devices
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -13,11 +13,15 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
+ * MA 02110-1301 USA.
  */
 
 #include <linux/kernel.h>
 #include <linux/i2c.h>
+#include <linux/slab.h>
+#include <linux/export.h>
+#include <linux/rwsem.h>
 
 #include "i2c-core.h"
 
@@ -25,7 +29,7 @@
 /* These symbols are exported ONLY FOR the i2c core.
  * No other users will be supported.
  */
-DEFINE_MUTEX(__i2c_board_lock);
+DECLARE_RWSEM(__i2c_board_lock);
 EXPORT_SYMBOL_GPL(__i2c_board_lock);
 
 LIST_HEAD(__i2c_board_list);
@@ -63,7 +67,7 @@ i2c_register_board_info(int busnum,
 {
 	int status;
 
-	mutex_lock(&__i2c_board_lock);
+	down_write(&__i2c_board_lock);
 
 	/* dynamic bus numbers will be assigned after the last static one */
 	if (busnum >= __i2c_first_dynamic_bus_num)
@@ -84,7 +88,7 @@ i2c_register_board_info(int busnum,
 		list_add_tail(&devinfo->list, &__i2c_board_list);
 	}
 
-	mutex_unlock(&__i2c_board_lock);
+	up_write(&__i2c_board_lock);
 
 	return status;
 }

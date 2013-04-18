@@ -17,7 +17,6 @@
 #include <linux/agp_backend.h>
 #include <linux/fb.h>
 #include <linux/i2c.h>
-#include <linux/i2c-id.h>
 #include <linux/i2c-algo-bit.h>
 #include <video/vga.h>
 
@@ -138,7 +137,7 @@
 #define DRAM_ON                     0x08            
 #define DRAM_OFF                    0xE7
 #define PG_ENABLE_MASK              0x01
-#define RING_SIZE_MASK              (RINGBUFFER_SIZE - 1);
+#define RING_SIZE_MASK              (RINGBUFFER_SIZE - 1)
 
 /* defines for restoring registers partially */
 #define ADDR_MAP_MASK               (0x07 << 5)
@@ -266,7 +265,7 @@ struct i810fb_par {
 	struct i810fb_i2c_chan   chan[3];
 	struct mutex		 open_lock;
 	unsigned int		 use_count;
-	u32 pseudo_palette[17];
+	u32 pseudo_palette[16];
 	unsigned long mmio_start_phys;
 	u8 __iomem *mmio_start_virtual;
 	u8 *edid;

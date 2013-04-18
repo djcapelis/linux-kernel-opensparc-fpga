@@ -86,15 +86,13 @@ static int riva_gpio_getsda(void* data)
 	return val;
 }
 
-static int __devinit riva_setup_i2c_bus(struct riva_i2c_chan *chan,
-					const char *name,
-					unsigned int i2c_class)
+static int riva_setup_i2c_bus(struct riva_i2c_chan *chan, const char *name,
+			      unsigned int i2c_class)
 {
 	int rc;
 
 	strcpy(chan->adapter.name, name);
 	chan->adapter.owner		= THIS_MODULE;
-	chan->adapter.id		= I2C_HW_B_RIVA;
 	chan->adapter.class		= i2c_class;
 	chan->adapter.algo_data		= &chan->algo;
 	chan->adapter.dev.parent	= &chan->par->pdev->dev;
@@ -125,7 +123,7 @@ static int __devinit riva_setup_i2c_bus(struct riva_i2c_chan *chan,
 	return rc;
 }
 
-void __devinit riva_create_i2c_busses(struct riva_par *par)
+void riva_create_i2c_busses(struct riva_par *par)
 {
 	par->chan[0].par	= par;
 	par->chan[1].par	= par;
@@ -151,7 +149,7 @@ void riva_delete_i2c_busses(struct riva_par *par)
 	}
 }
 
-int __devinit riva_probe_i2c_connector(struct riva_par *par, int conn, u8 **out_edid)
+int riva_probe_i2c_connector(struct riva_par *par, int conn, u8 **out_edid)
 {
 	u8 *edid = NULL;
 

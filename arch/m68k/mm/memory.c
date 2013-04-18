@@ -9,15 +9,14 @@
 #include <linux/kernel.h>
 #include <linux/string.h>
 #include <linux/types.h>
-#include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/pagemap.h>
+#include <linux/gfp.h>
 
 #include <asm/setup.h>
 #include <asm/segment.h>
 #include <asm/page.h>
 #include <asm/pgalloc.h>
-#include <asm/system.h>
 #include <asm/traps.h>
 #include <asm/machdep.h>
 
@@ -203,7 +202,9 @@ static inline void pushcl040(unsigned long paddr)
 
 void cache_clear (unsigned long paddr, int len)
 {
-    if (CPU_IS_040_OR_060) {
+    if (CPU_IS_COLDFIRE) {
+	clear_cf_bcache(0, DCACHE_MAX_ADDR);
+    } else if (CPU_IS_040_OR_060) {
 	int tmp;
 
 	/*
@@ -250,7 +251,9 @@ EXPORT_SYMBOL(cache_clear);
 
 void cache_push (unsigned long paddr, int len)
 {
-    if (CPU_IS_040_OR_060) {
+    if (CPU_IS_COLDFIRE) {
+	flush_cf_bcache(0, DCACHE_MAX_ADDR);
+    } else if (CPU_IS_040_OR_060) {
 	int tmp = PAGE_SIZE;
 
 	/*

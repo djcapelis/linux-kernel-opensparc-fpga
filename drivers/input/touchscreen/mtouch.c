@@ -151,8 +151,8 @@ static int mtouch_connect(struct serio *serio, struct serio_driver *drv)
 	input_dev->id.product = 0;
 	input_dev->id.version = 0x0100;
 	input_dev->dev.parent = &serio->dev;
-	input_dev->evbit[0] = BIT(EV_KEY) | BIT(EV_ABS);
-	input_dev->keybit[LONG(BTN_TOUCH)] = BIT(BTN_TOUCH);
+	input_dev->evbit[0] = BIT_MASK(EV_KEY) | BIT_MASK(EV_ABS);
+	input_dev->keybit[BIT_WORD(BTN_TOUCH)] = BIT_MASK(BTN_TOUCH);
 	input_set_abs_params(mtouch->dev, ABS_X, MTOUCH_MIN_XC, MTOUCH_MAX_XC, 0, 0);
 	input_set_abs_params(mtouch->dev, ABS_Y, MTOUCH_MIN_YC, MTOUCH_MAX_YC, 0, 0);
 
@@ -202,19 +202,4 @@ static struct serio_driver mtouch_drv = {
 	.disconnect	= mtouch_disconnect,
 };
 
-/*
- * The functions for inserting/removing us as a module.
- */
-
-static int __init mtouch_init(void)
-{
-	return serio_register_driver(&mtouch_drv);
-}
-
-static void __exit mtouch_exit(void)
-{
-	serio_unregister_driver(&mtouch_drv);
-}
-
-module_init(mtouch_init);
-module_exit(mtouch_exit);
+module_serio_driver(mtouch_drv);

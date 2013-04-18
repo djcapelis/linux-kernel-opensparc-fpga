@@ -1,6 +1,6 @@
 /*
  *  Driver for SoundBlaster 1.0/2.0/Pro soundcards and compatible
- *  Copyright (c) by Jaroslav Kysela <perex@suse.cz>
+ *  Copyright (c) by Jaroslav Kysela <perex@perex.cz>
  *
  *
  *   This program is free software; you can redistribute it and/or modify
@@ -19,26 +19,24 @@
  *
  */
 
-#include <sound/driver.h>
 #include <linux/init.h>
 #include <linux/err.h>
 #include <linux/isa.h>
-#include <linux/slab.h>
 #include <linux/ioport.h>
-#include <linux/moduleparam.h>
+#include <linux/module.h>
 #include <sound/core.h>
 #include <sound/sb.h>
 #include <sound/opl3.h>
 #include <sound/initval.h>
 
-MODULE_AUTHOR("Jaroslav Kysela <perex@suse.cz>");
+MODULE_AUTHOR("Jaroslav Kysela <perex@perex.cz>");
 MODULE_DESCRIPTION("Sound Blaster 1.0/2.0/Pro");
 MODULE_LICENSE("GPL");
 MODULE_SUPPORTED_DEVICE("{{Creative Labs,SB 1.0/SB 2.0/SB Pro}}");
 
 static int index[SNDRV_CARDS] = SNDRV_DEFAULT_IDX;	/* Index 0-MAX */
 static char *id[SNDRV_CARDS] = SNDRV_DEFAULT_STR;	/* ID for this card */
-static int enable[SNDRV_CARDS] = SNDRV_DEFAULT_ENABLE;	/* Enable this card */
+static bool enable[SNDRV_CARDS] = SNDRV_DEFAULT_ENABLE;	/* Enable this card */
 static long port[SNDRV_CARDS] = SNDRV_DEFAULT_PORT;	/* 0x220,0x240,0x260 */
 static int irq[SNDRV_CARDS] = SNDRV_DEFAULT_IRQ;	/* 5,7,9,10 */
 static int dma8[SNDRV_CARDS] = SNDRV_DEFAULT_DMA;	/* 1,3 */
@@ -74,29 +72,29 @@ static irqreturn_t snd_sb8_interrupt(int irq, void *dev_id)
 
 static void snd_sb8_free(struct snd_card *card)
 {
-	struct snd_sb8 *acard = (struct snd_sb8 *)card->private_data;
+	struct snd_sb8 *acard = card->private_data;
 
 	if (acard == NULL)
 		return;
 	release_and_free_resource(acard->fm_res);
 }
 
-static int __devinit snd_sb8_match(struct device *pdev, unsigned int dev)
+static int snd_sb8_match(struct device *pdev, unsigned int dev)
 {
 	if (!enable[dev])
 		return 0;
 	if (irq[dev] == SNDRV_AUTO_IRQ) {
-		snd_printk(KERN_ERR "%s: please specify irq\n", pdev->bus_id);
+		dev_err(pdev, "please specify irq\n");
 		return 0;
 	}
 	if (dma8[dev] == SNDRV_AUTO_DMA) {
-		snd_printk(KERN_ERR "%s: please specify dma8\n", pdev->bus_id);
+		dev_err(pdev, "please specify dma8\n");
 		return 0;
 	}
 	return 1;
 }
 
-static int __devinit snd_sb8_probe(struct device *pdev, unsigned int dev)
+static int snd_sb8_probe(struct device *pdev, unsigned int dev)
 {
 	struct snd_sb *chip;
 	struct snd_card *card;
@@ -104,10 +102,10 @@ static int __devinit snd_sb8_probe(struct device *pdev, unsigned int dev)
 	struct snd_opl3 *opl3;
 	int err;
 
-	card = snd_card_new(index[dev], id[dev], THIS_MODULE,
-			    sizeof(struct snd_sb8));
-	if (card == NULL)
-		return -ENOMEM;
+	err = snd_card_create(index[dev], id[dev], THIS_MODULE,
+			      sizeof(struct snd_sb8), &card);
+	if (err < 0)
+		return err;
 	acard = card->private_data;
 	card->private_free = snd_sb8_free;
 
@@ -141,8 +139,10 @@ static int __devinit snd_sb8_probe(struct device *pdev, unsigned int dev)
 				break;
 			}
 		}
-		if (i >= ARRAY_SIZE(possible_ports))
+		if (i >= ARRAY_SIZE(possible_ports)) {
+			err = -EINVAL;
 			goto _err;
+		}
 	}
 	acard->chip = chip;
 			
@@ -205,7 +205,7 @@ static int __devinit snd_sb8_probe(struct device *pdev, unsigned int dev)
 	return err;
 }
 
-static int __devexit snd_sb8_remove(struct device *pdev, unsigned int dev)
+static int snd_sb8_remove(struct device *pdev, unsigned int dev)
 {
 	snd_card_free(dev_get_drvdata(pdev));
 	dev_set_drvdata(pdev, NULL);
@@ -244,7 +244,7 @@ static int snd_sb8_resume(struct device *dev, unsigned int n)
 static struct isa_driver snd_sb8_driver = {
 	.match		= snd_sb8_match,
 	.probe		= snd_sb8_probe,
-	.remove		= __devexit_p(snd_sb8_remove),
+	.remove		= snd_sb8_remove,
 #ifdef CONFIG_PM
 	.suspend	= snd_sb8_suspend,
 	.resume		= snd_sb8_resume,

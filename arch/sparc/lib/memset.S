@@ -60,11 +60,10 @@
         .globl  __bzero_begin
 __bzero_begin:
 
-	.globl	__bzero, __memset, 
+	.globl	__bzero
 	.globl	memset
 	.globl	__memset_start, __memset_end
 __memset_start:
-__memset:
 memset:
 	and	%o1, 0xff, %g3
 	sll	%g3, 8, %g2
@@ -162,7 +161,7 @@ __bzero:
 8:
 	 add	%o0, 1, %o0
 	subcc	%o1, 1, %o1
-	bne,a	8b
+	bne	8b
 	 EX(stb	%g3, [%o0 - 1], add %o1, 1)
 0:
 	retl

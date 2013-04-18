@@ -12,11 +12,4 @@
 #include "bitops.h"
                 .text
 
-/*
- * Purpose  : Function to clear a bit
- * Prototype: int clear_bit(int bit, void *addr)
- */
-ENTRY(_clear_bit_be)
-		eor	r0, r0, #0x18		@ big endian byte ordering
-ENTRY(_clear_bit_le)
-	bitop	bic
+bitop	_clear_bit, bic

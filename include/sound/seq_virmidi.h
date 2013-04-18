@@ -4,7 +4,7 @@
 /*
  *  Virtual Raw MIDI client on Sequencer
  *  Copyright (c) 2000 by Takashi Iwai <tiwai@suse.de>,
- *                        Jaroslav Kysela <perex@suse.cz>
+ *                        Jaroslav Kysela <perex@perex.cz>
  *
  *   This program is free software; you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -22,8 +22,8 @@
  *
  */
 
-#include "rawmidi.h"
-#include "seq_midi_event.h"
+#include <sound/rawmidi.h>
+#include <sound/seq_midi_event.h>
 
 /*
  * device file instance:

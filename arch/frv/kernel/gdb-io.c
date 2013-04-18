@@ -19,7 +19,6 @@
 #include <linux/serial_reg.h>
 
 #include <asm/pgtable.h>
-#include <asm/system.h>
 #include <asm/irc-regs.h>
 #include <asm/timer-regs.h>
 #include <asm/gdb-stub.h>
@@ -171,11 +170,11 @@ int gdbstub_rx_char(unsigned char *_ch, int nonblock)
 		return -EINTR;
 	}
 	else if (st & (UART_LSR_FE|UART_LSR_OE|UART_LSR_PE)) {
-		gdbstub_proto("### GDB Rx Error (st=%02x) ###\n",st);
+		gdbstub_io("### GDB Rx Error (st=%02x) ###\n",st);
 		return -EIO;
 	}
 	else {
-		gdbstub_proto("### GDB Rx %02x (st=%02x) ###\n",ch,st);
+		gdbstub_io("### GDB Rx %02x (st=%02x) ###\n",ch,st);
 		*_ch = ch & 0x7f;
 		return 0;
 	}

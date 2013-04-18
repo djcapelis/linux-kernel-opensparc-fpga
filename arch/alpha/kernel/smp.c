@@ -16,6 +16,7 @@
 #include <linux/module.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
+#include <linux/err.h>
 #include <linux/threads.h>
 #include <linux/smp.h>
 #include <linux/interrupt.h>
@@ -26,10 +27,11 @@
 #include <linux/cache.h>
 #include <linux/profile.h>
 #include <linux/bitops.h>
+#include <linux/cpu.h>
 
 #include <asm/hwrpb.h>
 #include <asm/ptrace.h>
-#include <asm/atomic.h>
+#include <linux/atomic.h>
 
 #include <asm/io.h>
 #include <asm/irq.h>
@@ -61,24 +63,16 @@ static struct {
 enum ipi_message_type {
 	IPI_RESCHEDULE,
 	IPI_CALL_FUNC,
+	IPI_CALL_FUNC_SINGLE,
 	IPI_CPU_STOP,
 };
 
 /* Set to a secondary's cpuid when it comes online.  */
-static int smp_secondary_alive __initdata = 0;
-
-/* Which cpus ids came online.  */
-cpumask_t cpu_online_map;
-
-EXPORT_SYMBOL(cpu_online_map);
+static int smp_secondary_alive = 0;
 
 int smp_num_probed;		/* Internal processor count */
 int smp_num_cpus = 1;		/* Number that came online.  */
 EXPORT_SYMBOL(smp_num_cpus);
-
-extern void calibrate_delay(void);
-
-
 
 /*
  * Called by both boot and secondaries to move global data into
@@ -122,15 +116,16 @@ wait_boot_cpu_to_stop(int cpuid)
 /*
  * Where secondaries begin a life of C.
  */
-void __init
+void __cpuinit
 smp_callin(void)
 {
 	int cpuid = hard_smp_processor_id();
 
-	if (cpu_test_and_set(cpuid, cpu_online_map)) {
+	if (cpu_online(cpuid)) {
 		printk("??, cpu 0x%x already present??\n", cpuid);
 		BUG();
 	}
+	set_cpu_online(cpuid, true);
 
 	/* Turn on machine checks.  */
 	wrmces(7);
@@ -151,6 +146,9 @@ smp_callin(void)
 	atomic_inc(&init_mm.mm_count);
 	current->active_mm = &init_mm;
 
+	/* inform the notifiers about the new cpu */
+	notify_cpu_starting(cpuid);
+
 	/* Must have completely accurate bogos.  */
 	local_irq_enable();
 
@@ -168,12 +166,13 @@ smp_callin(void)
 	DBGS(("smp_callin: commencing CPU %d current %p active_mm %p\n",
 	      cpuid, current, current->active_mm));
 
+	preempt_disable();
 	/* Do nothing.  */
 	cpu_idle();
 }
 
 /* Wait until hwrpb->txrdy is clear for cpu.  Return -1 on timeout.  */
-static int __init
+static int
 wait_for_txrdy (unsigned long cpumask)
 {
 	unsigned long timeout;
@@ -196,7 +195,7 @@ wait_for_txrdy (unsigned long cpumask)
  * Send a message to a secondary's console.  "START" is one such
  * interesting message.  ;-)
  */
-static void __init
+static void __cpuinit
 send_secondary_console_msg(char *str, int cpuid)
 {
 	struct percpu_struct *cpu;
@@ -287,7 +286,7 @@ recv_secondary_console_msg(void)
 /*
  * Convince the console to have a secondary cpu begin execution.
  */
-static int __init
+static int __cpuinit
 secondary_cpu_start(int cpuid, struct task_struct *idle)
 {
 	struct percpu_struct *cpu;
@@ -358,24 +357,10 @@ secondary_cpu_start(int cpuid, struct task_struct *idle)
 /*
  * Bring one cpu online.
  */
-static int __init
-smp_boot_one_cpu(int cpuid)
+static int __cpuinit
+smp_boot_one_cpu(int cpuid, struct task_struct *idle)
 {
-	struct task_struct *idle;
 	unsigned long timeout;
-
-	/* Cook up an idler for this guy.  Note that the address we
-	   give to kernel_thread is irrelevant -- it's going to start
-	   where HWRPB.CPU_restart says to start.  But this gets all
-	   the other task-y sort of data structures set up like we
-	   wish.  We can't use kernel_thread since we must avoid
-	   rescheduling the child.  */
-	idle = fork_idle(cpuid);
-	if (IS_ERR(idle))
-		panic("failed fork for CPU %d", cpuid);
-
-	DBGS(("smp_boot_one_cpu: CPU %d state 0x%lx flags 0x%lx\n",
-	      cpuid, idle->state, idle->flags));
 
 	/* Signal the secondary to wait a moment.  */
 	smp_secondary_alive = -1;
@@ -438,8 +423,8 @@ setup_smp(void)
 				((char *)cpubase + i*hwrpb->processor_size);
 			if ((cpu->flags & 0x1cc) == 0x1cc) {
 				smp_num_probed++;
-				/* Assume here that "whami" == index */
-				cpu_set(i, cpu_present_map);
+				set_cpu_possible(i, true);
+				set_cpu_present(i, true);
 				cpu->pal_revision = boot_cpu_palrev;
 			}
 
@@ -452,8 +437,8 @@ setup_smp(void)
 		smp_num_probed = 1;
 	}
 
-	printk(KERN_INFO "SMP: %d CPUs probed -- cpu_present_map = %lx\n",
-	       smp_num_probed, cpu_present_map.bits[0]);
+	printk(KERN_INFO "SMP: %d CPUs probed -- cpu_present_mask = %lx\n",
+	       smp_num_probed, cpumask_bits(cpu_present_mask)[0]);
 }
 
 /*
@@ -472,7 +457,8 @@ smp_prepare_cpus(unsigned int max_cpus)
 
 	/* Nothing to do on a UP box, or when told not to.  */
 	if (smp_num_probed == 1 || max_cpus == 0) {
-		cpu_present_map = cpumask_of_cpu(boot_cpuid);
+		init_cpu_possible(cpumask_of(boot_cpuid));
+		init_cpu_present(cpumask_of(boot_cpuid));
 		printk(KERN_INFO "SMP mode deactivated.\n");
 		return;
 	}
@@ -482,15 +468,15 @@ smp_prepare_cpus(unsigned int max_cpus)
 	smp_num_cpus = smp_num_probed;
 }
 
-void __devinit
+void
 smp_prepare_boot_cpu(void)
 {
 }
 
-int __devinit
-__cpu_up(unsigned int cpu)
+int __cpuinit
+__cpu_up(unsigned int cpu, struct task_struct *tidle)
 {
-	smp_boot_one_cpu(cpu);
+	smp_boot_one_cpu(cpu, tidle);
 
 	return cpu_online(cpu) ? 0 : -ENOSYS;
 }
@@ -541,7 +527,7 @@ smp_percpu_timer_interrupt(struct pt_regs *regs)
 	set_irq_regs(old_regs);
 }
 
-int __init
+int
 setup_profiling_timer(unsigned int multiplier)
 {
 	return -EINVAL;
@@ -549,62 +535,17 @@ setup_profiling_timer(unsigned int multiplier)
 
 
 static void
-send_ipi_message(cpumask_t to_whom, enum ipi_message_type operation)
+send_ipi_message(const struct cpumask *to_whom, enum ipi_message_type operation)
 {
 	int i;
 
 	mb();
-	for_each_cpu_mask(i, to_whom)
+	for_each_cpu(i, to_whom)
 		set_bit(operation, &ipi_data[i].bits);
 
 	mb();
-	for_each_cpu_mask(i, to_whom)
+	for_each_cpu(i, to_whom)
 		wripir(i);
-}
-
-/* Structure and data for smp_call_function.  This is designed to 
-   minimize static memory requirements.  Plus it looks cleaner.  */
-
-struct smp_call_struct {
-	void (*func) (void *info);
-	void *info;
-	long wait;
-	atomic_t unstarted_count;
-	atomic_t unfinished_count;
-};
-
-static struct smp_call_struct *smp_call_function_data;
-
-/* Atomicly drop data into a shared pointer.  The pointer is free if
-   it is initially locked.  If retry, spin until free.  */
-
-static int
-pointer_lock (void *lock, void *data, int retry)
-{
-	void *old, *tmp;
-
-	mb();
- again:
-	/* Compare and swap with zero.  */
-	asm volatile (
-	"1:	ldq_l	%0,%1\n"
-	"	mov	%3,%2\n"
-	"	bne	%0,2f\n"
-	"	stq_c	%2,%1\n"
-	"	beq	%2,1b\n"
-	"2:"
-	: "=&r"(old), "=m"(*(void **)lock), "=&r"(tmp)
-	: "r"(data)
-	: "memory");
-
-	if (old == 0)
-		return 0;
-	if (! retry)
-		return -EBUSY;
-
-	while (*(void **)lock)
-		barrier();
-	goto again;
 }
 
 void
@@ -631,36 +572,16 @@ handle_ipi(struct pt_regs *regs)
 
 		switch (which) {
 		case IPI_RESCHEDULE:
-			/* Reschedule callback.  Everything to be done
-			   is done by the interrupt return path.  */
+			scheduler_ipi();
 			break;
 
 		case IPI_CALL_FUNC:
-		    {
-			struct smp_call_struct *data;
-			void (*func)(void *info);
-			void *info;
-			int wait;
-
-			data = smp_call_function_data;
-			func = data->func;
-			info = data->info;
-			wait = data->wait;
-
-			/* Notify the sending CPU that the data has been
-			   received, and execution is about to begin.  */
-			mb();
-			atomic_dec (&data->unstarted_count);
-
-			/* At this point the structure may be gone unless
-			   wait is true.  */
-			(*func)(info);
-
-			/* Notify the sending CPU that the task is done.  */
-			mb();
-			if (wait) atomic_dec (&data->unfinished_count);
+			generic_smp_call_function_interrupt();
 			break;
-		    }
+
+		case IPI_CALL_FUNC_SINGLE:
+			generic_smp_call_function_single_interrupt();
+			break;
 
 		case IPI_CPU_STOP:
 			halt();
@@ -689,117 +610,31 @@ smp_send_reschedule(int cpu)
 		printk(KERN_WARNING
 		       "smp_send_reschedule: Sending IPI to self.\n");
 #endif
-	send_ipi_message(cpumask_of_cpu(cpu), IPI_RESCHEDULE);
+	send_ipi_message(cpumask_of(cpu), IPI_RESCHEDULE);
 }
 
 void
 smp_send_stop(void)
 {
-	cpumask_t to_whom = cpu_possible_map;
-	cpu_clear(smp_processor_id(), to_whom);
+	cpumask_t to_whom;
+	cpumask_copy(&to_whom, cpu_possible_mask);
+	cpumask_clear_cpu(smp_processor_id(), &to_whom);
 #ifdef DEBUG_IPI_MSG
 	if (hard_smp_processor_id() != boot_cpu_id)
 		printk(KERN_WARNING "smp_send_stop: Not on boot cpu.\n");
 #endif
-	send_ipi_message(to_whom, IPI_CPU_STOP);
+	send_ipi_message(&to_whom, IPI_CPU_STOP);
 }
 
-/*
- * Run a function on all other CPUs.
- *  <func>	The function to run. This must be fast and non-blocking.
- *  <info>	An arbitrary pointer to pass to the function.
- *  <retry>	If true, keep retrying until ready.
- *  <wait>	If true, wait until function has completed on other CPUs.
- *  [RETURNS]   0 on success, else a negative status code.
- *
- * Does not return until remote CPUs are nearly ready to execute <func>
- * or are or have executed.
- * You must not call this function with disabled interrupts or from a
- * hardware interrupt handler or from a bottom half handler.
- */
-
-int
-smp_call_function_on_cpu (void (*func) (void *info), void *info, int retry,
-			  int wait, cpumask_t to_whom)
+void arch_send_call_function_ipi_mask(const struct cpumask *mask)
 {
-	struct smp_call_struct data;
-	unsigned long timeout;
-	int num_cpus_to_call;
-	
-	/* Can deadlock when called with interrupts disabled */
-	WARN_ON(irqs_disabled());
-
-	data.func = func;
-	data.info = info;
-	data.wait = wait;
-
-	cpu_clear(smp_processor_id(), to_whom);
-	num_cpus_to_call = cpus_weight(to_whom);
-
-	atomic_set(&data.unstarted_count, num_cpus_to_call);
-	atomic_set(&data.unfinished_count, num_cpus_to_call);
-
-	/* Acquire the smp_call_function_data mutex.  */
-	if (pointer_lock(&smp_call_function_data, &data, retry))
-		return -EBUSY;
-
-	/* Send a message to the requested CPUs.  */
-	send_ipi_message(to_whom, IPI_CALL_FUNC);
-
-	/* Wait for a minimal response.  */
-	timeout = jiffies + HZ;
-	while (atomic_read (&data.unstarted_count) > 0
-	       && time_before (jiffies, timeout))
-		barrier();
-
-	/* If there's no response yet, log a message but allow a longer
-	 * timeout period -- if we get a response this time, log
-	 * a message saying when we got it.. 
-	 */
-	if (atomic_read(&data.unstarted_count) > 0) {
-		long start_time = jiffies;
-		printk(KERN_ERR "%s: initial timeout -- trying long wait\n",
-		       __FUNCTION__);
-		timeout = jiffies + 30 * HZ;
-		while (atomic_read(&data.unstarted_count) > 0
-		       && time_before(jiffies, timeout))
-			barrier();
-		if (atomic_read(&data.unstarted_count) <= 0) {
-			long delta = jiffies - start_time;
-			printk(KERN_ERR 
-			       "%s: response %ld.%ld seconds into long wait\n",
-			       __FUNCTION__, delta / HZ,
-			       (100 * (delta - ((delta / HZ) * HZ))) / HZ);
-		}
-	}
-
-	/* We either got one or timed out -- clear the lock. */
-	mb();
-	smp_call_function_data = NULL;
-
-	/* 
-	 * If after both the initial and long timeout periods we still don't
-	 * have a response, something is very wrong...
-	 */
-	BUG_ON(atomic_read (&data.unstarted_count) > 0);
-
-	/* Wait for a complete response, if needed.  */
-	if (wait) {
-		while (atomic_read (&data.unfinished_count) > 0)
-			barrier();
-	}
-
-	return 0;
+	send_ipi_message(mask, IPI_CALL_FUNC);
 }
-EXPORT_SYMBOL(smp_call_function_on_cpu);
 
-int
-smp_call_function (void (*func) (void *info), void *info, int retry, int wait)
+void arch_send_call_function_single_ipi(int cpu)
 {
-	return smp_call_function_on_cpu (func, info, retry, wait,
-					 cpu_online_map);
+	send_ipi_message(cpumask_of(cpu), IPI_CALL_FUNC_SINGLE);
 }
-EXPORT_SYMBOL(smp_call_function);
 
 static void
 ipi_imb(void *ignored)
@@ -811,7 +646,7 @@ void
 smp_imb(void)
 {
 	/* Must wait other processors to flush their icache before continue. */
-	if (on_each_cpu(ipi_imb, NULL, 1, 1))
+	if (on_each_cpu(ipi_imb, NULL, 1))
 		printk(KERN_CRIT "smp_imb: timed out\n");
 }
 EXPORT_SYMBOL(smp_imb);
@@ -827,7 +662,7 @@ flush_tlb_all(void)
 {
 	/* Although we don't have any data to pass, we do want to
 	   synchronize with the other processors.  */
-	if (on_each_cpu(ipi_flush_tlb_all, NULL, 1, 1)) {
+	if (on_each_cpu(ipi_flush_tlb_all, NULL, 1)) {
 		printk(KERN_CRIT "flush_tlb_all: timed out\n");
 	}
 }
@@ -864,7 +699,7 @@ flush_tlb_mm(struct mm_struct *mm)
 		}
 	}
 
-	if (smp_call_function(ipi_flush_tlb_mm, mm, 1, 1)) {
+	if (smp_call_function(ipi_flush_tlb_mm, mm, 1)) {
 		printk(KERN_CRIT "flush_tlb_mm: timed out\n");
 	}
 
@@ -917,7 +752,7 @@ flush_tlb_page(struct vm_area_struct *vma, unsigned long addr)
 	data.mm = mm;
 	data.addr = addr;
 
-	if (smp_call_function(ipi_flush_tlb_page, &data, 1, 1)) {
+	if (smp_call_function(ipi_flush_tlb_page, &data, 1)) {
 		printk(KERN_CRIT "flush_tlb_page: timed out\n");
 	}
 
@@ -969,7 +804,7 @@ flush_icache_user_range(struct vm_area_struct *vma, struct page *page,
 		}
 	}
 
-	if (smp_call_function(ipi_flush_icache_page, mm, 1, 1)) {
+	if (smp_call_function(ipi_flush_icache_page, mm, 1)) {
 		printk(KERN_CRIT "flush_icache_page: timed out\n");
 	}
 

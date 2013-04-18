@@ -45,6 +45,7 @@
 #include <linux/interrupt.h>
 #include <linux/module.h>
 #include <linux/stddef.h>
+#include <linux/slab.h>
 #include <linux/isapnp.h>
 #include <linux/pnp.h>
 #include <linux/spinlock.h>
@@ -118,9 +119,9 @@ ad1848_port_info;
 static struct address_info cfg;
 static int nr_ad1848_devs;
 
-static int deskpro_xl;
-static int deskpro_m;
-static int soundpro;
+static bool deskpro_xl;
+static bool deskpro_m;
+static bool soundpro;
 
 static volatile signed char irq2dev[17] = {
 	-1, -1, -1, -1, -1, -1, -1, -1,
@@ -176,7 +177,7 @@ static struct {
 #ifdef CONFIG_PNP
 static int isapnp	= 1;
 static int isapnpjump;
-static int reverse;
+static bool reverse;
 
 static int audio_activated;
 #else
@@ -280,7 +281,7 @@ static void wait_for_calibration(ad1848_info * devc)
 	while (timeout > 0 && (ad_read(devc, 11) & 0x20))
 		timeout--;
 	if (ad_read(devc, 11) & 0x20)
-		if ( (devc->model != MD_1845) || (devc->model != MD_1845_SSCAPE))
+		if ((devc->model != MD_1845) && (devc->model != MD_1845_SSCAPE))
 			printk(KERN_WARNING "ad1848: Auto calibration timed out(3).\n");
 }
 
@@ -457,7 +458,7 @@ static int ad1848_set_recmask(ad1848_info * devc, int mask)
 	return mask;
 }
 
-static void change_bits(ad1848_info * devc, unsigned char *regval,
+static void oss_change_bits(ad1848_info *devc, unsigned char *regval,
 			unsigned char *muteval, int dev, int chn, int newval)
 {
 	unsigned char mask;
@@ -515,10 +516,10 @@ static void ad1848_mixer_set_channel(ad1848_info *devc, int dev, int value, int 
 
 	if (muteregoffs != regoffs) {
 		muteval = ad_read(devc, muteregoffs);
-		change_bits(devc, &val, &muteval, dev, channel, value);
+		oss_change_bits(devc, &val, &muteval, dev, channel, value);
 	}
 	else
-		change_bits(devc, &val, &val, dev, channel, value);
+		oss_change_bits(devc, &val, &val, dev, channel, value);
 
 	spin_lock_irqsave(&devc->lock,flags);
 	ad_write(devc, regoffs, val);
@@ -715,7 +716,7 @@ static int ad1848_mixer_ioctl(int dev, unsigned int cmd, void __user *arg)
 				
 				default:
 					if (get_user(val, (int __user *)arg))
-					return -EFAULT;
+						return -EFAULT;
 					val = ad1848_mixer_set(devc, cmd & 0xff, val);
 					break;
 			} 
@@ -2107,7 +2108,7 @@ int ad1848_control(int cmd, int arg)
 	switch (cmd)
 	{
 		case AD1848_SET_XTAL:	/* Change clock frequency of AD1845 (only ) */
-			if (devc->model != MD_1845 || devc->model != MD_1845_SSCAPE)
+			if (devc->model != MD_1845 && devc->model != MD_1845_SSCAPE)
 				return -EINVAL;
 			spin_lock_irqsave(&devc->lock,flags);
 			ad_enter_MCE(devc);
@@ -2863,7 +2864,7 @@ static struct {
 	{NULL}
 };
 
-static struct isapnp_device_id id_table[] __devinitdata = {
+static struct isapnp_device_id id_table[] = {
 	{	ISAPNP_VENDOR('C','M','I'), ISAPNP_DEVICE(0x0001),
 		ISAPNP_VENDOR('@','@','@'), ISAPNP_FUNCTION(0x0001), 0 },
         {       ISAPNP_ANY_ID, ISAPNP_ANY_ID,

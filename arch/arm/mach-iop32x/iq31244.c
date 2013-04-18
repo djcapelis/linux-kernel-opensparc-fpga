@@ -21,13 +21,13 @@
 #include <linux/pci.h>
 #include <linux/pm.h>
 #include <linux/string.h>
-#include <linux/slab.h>
 #include <linux/serial_core.h>
 #include <linux/serial_8250.h>
 #include <linux/mtd/physmap.h>
 #include <linux/platform_device.h>
-#include <asm/hardware.h>
-#include <asm/io.h>
+#include <linux/io.h>
+#include <mach/hardware.h>
+#include <asm/cputype.h>
 #include <asm/irq.h>
 #include <asm/mach/arch.h>
 #include <asm/mach/map.h>
@@ -36,7 +36,7 @@
 #include <asm/mach-types.h>
 #include <asm/page.h>
 #include <asm/pgtable.h>
-#include <asm/arch/time.h>
+#include <mach/time.h>
 
 /*
  * Until March of 2007 iq31244 platforms and ep80219 platforms shared the
@@ -49,8 +49,7 @@ static int force_ep80219;
 
 static int is_80219(void)
 {
-	extern int processor_id;
-	return !!((processor_id & 0xffffffe0) == 0x69052e20);
+	return !!((read_cpuid_id() & 0xffffffe0) == 0x69052e20);
 }
 
 static int is_ep80219(void)
@@ -78,7 +77,6 @@ static void __init iq31244_timer_init(void)
 
 static struct sys_timer iq31244_timer = {
 	.init		= iq31244_timer_init,
-	.offset		= iop_gettimeoffset,
 };
 
 
@@ -105,7 +103,7 @@ void __init iq31244_map_io(void)
  * EP80219/IQ31244 PCI.
  */
 static int __init
-ep80219_pci_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
+ep80219_pci_map_irq(const struct pci_dev *dev, u8 slot, u8 pin)
 {
 	int irq;
 
@@ -132,16 +130,15 @@ ep80219_pci_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
 }
 
 static struct hw_pci ep80219_pci __initdata = {
-	.swizzle	= pci_std_swizzle,
 	.nr_controllers = 1,
+	.ops		= &iop3xx_ops,
 	.setup		= iop3xx_pci_setup,
 	.preinit	= iop3xx_pci_preinit,
-	.scan		= iop3xx_pci_scan_bus,
 	.map_irq	= ep80219_pci_map_irq,
 };
 
 static int __init
-iq31244_pci_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
+iq31244_pci_map_irq(const struct pci_dev *dev, u8 slot, u8 pin)
 {
 	int irq;
 
@@ -168,20 +165,18 @@ iq31244_pci_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
 }
 
 static struct hw_pci iq31244_pci __initdata = {
-	.swizzle	= pci_std_swizzle,
 	.nr_controllers = 1,
+	.ops		= &iop3xx_ops,
 	.setup		= iop3xx_pci_setup,
 	.preinit	= iop3xx_pci_preinit,
-	.scan		= iop3xx_pci_scan_bus,
 	.map_irq	= iq31244_pci_map_irq,
 };
 
 static int __init iq31244_pci_init(void)
 {
-	if (is_ep80219()) {
-		if (iop3xx_get_init_atu() == IOP3XX_INIT_ATU_ENABLE)
-			pci_common_init(&ep80219_pci);
-	} else if (machine_is_iq31244()) {
+	if (is_ep80219())
+		pci_common_init(&ep80219_pci);
+	else if (machine_is_iq31244()) {
 		if (is_80219()) {
 			printk("note: iq31244 board type has been selected\n");
 			printk("note: to select ep80219 operation:\n");
@@ -190,9 +185,7 @@ static int __init iq31244_pci_init(void)
 			printk("\t2/ update boot loader to pass"
 				" the ep80219 id: %d\n", MACH_TYPE_EP80219);
 		}
-
-		if (iop3xx_get_init_atu() == IOP3XX_INIT_ATU_ENABLE)
-			pci_common_init(&iq31244_pci);
+		pci_common_init(&iq31244_pci);
 	}
 
 	return 0;
@@ -298,9 +291,14 @@ static void __init iq31244_init_machine(void)
 	platform_device_register(&iop3xx_i2c1_device);
 	platform_device_register(&iq31244_flash_device);
 	platform_device_register(&iq31244_serial_device);
+	platform_device_register(&iop3xx_dma_0_channel);
+	platform_device_register(&iop3xx_dma_1_channel);
 
 	if (is_ep80219())
 		pm_power_off = ep80219_power_off;
+
+	if (!is_80219())
+		platform_device_register(&iop3xx_aau_channel);
 }
 
 static int __init force_ep80219_setup(char *str)
@@ -313,13 +311,12 @@ __setup("force_ep80219", force_ep80219_setup);
 
 MACHINE_START(IQ31244, "Intel IQ31244")
 	/* Maintainer: Intel Corp. */
-	.phys_io	= IQ31244_UART,
-	.io_pg_offst	= ((IQ31244_UART) >> 18) & 0xfffc,
-	.boot_params	= 0xa0000100,
+	.atag_offset	= 0x100,
 	.map_io		= iq31244_map_io,
 	.init_irq	= iop32x_init_irq,
 	.timer		= &iq31244_timer,
 	.init_machine	= iq31244_init_machine,
+	.restart	= iop3xx_restart,
 MACHINE_END
 
 /* There should have been an ep80219 machine identifier from the beginning.
@@ -329,11 +326,10 @@ MACHINE_END
  */
 MACHINE_START(EP80219, "Intel EP80219")
 	/* Maintainer: Intel Corp. */
-	.phys_io	= IQ31244_UART,
-	.io_pg_offst	= ((IQ31244_UART) >> 18) & 0xfffc,
-	.boot_params	= 0xa0000100,
+	.atag_offset	= 0x100,
 	.map_io		= iq31244_map_io,
 	.init_irq	= iop32x_init_irq,
 	.timer		= &iq31244_timer,
 	.init_machine	= iq31244_init_machine,
+	.restart	= iop3xx_restart,
 MACHINE_END

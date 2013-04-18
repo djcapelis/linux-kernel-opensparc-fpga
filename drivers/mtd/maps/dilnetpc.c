@@ -14,8 +14,6 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA
  *
- * $Id: dilnetpc.c,v 1.20 2005/11/07 11:14:26 gleixner Exp $
- *
  * The DIL/Net PC is a tiny embedded PC board made by SSV Embedded Systems
  * featuring the AMD Elan SC410 processor. There are two variants of this
  * board: DNP/1486 and ADNP/1486. The DNP version has 2 megs of flash
@@ -452,7 +450,7 @@ static int __init init_dnpc(void)
 	partition_info[2].mtdp = &lowlvl_parts[1];
 	partition_info[3].mtdp = &lowlvl_parts[3];
 
-	add_mtd_partitions(mymtd, partition_info, NUM_PARTITIONS);
+	mtd_device_register(mymtd, partition_info, NUM_PARTITIONS);
 
 	/*
 	** now create a virtual MTD device by concatenating the for partitions
@@ -465,7 +463,8 @@ static int __init init_dnpc(void)
 		** we do not supply mtd pointers in higlvl_partition_info, so
 		** add_mtd_partitions() will register the devices.
 		*/
-		add_mtd_partitions(merged_mtd, higlvl_partition_info, NUM_HIGHLVL_PARTITIONS);
+		mtd_device_register(merged_mtd, higlvl_partition_info,
+				    NUM_HIGHLVL_PARTITIONS);
 	}
 
 	return 0;
@@ -474,12 +473,12 @@ static int __init init_dnpc(void)
 static void __exit cleanup_dnpc(void)
 {
 	if(merged_mtd) {
-		del_mtd_partitions(merged_mtd);
+		mtd_device_unregister(merged_mtd);
 		mtd_concat_destroy(merged_mtd);
 	}
 
 	if (mymtd) {
-		del_mtd_partitions(mymtd);
+		mtd_device_unregister(mymtd);
 		map_destroy(mymtd);
 	}
 	if (dnpc_map.virt) {

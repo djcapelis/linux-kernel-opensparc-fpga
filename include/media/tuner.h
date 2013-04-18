@@ -21,12 +21,9 @@
 
 #ifndef _TUNER_H
 #define _TUNER_H
+#ifdef __KERNEL__
 
 #include <linux/videodev2.h>
-#include <linux/i2c.h>
-#include <media/tuner-types.h>
-
-extern int tuner_debug;
 
 #define ADDR_UNSET (255)
 
@@ -82,7 +79,7 @@ extern int tuner_debug;
 
 #define TUNER_HITACHI_NTSC		40
 #define TUNER_PHILIPS_PAL_MK		41
-#define TUNER_PHILIPS_ATSC		42
+#define TUNER_PHILIPS_FCV1236D		42
 #define TUNER_PHILIPS_FM1236_MK3	43
 
 #define TUNER_PHILIPS_4IN1		44	/* ATI TV Wonder Pro - Conexant */
@@ -119,11 +116,27 @@ extern int tuner_debug;
 #define TUNER_PHILIPS_TUV1236D		68	/* ATI HDTV Wonder */
 #define TUNER_TNF_5335MF                69	/* Sabrent Bt848   */
 #define TUNER_SAMSUNG_TCPN_2121P30A     70 	/* Hauppauge PVR-500MCE NTSC */
-#define TUNER_XCEIVE_XC3028		71
+#define TUNER_XC2028			71
 
 #define TUNER_THOMSON_FE6600		72	/* DViCO FusionHDTV DVB-T Hybrid */
 #define TUNER_SAMSUNG_TCPG_6121P30A     73 	/* Hauppauge PVR-500 PAL */
 #define TUNER_TDA9887                   74      /* This tuner should be used only internally */
+#define TUNER_TEA5761			75	/* Only FM Radio Tuner */
+#define TUNER_XC5000			76	/* Xceive Silicon Tuner */
+#define TUNER_TCL_MF02GIP_5N		77	/* TCL MF02GIP_5N */
+#define TUNER_PHILIPS_FMD1216MEX_MK3	78
+#define TUNER_PHILIPS_FM1216MK5		79
+#define TUNER_PHILIPS_FQ1216LME_MK3	80	/* Active loopthrough, no FM */
+
+#define TUNER_PARTSNIC_PTI_5NF05	81
+#define TUNER_PHILIPS_CU1216L           82
+#define TUNER_NXP_TDA18271		83
+#define TUNER_SONY_BTF_PXN01Z		84
+#define TUNER_PHILIPS_FQ1236_MK5	85	/* NTSC, TDA9885, no FM radio */
+#define TUNER_TENA_TNF_5337		86
+
+#define TUNER_XC4000			87	/* Xceive Silicon Tuner */
+#define TUNER_XC5000C			88	/* Xceive Silicon Tuner */
 
 /* tv card specific */
 #define TDA9887_PRESENT 		(1<<0)
@@ -147,15 +160,12 @@ extern int tuner_debug;
 #define TDA9887_AUTOMUTE 		(1<<18)
 #define TDA9887_GATING_18		(1<<19)
 #define TDA9887_GAIN_NORMAL		(1<<20)
-
-#ifdef __KERNEL__
+#define TDA9887_RIF_41_3		(1<<21)  /* radio IF1 41.3 vs 33.3 */
 
 enum tuner_mode {
-	T_UNINITIALIZED = 0,
 	T_RADIO		= 1 << V4L2_TUNER_RADIO,
 	T_ANALOG_TV     = 1 << V4L2_TUNER_ANALOG_TV,
-	T_DIGITAL_TV    = 1 << V4L2_TUNER_DIGITAL_TV,
-	T_STANDBY	= 1 << 31
+	/* Don't need to map V4L2_TUNER_DIGITAL_TV, as tuner-core won't use it */
 };
 
 /* Older boards only had a single tuner device. Nowadays multiple tuner
@@ -179,85 +189,9 @@ struct tuner_setup {
 	unsigned int	type;   /* Tuner type */
 	unsigned int	mode_mask;  /* Allowed tuner modes */
 	unsigned int	config; /* configuraion for more complex tuners */
-	int (*tuner_callback) (void *dev, int command,int arg);
+	int (*tuner_callback) (void *dev, int component, int cmd, int arg);
 };
-
-struct tuner {
-	/* device */
-	struct i2c_client i2c;
-
-	unsigned int type;	/* chip type */
-
-	unsigned int mode;
-	unsigned int mode_mask;	/* Combination of allowable modes */
-
-	unsigned int tv_freq;	/* keep track of the current settings */
-	unsigned int radio_freq;
-	u16 	     last_div;
-	unsigned int audmode;
-	v4l2_std_id  std;
-
-	int          using_v4l2;
-
-	/* used by tda9887 */
-	unsigned int       tda9887_config;
-	unsigned char 	   tda9887_data[4];
-
-	/* used by MT2032 */
-	unsigned int xogc;
-	unsigned int radio_if2;
-
-	/* used by tda8290 */
-	unsigned char tda8290_easy_mode;
-	unsigned char tda827x_lpsel;
-	unsigned char tda827x_addr;
-	unsigned char tda827x_ver;
-	unsigned int sgIF;
-
-	unsigned int config;
-	int (*tuner_callback) (void *dev, int command,int arg);
-
-	/* function ptrs */
-	void (*set_tv_freq)(struct i2c_client *c, unsigned int freq);
-	void (*set_radio_freq)(struct i2c_client *c, unsigned int freq);
-	int  (*has_signal)(struct i2c_client *c);
-	int  (*is_stereo)(struct i2c_client *c);
-	int  (*get_afc)(struct i2c_client *c);
-	void (*tuner_status)(struct i2c_client *c);
-	void (*standby)(struct i2c_client *c);
-};
-
-extern unsigned const int tuner_count;
-
-extern int microtune_init(struct i2c_client *c);
-extern int xc3028_init(struct i2c_client *c);
-extern int tda8290_init(struct i2c_client *c);
-extern int tda8290_probe(struct i2c_client *c);
-extern int tea5767_tuner_init(struct i2c_client *c);
-extern int default_tuner_init(struct i2c_client *c);
-extern int tea5767_autodetection(struct i2c_client *c);
-extern int tda9887_tuner_init(struct i2c_client *c);
-
-#define tuner_warn(fmt, arg...) do {\
-	printk(KERN_WARNING "%s %d-%04x: " fmt, t->i2c.driver->driver.name, \
-			i2c_adapter_id(t->i2c.adapter), t->i2c.addr , ##arg); } while (0)
-#define tuner_info(fmt, arg...) do {\
-	printk(KERN_INFO "%s %d-%04x: " fmt, t->i2c.driver->driver.name, \
-			i2c_adapter_id(t->i2c.adapter), t->i2c.addr , ##arg); } while (0)
-#define tuner_dbg(fmt, arg...) do {\
-	extern int tuner_debug; \
-	if (tuner_debug) \
-		printk(KERN_DEBUG "%s %d-%04x: " fmt, t->i2c.driver->driver.name, \
-			i2c_adapter_id(t->i2c.adapter), t->i2c.addr , ##arg); } while (0)
 
 #endif /* __KERNEL__ */
 
 #endif /* _TUNER_H */
-
-/*
- * Overrides for Emacs so that we follow Linus's tabbing style.
- * ---------------------------------------------------------------------------
- * Local variables:
- * c-basic-offset: 8
- * End:
- */

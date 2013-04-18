@@ -11,6 +11,7 @@
 #include <linux/cdrom.h>
 #include <linux/genhd.h>
 #include <linux/nls.h>
+#include <linux/slab.h>
 
 #include "hfs_fs.h"
 #include "btree.h"
@@ -215,11 +216,11 @@ int hfs_mdb_get(struct super_block *sb)
 		attrib &= cpu_to_be16(~HFS_SB_ATTRIB_UNMNT);
 		attrib |= cpu_to_be16(HFS_SB_ATTRIB_INCNSTNT);
 		mdb->drAtrb = attrib;
-		mdb->drWrCnt = cpu_to_be32(be32_to_cpu(mdb->drWrCnt) + 1);
+		be32_add_cpu(&mdb->drWrCnt, 1);
 		mdb->drLsMod = hfs_mtime();
 
 		mark_buffer_dirty(HFS_SB(sb)->mdb_bh);
-		hfs_buffer_sync(HFS_SB(sb)->mdb_bh);
+		sync_dirty_buffer(HFS_SB(sb)->mdb_bh);
 	}
 
 	return 0;
@@ -235,10 +236,10 @@ out:
  * hfs_mdb_commit()
  *
  * Description:
- *   This updates the MDB on disk (look also at hfs_write_super()).
+ *   This updates the MDB on disk.
  *   It does not check, if the superblock has been modified, or
  *   if the filesystem has been mounted read-only. It is mainly
- *   called by hfs_write_super() and hfs_btree_extend().
+ *   called by hfs_sync_fs() and flush_mdb().
  * Input Variable(s):
  *   struct hfs_mdb *mdb: Pointer to the hfs MDB
  *   int backup;
@@ -259,6 +260,10 @@ void hfs_mdb_commit(struct super_block *sb)
 {
 	struct hfs_mdb *mdb = HFS_SB(sb)->mdb;
 
+	if (sb->s_flags & MS_RDONLY)
+		return;
+
+	lock_buffer(HFS_SB(sb)->mdb_bh);
 	if (test_and_clear_bit(HFS_FLG_MDB_DIRTY, &HFS_SB(sb)->flags)) {
 		/* These parameters may have been modified, so write them back */
 		mdb->drLsMod = hfs_mtime();
@@ -282,11 +287,15 @@ void hfs_mdb_commit(struct super_block *sb)
 				     &mdb->drXTFlSize, NULL);
 		hfs_inode_write_fork(HFS_SB(sb)->cat_tree->inode, mdb->drCTExtRec,
 				     &mdb->drCTFlSize, NULL);
+
+		lock_buffer(HFS_SB(sb)->alt_mdb_bh);
 		memcpy(HFS_SB(sb)->alt_mdb, HFS_SB(sb)->mdb, HFS_SECTOR_SIZE);
 		HFS_SB(sb)->alt_mdb->drAtrb |= cpu_to_be16(HFS_SB_ATTRIB_UNMNT);
 		HFS_SB(sb)->alt_mdb->drAtrb &= cpu_to_be16(~HFS_SB_ATTRIB_INCNSTNT);
+		unlock_buffer(HFS_SB(sb)->alt_mdb_bh);
+
 		mark_buffer_dirty(HFS_SB(sb)->alt_mdb_bh);
-		hfs_buffer_sync(HFS_SB(sb)->alt_mdb_bh);
+		sync_dirty_buffer(HFS_SB(sb)->alt_mdb_bh);
 	}
 
 	if (test_and_clear_bit(HFS_FLG_BITMAP_DIRTY, &HFS_SB(sb)->flags)) {
@@ -307,7 +316,11 @@ void hfs_mdb_commit(struct super_block *sb)
 				break;
 			}
 			len = min((int)sb->s_blocksize - off, size);
+
+			lock_buffer(bh);
 			memcpy(bh->b_data + off, ptr, len);
+			unlock_buffer(bh);
+
 			mark_buffer_dirty(bh);
 			brelse(bh);
 			block++;
@@ -316,6 +329,7 @@ void hfs_mdb_commit(struct super_block *sb)
 			size -= len;
 		}
 	}
+	unlock_buffer(HFS_SB(sb)->mdb_bh);
 }
 
 void hfs_mdb_close(struct super_block *sb)
@@ -344,11 +358,10 @@ void hfs_mdb_put(struct super_block *sb)
 	brelse(HFS_SB(sb)->mdb_bh);
 	brelse(HFS_SB(sb)->alt_mdb_bh);
 
-	if (HFS_SB(sb)->nls_io)
-		unload_nls(HFS_SB(sb)->nls_io);
-	if (HFS_SB(sb)->nls_disk)
-		unload_nls(HFS_SB(sb)->nls_disk);
+	unload_nls(HFS_SB(sb)->nls_io);
+	unload_nls(HFS_SB(sb)->nls_disk);
 
+	free_pages((unsigned long)HFS_SB(sb)->bitmap, PAGE_SIZE < 8192 ? 1 : 0);
 	kfree(HFS_SB(sb));
 	sb->s_fs_info = NULL;
 }

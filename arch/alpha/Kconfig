@@ -1,10 +1,28 @@
-#
-# For a description of the syntax of this configuration file,
-# see Documentation/kbuild/kconfig-language.txt.
-#
 config ALPHA
 	bool
 	default y
+	select HAVE_AOUT
+	select HAVE_IDE
+	select HAVE_OPROFILE
+	select HAVE_SYSCALL_WRAPPERS
+	select HAVE_IRQ_WORK
+	select HAVE_PCSPKR_PLATFORM
+	select HAVE_PERF_EVENTS
+	select HAVE_DMA_ATTRS
+	select HAVE_GENERIC_HARDIRQS
+	select GENERIC_IRQ_PROBE
+	select AUTO_IRQ_AFFINITY if SMP
+	select GENERIC_IRQ_SHOW
+	select ARCH_WANT_OPTIONAL_GPIOLIB
+	select ARCH_WANT_IPC_PARSE_VERSION
+	select ARCH_HAVE_NMI_SAFE_CMPXCHG
+	select GENERIC_SMP_IDLE_THREAD
+	select GENERIC_CMOS_UPDATE
+	select GENERIC_STRNCPY_FROM_USER
+	select GENERIC_STRNLEN_USER
+	select HAVE_MOD_ARCH_SPECIFIC
+	select MODULES_USE_ELF_RELA
+	select GENERIC_SIGALTSTACK
 	help
 	  The Alpha is a 64-bit general-purpose processor designed and
 	  marketed by the Digital Equipment Corporation of blessed memory,
@@ -33,40 +51,32 @@ config ARCH_HAS_ILOG2_U64
 	bool
 	default n
 
-config GENERIC_FIND_NEXT_BIT
-	bool
-	default y
-
 config GENERIC_CALIBRATE_DELAY
 	bool
 	default y
+
+config GENERIC_GPIO
+	bool
 
 config ZONE_DMA
 	bool
 	default y
 
+config ARCH_DMA_ADDR_T_64BIT
+	def_bool y
+
+config NEED_DMA_MAP_STATE
+       def_bool y
+
+config NEED_SG_DMA_LENGTH
+	def_bool y
+
 config GENERIC_ISA_DMA
 	bool
 	default y
 
-config GENERIC_IOMAP
-	bool
-	default n
-
-config GENERIC_HARDIRQS
-	bool
-	default y
-
-config GENERIC_IRQ_PROBE
-	bool
-	default y
-
-config AUTO_IRQ_AFFINITY
-	bool
-	depends on SMP
-	default y
-
 source "init/Kconfig"
+source "kernel/Kconfig.freezer"
 
 
 menu "System setup"
@@ -219,8 +229,7 @@ config ALPHA_MIATA
 	bool "Miata"
 	help
 	  The Digital PersonalWorkStation (PWS 433a, 433au, 500a, 500au, 600a,
-	  or 600au).  There is an Installation HOWTO for this hardware at
-	  <http://eijk.homelinux.org/~stefan/miata.html>.
+	  or 600au).
 
 config ALPHA_MIKASA
 	bool "Mikasa"
@@ -311,6 +320,7 @@ config ISA_DMA_API
 config PCI
 	bool
 	depends on !ALPHA_JENSEN
+	select GENERIC_PCI_IOMAP
 	default y
 	help
 	  Find out whether you have a PCI motherboard. PCI is the name of a
@@ -318,19 +328,15 @@ config PCI
 	  your box. Other bus systems are ISA, EISA, MicroChannel (MCA) or
 	  VESA. If you have PCI, say Y, otherwise N.
 
-	  The PCI-HOWTO, available from
-	  <http://www.tldp.org/docs.html#howto>, contains valuable
-	  information about which PCI hardware does work under Linux and which
-	  doesn't.
-
 config PCI_DOMAINS
 	bool
 	default y
 
-config ALPHA_CORE_AGP
-	bool
-	depends on ALPHA_GENERIC || ALPHA_TITAN || ALPHA_MARVEL
-	default y
+config PCI_SYSCALL
+	def_bool PCI
+
+config IOMMU_HELPER
+	def_bool PCI
 
 config ALPHA_NONAME
 	bool
@@ -441,11 +447,6 @@ config ALPHA_EV67
 	  Is this a machine based on the EV67 core?  If in doubt, select N here
 	  and the machine will be treated as an EV6.
 
-config ALPHA_EV7
-	bool
-	depends on ALPHA_MARVEL
-	default y
-
 config ALPHA_MCPCIA
 	bool
 	depends on ALPHA_RAWHIDE
@@ -481,7 +482,7 @@ config ALPHA_BROKEN_IRQ_MASK
 
 config VGA_HOSE
 	bool
-	depends on ALPHA_GENERIC || ALPHA_TITAN || ALPHA_MARVEL || ALPHA_TSUNAMI
+	depends on VGA_CONSOLE && (ALPHA_GENERIC || ALPHA_TITAN || ALPHA_MARVEL || ALPHA_TSUNAMI)
 	default y
 	help
 	  Support VGA on an arbitrary hose; needed for several platforms
@@ -522,6 +523,7 @@ config ARCH_MAY_HAVE_PC_FDC
 config SMP
 	bool "Symmetric multi-processing support"
 	depends on ALPHA_SABLE || ALPHA_LYNX || ALPHA_RAWHIDE || ALPHA_DP264 || ALPHA_WILDFIRE || ALPHA_TITAN || ALPHA_GENERIC || ALPHA_SHARK || ALPHA_MARVEL
+	select USE_GENERIC_SMP_HELPERS
 	---help---
 	  This enables support for systems with more than one CPU. If you have
 	  a system with only one CPU, like most personal computers, say N. If
@@ -533,8 +535,8 @@ config SMP
 	  singleprocessor machines. On a singleprocessor machine, the kernel
 	  will run faster if you say N here.
 
-	  See also the <file:Documentation/smp.txt>, and the SMP-HOWTO
-	  available at <http://www.tldp.org/docs.html#howto>.
+	  See also the SMP-HOWTO available at
+	  <http://www.tldp.org/docs.html#howto>.
 
 	  If you don't know what to do here, say N.
 
@@ -613,6 +615,11 @@ config VERBOSE_MCHECK_ON
 
 	  Take the default (1) unless you want more control or more info.
 
+config HZ
+	int
+	default 1200 if ALPHA_RAWHIDE
+	default 1024
+
 source "drivers/pci/Kconfig"
 source "drivers/eisa/Kconfig"
 
@@ -650,8 +657,6 @@ source "net/Kconfig"
 source "drivers/Kconfig"
 
 source "fs/Kconfig"
-
-source "arch/alpha/oprofile/Kconfig"
 
 source "arch/alpha/Kconfig.debug"
 

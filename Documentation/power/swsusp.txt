@@ -33,6 +33,11 @@ echo shutdown > /sys/power/disk; echo disk > /sys/power/state
 
 echo platform > /sys/power/disk; echo disk > /sys/power/state
 
+. If you would like to write hibernation image to swap and then suspend
+to RAM (provided your platform supports it), you can try
+
+echo suspend > /sys/power/disk; echo disk > /sys/power/state
+
 . If you have SATA disks, you'll need recent kernels with SATA suspend
 support. For suspend and resume to work, make sure your disk drivers
 are built into kernel -- not modules. [There's way to make
@@ -48,7 +53,7 @@ before suspend (it is limited to 500 MB by default).
 
 Article about goals and implementation of Software Suspend for Linux
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Author: Gábor Kuti
+Author: Gábor Kuti
 Last revised: 2003-10-20 by Pavel Machek
 
 Idea and goals to achieve
@@ -66,7 +71,8 @@ swsusp saves the state of the machine into active swaps and then reboots or
 powerdowns.  You must explicitly specify the swap partition to resume from with
 ``resume='' kernel option. If signature is found it loads and restores saved
 state. If the option ``noresume'' is specified as a boot parameter, it skips
-the resuming.
+the resuming.  If the option ``hibernate=nocompress'' is specified as a boot
+parameter, it saves hibernation image without compression.
 
 In the meantime while the system is suspended you should not add/remove any
 of the hardware, write to the filesystems, etc.
@@ -140,21 +146,11 @@ should be sent to the mailing list available through the suspend2
 website, and not to the Linux Kernel Mailing List. We are working
 toward merging suspend2 into the mainline kernel.
 
-Q: A kernel thread must voluntarily freeze itself (call 'refrigerator').
-I found some kernel threads that don't do it, and they don't freeze
-so the system can't sleep. Is this a known behavior?
+Q: What is the freezing of tasks and why are we using it?
 
-A: All such kernel threads need to be fixed, one by one. Select the
-place where the thread is safe to be frozen (no kernel semaphores
-should be held at that point and it must be safe to sleep there), and
-add:
-
-       try_to_freeze();
-
-If the thread is needed for writing the image to storage, you should
-instead set the PF_NOFREEZE process flag when creating the thread (and
-be very careful).
-
+A: The freezing of tasks is a mechanism by which user space processes and some
+kernel threads are controlled during hibernation or system-wide suspend (on some
+architectures).  See freezing-of-tasks.txt for details.
 
 Q: What is the difference between "platform" and "shutdown"?
 
@@ -201,7 +197,7 @@ Q: There don't seem to be any generally useful behavioral
 distinctions between SUSPEND and FREEZE.
 
 A: Doing SUSPEND when you are asked to do FREEZE is always correct,
-but it may be unneccessarily slow. If you want your driver to stay simple,
+but it may be unnecessarily slow. If you want your driver to stay simple,
 slowness may not matter to you. It can always be fixed later.
 
 For devices like disk it does matter, you do not want to spindown for
@@ -246,7 +242,7 @@ disk. Whole sequence goes like
 
       running system, user asks for suspend-to-disk
 
-      user processes are stopped (in common case there are none, but with resume-from-initrd, noone knows)
+      user processes are stopped (in common case there are none, but with resume-from-initrd, no one knows)
 
       read image from disk
 
@@ -392,6 +388,14 @@ mounted filesystem.  That's true even when your system is asleep!  The
 safest thing is to unmount all filesystems on removable media (such USB,
 Firewire, CompactFlash, MMC, external SATA, or even IDE hotplug bays)
 before suspending; then remount them after resuming.
+
+There is a work-around for this problem.  For more information, see
+Documentation/usb/persist.txt.
+
+Q: Can I suspend-to-disk using a swap partition under LVM?
+
+A: No. You can suspend successfully, but you'll not be able to
+resume. uswsusp should be able to work with LVM. See suspend.sf.net.
 
 Q: I upgraded the kernel from 2.6.15 to 2.6.16. Both kernels were
 compiled with the similar configuration files. Anyway I found that

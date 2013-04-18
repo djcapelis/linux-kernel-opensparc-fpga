@@ -1,5 +1,5 @@
 /*
- * Aic7xxx SCSI host adapter firmware asssembler symbol table definitions
+ * Aic7xxx SCSI host adapter firmware assembler symbol table definitions
  *
  * Copyright (c) 1997 Justin T. Gibbs.
  * Copyright (c) 2002 Adaptec Inc.
@@ -128,6 +128,7 @@ typedef struct expression_info {
 typedef struct symbol {
 	char	*name;
 	symtype	type;
+	int	count;
 	union	{
 		struct reg_info	  *rinfo;
 		struct field_info *finfo;
@@ -136,7 +137,8 @@ typedef struct symbol {
 		struct label_info *linfo;
 		struct cond_info  *condinfo;
 		struct macro_info *macroinfo;
-	}info;
+	} info;
+	int	dont_generate_debug_code;
 } symbol_t;
 
 typedef struct symbol_ref {

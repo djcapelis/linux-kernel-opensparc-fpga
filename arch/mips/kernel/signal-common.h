@@ -14,23 +14,16 @@
 /* #define DEBUG_SIG */
 
 #ifdef DEBUG_SIG
-#  define DEBUGP(fmt, args...) printk("%s: " fmt, __FUNCTION__ , ##args)
+#  define DEBUGP(fmt, args...) printk("%s: " fmt, __func__, ##args)
 #else
 #  define DEBUGP(fmt, args...)
 #endif
-
-#define _BLOCKABLE (~(sigmask(SIGKILL) | sigmask(SIGSTOP)))
 
 /*
  * Determine which stack to use..
  */
 extern void __user *get_sigframe(struct k_sigaction *ka, struct pt_regs *regs,
 				 size_t frame_size);
-/*
- * install trampoline code to get back from the sig handler
- */
-extern int install_sigtramp(unsigned int __user *tramp, unsigned int syscall);
-
 /* Check and clear pending FPU exceptions in saved CSR */
 extern int fpcsr_pending(unsigned int __user *fpcsr);
 

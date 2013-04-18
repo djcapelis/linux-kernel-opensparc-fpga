@@ -30,8 +30,6 @@
  * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
  * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
- *
- * $Id: ib_sa.h 2811 2005-07-06 18:11:43Z halr $
  */
 
 #ifndef IB_SA_H
@@ -40,7 +38,7 @@
 #include <linux/completion.h>
 #include <linux/compiler.h>
 
-#include <asm/atomic.h>
+#include <linux/atomic.h>
 
 #include <rdma/ib_verbs.h>
 #include <rdma/ib_mad.h>
@@ -109,8 +107,8 @@ enum ib_sa_selector {
  * Reserved rows are indicated with comments to help maintainability.
  */
 
-/* reserved:								 0 */
-/* reserved:								 1 */
+#define IB_SA_PATH_REC_SERVICE_ID		       (IB_SA_COMP_MASK( 0) |\
+							IB_SA_COMP_MASK( 1))
 #define IB_SA_PATH_REC_DGID				IB_SA_COMP_MASK( 2)
 #define IB_SA_PATH_REC_SGID				IB_SA_COMP_MASK( 3)
 #define IB_SA_PATH_REC_DLID				IB_SA_COMP_MASK( 4)
@@ -123,7 +121,7 @@ enum ib_sa_selector {
 #define IB_SA_PATH_REC_REVERSIBLE			IB_SA_COMP_MASK(11)
 #define IB_SA_PATH_REC_NUMB_PATH			IB_SA_COMP_MASK(12)
 #define IB_SA_PATH_REC_PKEY				IB_SA_COMP_MASK(13)
-/* reserved:								14 */
+#define IB_SA_PATH_REC_QOS_CLASS			IB_SA_COMP_MASK(14)
 #define IB_SA_PATH_REC_SL				IB_SA_COMP_MASK(15)
 #define IB_SA_PATH_REC_MTU_SELECTOR			IB_SA_COMP_MASK(16)
 #define IB_SA_PATH_REC_MTU				IB_SA_COMP_MASK(17)
@@ -134,8 +132,7 @@ enum ib_sa_selector {
 #define IB_SA_PATH_REC_PREFERENCE			IB_SA_COMP_MASK(22)
 
 struct ib_sa_path_rec {
-	/* reserved */
-	/* reserved */
+	__be64       service_id;
 	union ib_gid dgid;
 	union ib_gid sgid;
 	__be16       dlid;
@@ -148,7 +145,7 @@ struct ib_sa_path_rec {
 	int          reversible;
 	u8           numb_path;
 	__be16       pkey;
-	/* reserved */
+	__be16       qos_class;
 	u8           sl;
 	u8           mtu_selector;
 	u8           mtu;
@@ -252,6 +249,28 @@ struct ib_sa_service_rec {
 	u16		data16[8];
 	u32		data32[4];
 	u64		data64[2];
+};
+
+#define IB_SA_GUIDINFO_REC_LID		IB_SA_COMP_MASK(0)
+#define IB_SA_GUIDINFO_REC_BLOCK_NUM	IB_SA_COMP_MASK(1)
+#define IB_SA_GUIDINFO_REC_RES1		IB_SA_COMP_MASK(2)
+#define IB_SA_GUIDINFO_REC_RES2		IB_SA_COMP_MASK(3)
+#define IB_SA_GUIDINFO_REC_GID0		IB_SA_COMP_MASK(4)
+#define IB_SA_GUIDINFO_REC_GID1		IB_SA_COMP_MASK(5)
+#define IB_SA_GUIDINFO_REC_GID2		IB_SA_COMP_MASK(6)
+#define IB_SA_GUIDINFO_REC_GID3		IB_SA_COMP_MASK(7)
+#define IB_SA_GUIDINFO_REC_GID4		IB_SA_COMP_MASK(8)
+#define IB_SA_GUIDINFO_REC_GID5		IB_SA_COMP_MASK(9)
+#define IB_SA_GUIDINFO_REC_GID6		IB_SA_COMP_MASK(10)
+#define IB_SA_GUIDINFO_REC_GID7		IB_SA_COMP_MASK(11)
+
+struct ib_sa_guidinfo_rec {
+	__be16	lid;
+	u8	block_num;
+	/* reserved */
+	u8	res1;
+	__be32	res2;
+	u8	guid_info_list[64];
 };
 
 struct ib_sa_client {
@@ -382,4 +401,21 @@ int ib_init_ah_from_path(struct ib_device *device, u8 port_num,
 			 struct ib_sa_path_rec *rec,
 			 struct ib_ah_attr *ah_attr);
 
+/**
+ * ib_sa_unpack_path - Convert a path record from MAD format to struct
+ * ib_sa_path_rec.
+ */
+void ib_sa_unpack_path(void *attribute, struct ib_sa_path_rec *rec);
+
+/* Support GuidInfoRecord */
+int ib_sa_guid_info_rec_query(struct ib_sa_client *client,
+			      struct ib_device *device, u8 port_num,
+			      struct ib_sa_guidinfo_rec *rec,
+			      ib_sa_comp_mask comp_mask, u8 method,
+			      int timeout_ms, gfp_t gfp_mask,
+			      void (*callback)(int status,
+					       struct ib_sa_guidinfo_rec *resp,
+					       void *context),
+			      void *context,
+			      struct ib_sa_query **sa_query);
 #endif /* IB_SA_H */

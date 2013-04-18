@@ -1,6 +1,6 @@
-/* request_key.c: request a key from userspace
+/* Request a key from userspace
  *
- * Copyright (C) 2004-6 Red Hat, Inc. All Rights Reserved.
+ * Copyright (C) 2004-2007 Red Hat, Inc. All Rights Reserved.
  * Written by David Howells (dhowells@redhat.com)
  *
  * This program is free software; you can redistribute it and/or
@@ -8,7 +8,7 @@
  * as published by the Free Software Foundation; either version
  * 2 of the License, or (at your option) any later version.
  *
- * See Documentation/keys-request-key.txt
+ * See Documentation/security/keys-request-key.txt
  */
 
 #include <linux/module.h>
@@ -16,29 +16,100 @@
 #include <linux/kmod.h>
 #include <linux/err.h>
 #include <linux/keyctl.h>
+#include <linux/slab.h>
 #include "internal.h"
 
-struct key_construction {
-	struct list_head	link;	/* link in construction queue */
-	struct key		*key;	/* key being constructed */
-};
+#define key_negative_timeout	60	/* default timeout on a negative key's existence */
 
-/* when waiting for someone else's keys, you get added to this */
-DECLARE_WAIT_QUEUE_HEAD(request_key_conswq);
-
-/*****************************************************************************/
 /*
- * request userspace finish the construction of a key
+ * wait_on_bit() sleep function for uninterruptible waiting
+ */
+static int key_wait_bit(void *flags)
+{
+	schedule();
+	return 0;
+}
+
+/*
+ * wait_on_bit() sleep function for interruptible waiting
+ */
+static int key_wait_bit_intr(void *flags)
+{
+	schedule();
+	return signal_pending(current) ? -ERESTARTSYS : 0;
+}
+
+/**
+ * complete_request_key - Complete the construction of a key.
+ * @cons: The key construction record.
+ * @error: The success or failute of the construction.
+ *
+ * Complete the attempt to construct a key.  The key will be negated
+ * if an error is indicated.  The authorisation key will be revoked
+ * unconditionally.
+ */
+void complete_request_key(struct key_construction *cons, int error)
+{
+	kenter("{%d,%d},%d", cons->key->serial, cons->authkey->serial, error);
+
+	if (error < 0)
+		key_negate_and_link(cons->key, key_negative_timeout, NULL,
+				    cons->authkey);
+	else
+		key_revoke(cons->authkey);
+
+	key_put(cons->key);
+	key_put(cons->authkey);
+	kfree(cons);
+}
+EXPORT_SYMBOL(complete_request_key);
+
+/*
+ * Initialise a usermode helper that is going to have a specific session
+ * keyring.
+ *
+ * This is called in context of freshly forked kthread before kernel_execve(),
+ * so we can simply install the desired session_keyring at this point.
+ */
+static int umh_keys_init(struct subprocess_info *info, struct cred *cred)
+{
+	struct key *keyring = info->data;
+
+	return install_session_keyring_to_cred(cred, keyring);
+}
+
+/*
+ * Clean up a usermode helper with session keyring.
+ */
+static void umh_keys_cleanup(struct subprocess_info *info)
+{
+	struct key *keyring = info->data;
+	key_put(keyring);
+}
+
+/*
+ * Call a usermode helper with a specific session keyring.
+ */
+static int call_usermodehelper_keys(char *path, char **argv, char **envp,
+					struct key *session_keyring, int wait)
+{
+	return call_usermodehelper_fns(path, argv, envp, wait,
+				       umh_keys_init, umh_keys_cleanup,
+				       key_get(session_keyring));
+}
+
+/*
+ * Request userspace finish the construction of a key
  * - execute "/sbin/request-key <op> <key> <uid> <gid> <keyring> <keyring> <keyring>"
  */
-static int call_sbin_request_key(struct key *key,
-				 struct key *authkey,
+static int call_sbin_request_key(struct key_construction *cons,
 				 const char *op,
 				 void *aux)
 {
-	struct task_struct *tsk = current;
+	const struct cred *cred = current_cred();
 	key_serial_t prkey, sskey;
-	struct key *keyring;
+	struct key *key = cons->key, *authkey = cons->authkey, *keyring,
+		*session;
 	char *argv[9], *envp[3], uid_str[12], gid_str[12];
 	char key_str[12], keyring_str[3][12];
 	char desc[20];
@@ -46,46 +117,50 @@ static int call_sbin_request_key(struct key *key,
 
 	kenter("{%d},{%d},%s", key->serial, authkey->serial, op);
 
+	ret = install_user_keyrings();
+	if (ret < 0)
+		goto error_alloc;
+
 	/* allocate a new session keyring */
 	sprintf(desc, "_req.%u", key->serial);
 
-	keyring = keyring_alloc(desc, current->fsuid, current->fsgid, current,
+	cred = get_current_cred();
+	keyring = keyring_alloc(desc, cred->fsuid, cred->fsgid, cred,
+				KEY_POS_ALL | KEY_USR_VIEW | KEY_USR_READ,
 				KEY_ALLOC_QUOTA_OVERRUN, NULL);
+	put_cred(cred);
 	if (IS_ERR(keyring)) {
 		ret = PTR_ERR(keyring);
 		goto error_alloc;
 	}
 
 	/* attach the auth key to the session keyring */
-	ret = __key_link(keyring, authkey);
+	ret = key_link(keyring, authkey);
 	if (ret < 0)
 		goto error_link;
 
 	/* record the UID and GID */
-	sprintf(uid_str, "%d", current->fsuid);
-	sprintf(gid_str, "%d", current->fsgid);
+	sprintf(uid_str, "%d", from_kuid(&init_user_ns, cred->fsuid));
+	sprintf(gid_str, "%d", from_kgid(&init_user_ns, cred->fsgid));
 
 	/* we say which key is under construction */
 	sprintf(key_str, "%d", key->serial);
 
 	/* we specify the process's default keyrings */
 	sprintf(keyring_str[0], "%d",
-		tsk->thread_keyring ? tsk->thread_keyring->serial : 0);
+		cred->thread_keyring ? cred->thread_keyring->serial : 0);
 
 	prkey = 0;
-	if (tsk->signal->process_keyring)
-		prkey = tsk->signal->process_keyring->serial;
-
+	if (cred->process_keyring)
+		prkey = cred->process_keyring->serial;
 	sprintf(keyring_str[1], "%d", prkey);
 
-	if (tsk->signal->session_keyring) {
-		rcu_read_lock();
-		sskey = rcu_dereference(tsk->signal->session_keyring)->serial;
-		rcu_read_unlock();
-	}
-	else {
-		sskey = tsk->user->session_keyring->serial;
-	}
+	rcu_read_lock();
+	session = rcu_dereference(cred->session_keyring);
+	if (!session)
+		session = cred->user->session_keyring;
+	sskey = session->serial;
+	rcu_read_unlock();
 
 	sprintf(keyring_str[2], "%d", sskey);
 
@@ -108,265 +183,141 @@ static int call_sbin_request_key(struct key *key,
 	argv[i] = NULL;
 
 	/* do it */
-	ret = call_usermodehelper_keys(argv[0], argv, envp, keyring, 1);
+	ret = call_usermodehelper_keys(argv[0], argv, envp, keyring,
+				       UMH_WAIT_PROC);
+	kdebug("usermode -> 0x%x", ret);
+	if (ret >= 0) {
+		/* ret is the exit/wait code */
+		if (test_bit(KEY_FLAG_USER_CONSTRUCT, &key->flags) ||
+		    key_validate(key) < 0)
+			ret = -ENOKEY;
+		else
+			/* ignore any errors from userspace if the key was
+			 * instantiated */
+			ret = 0;
+	}
 
 error_link:
 	key_put(keyring);
 
 error_alloc:
+	complete_request_key(cons, ret);
 	kleave(" = %d", ret);
 	return ret;
+}
 
-} /* end call_sbin_request_key() */
-
-/*****************************************************************************/
 /*
- * call out to userspace for the key
- * - called with the construction sem held, but the sem is dropped here
- * - we ignore program failure and go on key status instead
+ * Call out to userspace for key construction.
+ *
+ * Program failure is ignored in favour of key status.
  */
-static struct key *__request_key_construction(struct key_type *type,
-					      const char *description,
-					      const char *callout_info,
-					      void *aux,
-					      unsigned long flags)
+static int construct_key(struct key *key, const void *callout_info,
+			 size_t callout_len, void *aux,
+			 struct key *dest_keyring)
 {
+	struct key_construction *cons;
 	request_key_actor_t actor;
-	struct key_construction cons;
-	struct timespec now;
-	struct key *key, *authkey;
-	int ret, negated;
+	struct key *authkey;
+	int ret;
 
-	kenter("%s,%s,%s,%lx", type->name, description, callout_info, flags);
+	kenter("%d,%p,%zu,%p", key->serial, callout_info, callout_len, aux);
 
-	/* create a key and add it to the queue */
-	key = key_alloc(type, description,
-			current->fsuid, current->fsgid, current, KEY_POS_ALL,
-			flags);
-	if (IS_ERR(key))
-		goto alloc_failed;
-
-	set_bit(KEY_FLAG_USER_CONSTRUCT, &key->flags);
-
-	cons.key = key;
-	list_add_tail(&cons.link, &key->user->consq);
-
-	/* we drop the construction sem here on behalf of the caller */
-	up_write(&key_construction_sem);
+	cons = kmalloc(sizeof(*cons), GFP_KERNEL);
+	if (!cons)
+		return -ENOMEM;
 
 	/* allocate an authorisation key */
-	authkey = request_key_auth_new(key, callout_info);
+	authkey = request_key_auth_new(key, callout_info, callout_len,
+				       dest_keyring);
 	if (IS_ERR(authkey)) {
+		kfree(cons);
 		ret = PTR_ERR(authkey);
 		authkey = NULL;
-		goto alloc_authkey_failed;
+	} else {
+		cons->authkey = key_get(authkey);
+		cons->key = key_get(key);
+
+		/* make the call */
+		actor = call_sbin_request_key;
+		if (key->type->request_key)
+			actor = key->type->request_key;
+
+		ret = actor(cons, "create", aux);
+
+		/* check that the actor called complete_request_key() prior to
+		 * returning an error */
+		WARN_ON(ret < 0 &&
+			!test_bit(KEY_FLAG_REVOKED, &authkey->flags));
+		key_put(authkey);
 	}
 
-	/* make the call */
-	actor = call_sbin_request_key;
-	if (type->request_key)
-		actor = type->request_key;
-	ret = actor(key, authkey, "create", aux);
-	if (ret < 0)
-		goto request_failed;
+	kleave(" = %d", ret);
+	return ret;
+}
 
-	/* if the key wasn't instantiated, then we want to give an error */
-	ret = -ENOKEY;
-	if (!test_bit(KEY_FLAG_INSTANTIATED, &key->flags))
-		goto request_failed;
-
-	key_revoke(authkey);
-	key_put(authkey);
-
-	down_write(&key_construction_sem);
-	list_del(&cons.link);
-	up_write(&key_construction_sem);
-
-	/* also give an error if the key was negatively instantiated */
-check_not_negative:
-	if (test_bit(KEY_FLAG_NEGATIVE, &key->flags)) {
-		key_put(key);
-		key = ERR_PTR(-ENOKEY);
-	}
-
-out:
-	kleave(" = %p", key);
-	return key;
-
-request_failed:
-	key_revoke(authkey);
-	key_put(authkey);
-
-alloc_authkey_failed:
-	/* it wasn't instantiated
-	 * - remove from construction queue
-	 * - mark the key as dead
-	 */
-	negated = 0;
-	down_write(&key_construction_sem);
-
-	list_del(&cons.link);
-
-	/* check it didn't get instantiated between the check and the down */
-	if (!test_bit(KEY_FLAG_INSTANTIATED, &key->flags)) {
-		set_bit(KEY_FLAG_NEGATIVE, &key->flags);
-		set_bit(KEY_FLAG_INSTANTIATED, &key->flags);
-		negated = 1;
-	}
-
-	clear_bit(KEY_FLAG_USER_CONSTRUCT, &key->flags);
-
-	up_write(&key_construction_sem);
-
-	if (!negated)
-		goto check_not_negative; /* surprisingly, the key got
-					  * instantiated */
-
-	/* set the timeout and store in the session keyring if we can */
-	now = current_kernel_time();
-	key->expiry = now.tv_sec + key_negative_timeout;
-
-	if (current->signal->session_keyring) {
-		struct key *keyring;
-
-		rcu_read_lock();
-		keyring = rcu_dereference(current->signal->session_keyring);
-		atomic_inc(&keyring->usage);
-		rcu_read_unlock();
-
-		key_link(keyring, key);
-		key_put(keyring);
-	}
-
-	key_put(key);
-
-	/* notify anyone who was waiting */
-	wake_up_all(&request_key_conswq);
-
-	key = ERR_PTR(ret);
-	goto out;
-
-alloc_failed:
-	up_write(&key_construction_sem);
-	goto out;
-
-} /* end __request_key_construction() */
-
-/*****************************************************************************/
 /*
- * call out to userspace to request the key
- * - we check the construction queue first to see if an appropriate key is
- *   already being constructed by userspace
+ * Get the appropriate destination keyring for the request.
+ *
+ * The keyring selected is returned with an extra reference upon it which the
+ * caller must release.
  */
-static struct key *request_key_construction(struct key_type *type,
-					    const char *description,
-					    const char *callout_info,
-					    void *aux,
-					    struct key_user *user,
-					    unsigned long flags)
+static void construct_get_dest_keyring(struct key **_dest_keyring)
 {
-	struct key_construction *pcons;
-	struct key *key, *ckey;
+	struct request_key_auth *rka;
+	const struct cred *cred = current_cred();
+	struct key *dest_keyring = *_dest_keyring, *authkey;
 
-	DECLARE_WAITQUEUE(myself, current);
-
-	kenter("%s,%s,{%d},%s,%lx",
-	       type->name, description, user->uid, callout_info, flags);
-
-	/* see if there's such a key under construction already */
-	down_write(&key_construction_sem);
-
-	list_for_each_entry(pcons, &user->consq, link) {
-		ckey = pcons->key;
-
-		if (ckey->type != type)
-			continue;
-
-		if (type->match(ckey, description))
-			goto found_key_under_construction;
-	}
-
-	/* see about getting userspace to construct the key */
-	key = __request_key_construction(type, description, callout_info, aux,
-					 flags);
- error:
-	kleave(" = %p", key);
-	return key;
-
-	/* someone else has the same key under construction
-	 * - we want to keep an eye on their key
-	 */
- found_key_under_construction:
-	atomic_inc(&ckey->usage);
-	up_write(&key_construction_sem);
-
-	/* wait for the key to be completed one way or another */
-	add_wait_queue(&request_key_conswq, &myself);
-
-	for (;;) {
-		set_current_state(TASK_INTERRUPTIBLE);
-		if (!test_bit(KEY_FLAG_USER_CONSTRUCT, &ckey->flags))
-			break;
-		if (signal_pending(current))
-			break;
-		schedule();
-	}
-
-	set_current_state(TASK_RUNNING);
-	remove_wait_queue(&request_key_conswq, &myself);
-
-	/* we'll need to search this process's keyrings to see if the key is
-	 * now there since we can't automatically assume it's also available
-	 * there */
-	key_put(ckey);
-	ckey = NULL;
-
-	key = NULL; /* request a retry */
-	goto error;
-
-} /* end request_key_construction() */
-
-/*****************************************************************************/
-/*
- * link a freshly minted key to an appropriate destination keyring
- */
-static void request_key_link(struct key *key, struct key *dest_keyring)
-{
-	struct task_struct *tsk = current;
-	struct key *drop = NULL;
-
-	kenter("{%d},%p", key->serial, dest_keyring);
+	kenter("%p", dest_keyring);
 
 	/* find the appropriate keyring */
-	if (!dest_keyring) {
-		switch (tsk->jit_keyring) {
+	if (dest_keyring) {
+		/* the caller supplied one */
+		key_get(dest_keyring);
+	} else {
+		/* use a default keyring; falling through the cases until we
+		 * find one that we actually have */
+		switch (cred->jit_keyring) {
 		case KEY_REQKEY_DEFL_DEFAULT:
+		case KEY_REQKEY_DEFL_REQUESTOR_KEYRING:
+			if (cred->request_key_auth) {
+				authkey = cred->request_key_auth;
+				down_read(&authkey->sem);
+				rka = authkey->payload.data;
+				if (!test_bit(KEY_FLAG_REVOKED,
+					      &authkey->flags))
+					dest_keyring =
+						key_get(rka->dest_keyring);
+				up_read(&authkey->sem);
+				if (dest_keyring)
+					break;
+			}
+
 		case KEY_REQKEY_DEFL_THREAD_KEYRING:
-			dest_keyring = tsk->thread_keyring;
+			dest_keyring = key_get(cred->thread_keyring);
 			if (dest_keyring)
 				break;
 
 		case KEY_REQKEY_DEFL_PROCESS_KEYRING:
-			dest_keyring = tsk->signal->process_keyring;
+			dest_keyring = key_get(cred->process_keyring);
 			if (dest_keyring)
 				break;
 
 		case KEY_REQKEY_DEFL_SESSION_KEYRING:
 			rcu_read_lock();
 			dest_keyring = key_get(
-				rcu_dereference(tsk->signal->session_keyring));
+				rcu_dereference(cred->session_keyring));
 			rcu_read_unlock();
-			drop = dest_keyring;
 
 			if (dest_keyring)
 				break;
 
 		case KEY_REQKEY_DEFL_USER_SESSION_KEYRING:
-			dest_keyring = current->user->session_keyring;
+			dest_keyring =
+				key_get(cred->user->session_keyring);
 			break;
 
 		case KEY_REQKEY_DEFL_USER_KEYRING:
-			dest_keyring = current->user->uid_keyring;
+			dest_keyring = key_get(cred->user->uid_keyring);
 			break;
 
 		case KEY_REQKEY_DEFL_GROUP_KEYRING:
@@ -375,148 +326,390 @@ static void request_key_link(struct key *key, struct key *dest_keyring)
 		}
 	}
 
-	/* and attach the key to it */
-	key_link(dest_keyring, key);
+	*_dest_keyring = dest_keyring;
+	kleave(" [dk %d]", key_serial(dest_keyring));
+	return;
+}
 
-	key_put(drop);
-
-	kleave("");
-
-} /* end request_key_link() */
-
-/*****************************************************************************/
 /*
- * request a key
- * - search the process's keyrings
- * - check the list of keys being created or updated
- * - call out to userspace for a key if supplementary info was provided
- * - cache the key in an appropriate keyring
+ * Allocate a new key in under-construction state and attempt to link it in to
+ * the requested keyring.
+ *
+ * May return a key that's already under construction instead if there was a
+ * race between two thread calling request_key().
+ */
+static int construct_alloc_key(struct key_type *type,
+			       const char *description,
+			       struct key *dest_keyring,
+			       unsigned long flags,
+			       struct key_user *user,
+			       struct key **_key)
+{
+	const struct cred *cred = current_cred();
+	unsigned long prealloc;
+	struct key *key;
+	key_perm_t perm;
+	key_ref_t key_ref;
+	int ret;
+
+	kenter("%s,%s,,,", type->name, description);
+
+	*_key = NULL;
+	mutex_lock(&user->cons_lock);
+
+	perm = KEY_POS_VIEW | KEY_POS_SEARCH | KEY_POS_LINK | KEY_POS_SETATTR;
+	perm |= KEY_USR_VIEW;
+	if (type->read)
+		perm |= KEY_POS_READ;
+	if (type == &key_type_keyring || type->update)
+		perm |= KEY_POS_WRITE;
+
+	key = key_alloc(type, description, cred->fsuid, cred->fsgid, cred,
+			perm, flags);
+	if (IS_ERR(key))
+		goto alloc_failed;
+
+	set_bit(KEY_FLAG_USER_CONSTRUCT, &key->flags);
+
+	if (dest_keyring) {
+		ret = __key_link_begin(dest_keyring, type, description,
+				       &prealloc);
+		if (ret < 0)
+			goto link_prealloc_failed;
+	}
+
+	/* attach the key to the destination keyring under lock, but we do need
+	 * to do another check just in case someone beat us to it whilst we
+	 * waited for locks */
+	mutex_lock(&key_construction_mutex);
+
+	key_ref = search_process_keyrings(type, description, type->match, cred);
+	if (!IS_ERR(key_ref))
+		goto key_already_present;
+
+	if (dest_keyring)
+		__key_link(dest_keyring, key, &prealloc);
+
+	mutex_unlock(&key_construction_mutex);
+	if (dest_keyring)
+		__key_link_end(dest_keyring, type, prealloc);
+	mutex_unlock(&user->cons_lock);
+	*_key = key;
+	kleave(" = 0 [%d]", key_serial(key));
+	return 0;
+
+	/* the key is now present - we tell the caller that we found it by
+	 * returning -EINPROGRESS  */
+key_already_present:
+	key_put(key);
+	mutex_unlock(&key_construction_mutex);
+	key = key_ref_to_ptr(key_ref);
+	if (dest_keyring) {
+		ret = __key_link_check_live_key(dest_keyring, key);
+		if (ret == 0)
+			__key_link(dest_keyring, key, &prealloc);
+		__key_link_end(dest_keyring, type, prealloc);
+		if (ret < 0)
+			goto link_check_failed;
+	}
+	mutex_unlock(&user->cons_lock);
+	*_key = key;
+	kleave(" = -EINPROGRESS [%d]", key_serial(key));
+	return -EINPROGRESS;
+
+link_check_failed:
+	mutex_unlock(&user->cons_lock);
+	key_put(key);
+	kleave(" = %d [linkcheck]", ret);
+	return ret;
+
+link_prealloc_failed:
+	mutex_unlock(&user->cons_lock);
+	kleave(" = %d [prelink]", ret);
+	return ret;
+
+alloc_failed:
+	mutex_unlock(&user->cons_lock);
+	kleave(" = %ld", PTR_ERR(key));
+	return PTR_ERR(key);
+}
+
+/*
+ * Commence key construction.
+ */
+static struct key *construct_key_and_link(struct key_type *type,
+					  const char *description,
+					  const char *callout_info,
+					  size_t callout_len,
+					  void *aux,
+					  struct key *dest_keyring,
+					  unsigned long flags)
+{
+	struct key_user *user;
+	struct key *key;
+	int ret;
+
+	kenter("");
+
+	user = key_user_lookup(current_fsuid());
+	if (!user)
+		return ERR_PTR(-ENOMEM);
+
+	construct_get_dest_keyring(&dest_keyring);
+
+	ret = construct_alloc_key(type, description, dest_keyring, flags, user,
+				  &key);
+	key_user_put(user);
+
+	if (ret == 0) {
+		ret = construct_key(key, callout_info, callout_len, aux,
+				    dest_keyring);
+		if (ret < 0) {
+			kdebug("cons failed");
+			goto construction_failed;
+		}
+	} else if (ret == -EINPROGRESS) {
+		ret = 0;
+	} else {
+		goto couldnt_alloc_key;
+	}
+
+	key_put(dest_keyring);
+	kleave(" = key %d", key_serial(key));
+	return key;
+
+construction_failed:
+	key_negate_and_link(key, key_negative_timeout, NULL, NULL);
+	key_put(key);
+couldnt_alloc_key:
+	key_put(dest_keyring);
+	kleave(" = %d", ret);
+	return ERR_PTR(ret);
+}
+
+/**
+ * request_key_and_link - Request a key and cache it in a keyring.
+ * @type: The type of key we want.
+ * @description: The searchable description of the key.
+ * @callout_info: The data to pass to the instantiation upcall (or NULL).
+ * @callout_len: The length of callout_info.
+ * @aux: Auxiliary data for the upcall.
+ * @dest_keyring: Where to cache the key.
+ * @flags: Flags to key_alloc().
+ *
+ * A key matching the specified criteria is searched for in the process's
+ * keyrings and returned with its usage count incremented if found.  Otherwise,
+ * if callout_info is not NULL, a key will be allocated and some service
+ * (probably in userspace) will be asked to instantiate it.
+ *
+ * If successfully found or created, the key will be linked to the destination
+ * keyring if one is provided.
+ *
+ * Returns a pointer to the key if successful; -EACCES, -ENOKEY, -EKEYREVOKED
+ * or -EKEYEXPIRED if an inaccessible, negative, revoked or expired key was
+ * found; -ENOKEY if no key was found and no @callout_info was given; -EDQUOT
+ * if insufficient key quota was available to create a new key; or -ENOMEM if
+ * insufficient memory was available.
+ *
+ * If the returned key was created, then it may still be under construction,
+ * and wait_for_key_construction() should be used to wait for that to complete.
  */
 struct key *request_key_and_link(struct key_type *type,
 				 const char *description,
-				 const char *callout_info,
+				 const void *callout_info,
+				 size_t callout_len,
 				 void *aux,
 				 struct key *dest_keyring,
 				 unsigned long flags)
 {
-	struct key_user *user;
+	const struct cred *cred = current_cred();
 	struct key *key;
 	key_ref_t key_ref;
+	int ret;
 
-	kenter("%s,%s,%s,%p,%p,%lx",
-	       type->name, description, callout_info, aux,
+	kenter("%s,%s,%p,%zu,%p,%p,%lx",
+	       type->name, description, callout_info, callout_len, aux,
 	       dest_keyring, flags);
 
 	/* search all the process keyrings for a key */
-	key_ref = search_process_keyrings(type, description, type->match,
-					  current);
-
-	kdebug("search 1: %p", key_ref);
+	key_ref = search_process_keyrings(type, description, type->match, cred);
 
 	if (!IS_ERR(key_ref)) {
 		key = key_ref_to_ptr(key_ref);
-	}
-	else if (PTR_ERR(key_ref) != -EAGAIN) {
-		key = ERR_PTR(PTR_ERR(key_ref));
-	}
-	else  {
+		if (dest_keyring) {
+			construct_get_dest_keyring(&dest_keyring);
+			ret = key_link(dest_keyring, key);
+			key_put(dest_keyring);
+			if (ret < 0) {
+				key_put(key);
+				key = ERR_PTR(ret);
+				goto error;
+			}
+		}
+	} else if (PTR_ERR(key_ref) != -EAGAIN) {
+		key = ERR_CAST(key_ref);
+	} else  {
 		/* the search failed, but the keyrings were searchable, so we
 		 * should consult userspace if we can */
 		key = ERR_PTR(-ENOKEY);
 		if (!callout_info)
 			goto error;
 
-		/* - get hold of the user's construction queue */
-		user = key_user_lookup(current->fsuid);
-		if (!user)
-			goto nomem;
-
-		for (;;) {
-			if (signal_pending(current))
-				goto interrupted;
-
-			/* ask userspace (returns NULL if it waited on a key
-			 * being constructed) */
-			key = request_key_construction(type, description,
-						       callout_info, aux,
-						       user, flags);
-			if (key)
-				break;
-
-			/* someone else made the key we want, so we need to
-			 * search again as it might now be available to us */
-			key_ref = search_process_keyrings(type, description,
-							  type->match,
-							  current);
-
-			kdebug("search 2: %p", key_ref);
-
-			if (!IS_ERR(key_ref)) {
-				key = key_ref_to_ptr(key_ref);
-				break;
-			}
-
-			if (PTR_ERR(key_ref) != -EAGAIN) {
-				key = ERR_PTR(PTR_ERR(key_ref));
-				break;
-			}
-		}
-
-		key_user_put(user);
-
-		/* link the new key into the appropriate keyring */
-		if (!IS_ERR(key))
-			request_key_link(key, dest_keyring);
+		key = construct_key_and_link(type, description, callout_info,
+					     callout_len, aux, dest_keyring,
+					     flags);
 	}
 
 error:
 	kleave(" = %p", key);
 	return key;
+}
 
-nomem:
-	key = ERR_PTR(-ENOMEM);
-	goto error;
+/**
+ * wait_for_key_construction - Wait for construction of a key to complete
+ * @key: The key being waited for.
+ * @intr: Whether to wait interruptibly.
+ *
+ * Wait for a key to finish being constructed.
+ *
+ * Returns 0 if successful; -ERESTARTSYS if the wait was interrupted; -ENOKEY
+ * if the key was negated; or -EKEYREVOKED or -EKEYEXPIRED if the key was
+ * revoked or expired.
+ */
+int wait_for_key_construction(struct key *key, bool intr)
+{
+	int ret;
 
-interrupted:
-	key_user_put(user);
-	key = ERR_PTR(-EINTR);
-	goto error;
+	ret = wait_on_bit(&key->flags, KEY_FLAG_USER_CONSTRUCT,
+			  intr ? key_wait_bit_intr : key_wait_bit,
+			  intr ? TASK_INTERRUPTIBLE : TASK_UNINTERRUPTIBLE);
+	if (ret < 0)
+		return ret;
+	if (test_bit(KEY_FLAG_NEGATIVE, &key->flags))
+		return key->type_data.reject_error;
+	return key_validate(key);
+}
+EXPORT_SYMBOL(wait_for_key_construction);
 
-} /* end request_key_and_link() */
-
-/*****************************************************************************/
-/*
- * request a key
- * - search the process's keyrings
- * - check the list of keys being created or updated
- * - call out to userspace for a key if supplementary info was provided
+/**
+ * request_key - Request a key and wait for construction
+ * @type: Type of key.
+ * @description: The searchable description of the key.
+ * @callout_info: The data to pass to the instantiation upcall (or NULL).
+ *
+ * As for request_key_and_link() except that it does not add the returned key
+ * to a keyring if found, new keys are always allocated in the user's quota,
+ * the callout_info must be a NUL-terminated string and no auxiliary data can
+ * be passed.
+ *
+ * Furthermore, it then works as wait_for_key_construction() to wait for the
+ * completion of keys undergoing construction with a non-interruptible wait.
  */
 struct key *request_key(struct key_type *type,
 			const char *description,
 			const char *callout_info)
 {
-	return request_key_and_link(type, description, callout_info, NULL,
-				    NULL, KEY_ALLOC_IN_QUOTA);
+	struct key *key;
+	size_t callout_len = 0;
+	int ret;
 
-} /* end request_key() */
-
+	if (callout_info)
+		callout_len = strlen(callout_info);
+	key = request_key_and_link(type, description, callout_info, callout_len,
+				   NULL, NULL, KEY_ALLOC_IN_QUOTA);
+	if (!IS_ERR(key)) {
+		ret = wait_for_key_construction(key, false);
+		if (ret < 0) {
+			key_put(key);
+			return ERR_PTR(ret);
+		}
+	}
+	return key;
+}
 EXPORT_SYMBOL(request_key);
 
-/*****************************************************************************/
-/*
- * request a key with auxiliary data for the upcaller
- * - search the process's keyrings
- * - check the list of keys being created or updated
- * - call out to userspace for a key if supplementary info was provided
+/**
+ * request_key_with_auxdata - Request a key with auxiliary data for the upcaller
+ * @type: The type of key we want.
+ * @description: The searchable description of the key.
+ * @callout_info: The data to pass to the instantiation upcall (or NULL).
+ * @callout_len: The length of callout_info.
+ * @aux: Auxiliary data for the upcall.
+ *
+ * As for request_key_and_link() except that it does not add the returned key
+ * to a keyring if found and new keys are always allocated in the user's quota.
+ *
+ * Furthermore, it then works as wait_for_key_construction() to wait for the
+ * completion of keys undergoing construction with a non-interruptible wait.
  */
 struct key *request_key_with_auxdata(struct key_type *type,
 				     const char *description,
-				     const char *callout_info,
+				     const void *callout_info,
+				     size_t callout_len,
 				     void *aux)
 {
-	return request_key_and_link(type, description, callout_info, aux,
-				    NULL, KEY_ALLOC_IN_QUOTA);
+	struct key *key;
+	int ret;
 
-} /* end request_key_with_auxdata() */
-
+	key = request_key_and_link(type, description, callout_info, callout_len,
+				   aux, NULL, KEY_ALLOC_IN_QUOTA);
+	if (!IS_ERR(key)) {
+		ret = wait_for_key_construction(key, false);
+		if (ret < 0) {
+			key_put(key);
+			return ERR_PTR(ret);
+		}
+	}
+	return key;
+}
 EXPORT_SYMBOL(request_key_with_auxdata);
+
+/*
+ * request_key_async - Request a key (allow async construction)
+ * @type: Type of key.
+ * @description: The searchable description of the key.
+ * @callout_info: The data to pass to the instantiation upcall (or NULL).
+ * @callout_len: The length of callout_info.
+ *
+ * As for request_key_and_link() except that it does not add the returned key
+ * to a keyring if found, new keys are always allocated in the user's quota and
+ * no auxiliary data can be passed.
+ *
+ * The caller should call wait_for_key_construction() to wait for the
+ * completion of the returned key if it is still undergoing construction.
+ */
+struct key *request_key_async(struct key_type *type,
+			      const char *description,
+			      const void *callout_info,
+			      size_t callout_len)
+{
+	return request_key_and_link(type, description, callout_info,
+				    callout_len, NULL, NULL,
+				    KEY_ALLOC_IN_QUOTA);
+}
+EXPORT_SYMBOL(request_key_async);
+
+/*
+ * request a key with auxiliary data for the upcaller (allow async construction)
+ * @type: Type of key.
+ * @description: The searchable description of the key.
+ * @callout_info: The data to pass to the instantiation upcall (or NULL).
+ * @callout_len: The length of callout_info.
+ * @aux: Auxiliary data for the upcall.
+ *
+ * As for request_key_and_link() except that it does not add the returned key
+ * to a keyring if found and new keys are always allocated in the user's quota.
+ *
+ * The caller should call wait_for_key_construction() to wait for the
+ * completion of the returned key if it is still undergoing construction.
+ */
+struct key *request_key_async_with_auxdata(struct key_type *type,
+					   const char *description,
+					   const void *callout_info,
+					   size_t callout_len,
+					   void *aux)
+{
+	return request_key_and_link(type, description, callout_info,
+				    callout_len, aux, NULL, KEY_ALLOC_IN_QUOTA);
+}
+EXPORT_SYMBOL(request_key_async_with_auxdata);

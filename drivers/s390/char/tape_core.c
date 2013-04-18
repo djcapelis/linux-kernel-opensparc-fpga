@@ -1,9 +1,8 @@
 /*
- *  drivers/s390/char/tape_core.c
  *    basic function of the tape device driver
  *
  *  S390 and zSeries version
- *    Copyright IBM Corp. 2001,2006
+ *    Copyright IBM Corp. 2001, 2009
  *    Author(s): Carsten Otte <cotte@de.ibm.com>
  *		 Michael Holzheu <holzheu@de.ibm.com>
  *		 Tuan Ngo-Anh <ngoanh@de.ibm.com>
@@ -11,12 +10,16 @@
  *		 Stefan Bader <shbader@de.ibm.com>
  */
 
+#define KMSG_COMPONENT "tape"
+#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+
 #include <linux/module.h>
 #include <linux/init.h>	     // for kernel parameters
 #include <linux/kmod.h>	     // for requesting modules
 #include <linux/spinlock.h>  // for locks
 #include <linux/vmalloc.h>
 #include <linux/list.h>
+#include <linux/slab.h>
 
 #include <asm/types.h>	     // for variable types
 
@@ -25,7 +28,6 @@
 #include "tape.h"
 #include "tape_std.h"
 
-#define PRINTK_HEADER "TAPE_CORE: "
 #define LONG_BUSY_TIMEOUT 180 /* seconds */
 
 static void __tape_do_irq (struct ccw_device *, unsigned long, struct irb *);
@@ -37,7 +39,7 @@ static void tape_long_busy_timeout(unsigned long data);
  * we can assign the devices to minor numbers of the same major
  * The list is protected by the rwlock
  */
-static struct list_head tape_device_list = LIST_HEAD_INIT(tape_device_list);
+static LIST_HEAD(tape_device_list);
 static DEFINE_RWLOCK(tape_device_lock);
 
 /*
@@ -76,32 +78,9 @@ const char *tape_op_verbose[TO_SIZE] =
 	[TO_KEKL_QUERY] = "KLQ",[TO_RDC] = "RDC",
 };
 
-static int
-busid_to_int(char *bus_id)
+static int devid_to_int(struct ccw_dev_id *dev_id)
 {
-	int	dec;
-	int	d;
-	char *	s;
-
-	for(s = bus_id, d = 0; *s != '\0' && *s != '.'; s++)
-		d = (d * 10) + (*s - '0');
-	dec = d;
-	for(s++, d = 0; *s != '\0' && *s != '.'; s++)
-		d = (d * 10) + (*s - '0');
-	dec = (dec << 8) + d;
-
-	for(s++; *s != '\0'; s++) {
-		if (*s >= '0' && *s <= '9') {
-			d = *s - '0';
-		} else if (*s >= 'a' && *s <= 'f') {
-			d = *s - 'a' + 10;
-		} else {
-			d = *s - 'A' + 10;
-		}
-		dec = (dec << 4) + d;
-	}
-
-	return dec;
+	return dev_id->devno + (dev_id->ssid << 16);
 }
 
 /*
@@ -115,7 +94,7 @@ tape_medium_state_show(struct device *dev, struct device_attribute *attr, char *
 {
 	struct tape_device *tdev;
 
-	tdev = (struct tape_device *) dev->driver_data;
+	tdev = dev_get_drvdata(dev);
 	return scnprintf(buf, PAGE_SIZE, "%i\n", tdev->medium_state);
 }
 
@@ -127,7 +106,7 @@ tape_first_minor_show(struct device *dev, struct device_attribute *attr, char *b
 {
 	struct tape_device *tdev;
 
-	tdev = (struct tape_device *) dev->driver_data;
+	tdev = dev_get_drvdata(dev);
 	return scnprintf(buf, PAGE_SIZE, "%i\n", tdev->first_minor);
 }
 
@@ -139,7 +118,7 @@ tape_state_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct tape_device *tdev;
 
-	tdev = (struct tape_device *) dev->driver_data;
+	tdev = dev_get_drvdata(dev);
 	return scnprintf(buf, PAGE_SIZE, "%s\n", (tdev->first_minor < 0) ?
 		"OFFLINE" : tape_state_verbose[tdev->tape_state]);
 }
@@ -153,7 +132,7 @@ tape_operation_show(struct device *dev, struct device_attribute *attr, char *buf
 	struct tape_device *tdev;
 	ssize_t rc;
 
-	tdev = (struct tape_device *) dev->driver_data;
+	tdev = dev_get_drvdata(dev);
 	if (tdev->first_minor < 0)
 		return scnprintf(buf, PAGE_SIZE, "N/A\n");
 
@@ -179,7 +158,7 @@ tape_blocksize_show(struct device *dev, struct device_attribute *attr, char *buf
 {
 	struct tape_device *tdev;
 
-	tdev = (struct tape_device *) dev->driver_data;
+	tdev = dev_get_drvdata(dev);
 
 	return scnprintf(buf, PAGE_SIZE, "%i\n", tdev->char_data.block_size);
 }
@@ -229,27 +208,79 @@ tape_state_set(struct tape_device *device, enum tape_state newstate)
 	wake_up(&device->state_change_wq);
 }
 
+struct tape_med_state_work_data {
+	struct tape_device *device;
+	enum tape_medium_state state;
+	struct work_struct  work;
+};
+
+static void
+tape_med_state_work_handler(struct work_struct *work)
+{
+	static char env_state_loaded[] = "MEDIUM_STATE=LOADED";
+	static char env_state_unloaded[] = "MEDIUM_STATE=UNLOADED";
+	struct tape_med_state_work_data *p =
+		container_of(work, struct tape_med_state_work_data, work);
+	struct tape_device *device = p->device;
+	char *envp[] = { NULL, NULL };
+
+	switch (p->state) {
+	case MS_UNLOADED:
+		pr_info("%s: The tape cartridge has been successfully "
+			"unloaded\n", dev_name(&device->cdev->dev));
+		envp[0] = env_state_unloaded;
+		kobject_uevent_env(&device->cdev->dev.kobj, KOBJ_CHANGE, envp);
+		break;
+	case MS_LOADED:
+		pr_info("%s: A tape cartridge has been mounted\n",
+			dev_name(&device->cdev->dev));
+		envp[0] = env_state_loaded;
+		kobject_uevent_env(&device->cdev->dev.kobj, KOBJ_CHANGE, envp);
+		break;
+	default:
+		break;
+	}
+	tape_put_device(device);
+	kfree(p);
+}
+
+static void
+tape_med_state_work(struct tape_device *device, enum tape_medium_state state)
+{
+	struct tape_med_state_work_data *p;
+
+	p = kzalloc(sizeof(*p), GFP_ATOMIC);
+	if (p) {
+		INIT_WORK(&p->work, tape_med_state_work_handler);
+		p->device = tape_get_device(device);
+		p->state = state;
+		schedule_work(&p->work);
+	}
+}
+
 void
 tape_med_state_set(struct tape_device *device, enum tape_medium_state newstate)
 {
-	if (device->medium_state == newstate)
+	enum tape_medium_state oldstate;
+
+	oldstate = device->medium_state;
+	if (oldstate == newstate)
 		return;
+	device->medium_state = newstate;
 	switch(newstate){
 	case MS_UNLOADED:
 		device->tape_generic_status |= GMT_DR_OPEN(~0);
-		PRINT_INFO("(%s): Tape is unloaded\n",
-			   device->cdev->dev.bus_id);
+		if (oldstate == MS_LOADED)
+			tape_med_state_work(device, MS_UNLOADED);
 		break;
 	case MS_LOADED:
 		device->tape_generic_status &= ~GMT_DR_OPEN(~0);
-		PRINT_INFO("(%s): Tape has been mounted\n",
-			   device->cdev->dev.bus_id);
+		if (oldstate == MS_UNLOADED)
+			tape_med_state_work(device, MS_LOADED);
 		break;
 	default:
-		// print nothing
 		break;
 	}
-	device->medium_state = newstate;
 	wake_up(&device->state_change_wq);
 }
 
@@ -356,7 +387,6 @@ tape_generic_online(struct tape_device *device,
 	/* Let the discipline have a go at the device. */
 	device->discipline = discipline;
 	if (!try_module_get(discipline->owner)) {
-		PRINT_ERR("Cannot get module. Module gone.\n");
 		return -EINVAL;
 	}
 
@@ -370,9 +400,6 @@ tape_generic_online(struct tape_device *device,
 	rc = tapechar_setup_device(device);
 	if (rc)
 		goto out_minor;
-	rc = tapeblock_setup_device(device);
-	if (rc)
-		goto out_char;
 
 	tape_state_set(device, TS_UNUSED);
 
@@ -380,13 +407,11 @@ tape_generic_online(struct tape_device *device,
 
 	return 0;
 
-out_char:
-	tapechar_cleanup_device(device);
+out_minor:
+	tape_remove_minor(device);
 out_discipline:
 	device->discipline->cleanup_device(device);
 	device->discipline = NULL;
-out_minor:
-	tape_remove_minor(device);
 out:
 	module_put(discipline->owner);
 	return rc;
@@ -395,12 +420,60 @@ out:
 static void
 tape_cleanup_device(struct tape_device *device)
 {
-	tapeblock_cleanup_device(device);
 	tapechar_cleanup_device(device);
 	device->discipline->cleanup_device(device);
 	module_put(device->discipline->owner);
 	tape_remove_minor(device);
 	tape_med_state_set(device, MS_UNKNOWN);
+}
+
+/*
+ * Suspend device.
+ *
+ * Called by the common I/O layer if the drive should be suspended on user
+ * request. We refuse to suspend if the device is loaded or in use for the
+ * following reason:
+ * While the Linux guest is suspended, it might be logged off which causes
+ * devices to be detached. Tape devices are automatically rewound and unloaded
+ * during DETACH processing (unless the tape device was attached with the
+ * NOASSIGN or MULTIUSER option). After rewind/unload, there is no way to
+ * resume the original state of the tape device, since we would need to
+ * manually re-load the cartridge which was active at suspend time.
+ */
+int tape_generic_pm_suspend(struct ccw_device *cdev)
+{
+	struct tape_device *device;
+
+	device = dev_get_drvdata(&cdev->dev);
+	if (!device) {
+		return -ENODEV;
+	}
+
+	DBF_LH(3, "(%08x): tape_generic_pm_suspend(%p)\n",
+		device->cdev_id, device);
+
+	if (device->medium_state != MS_UNLOADED) {
+		pr_err("A cartridge is loaded in tape device %s, "
+		       "refusing to suspend\n", dev_name(&cdev->dev));
+		return -EBUSY;
+	}
+
+	spin_lock_irq(get_ccwdev_lock(device->cdev));
+	switch (device->tape_state) {
+		case TS_INIT:
+		case TS_NOT_OPER:
+		case TS_UNUSED:
+			spin_unlock_irq(get_ccwdev_lock(device->cdev));
+			break;
+		default:
+			pr_err("Tape device %s is busy, refusing to "
+			       "suspend\n", dev_name(&cdev->dev));
+			spin_unlock_irq(get_ccwdev_lock(device->cdev));
+			return -EBUSY;
+	}
+
+	DBF_LH(3, "(%08x): Drive suspended.\n", device->cdev_id);
+	return 0;
 }
 
 /*
@@ -411,10 +484,12 @@ tape_cleanup_device(struct tape_device *device)
  * Manual offline is only allowed while the drive is not in use.
  */
 int
-tape_generic_offline(struct tape_device *device)
+tape_generic_offline(struct ccw_device *cdev)
 {
+	struct tape_device *device;
+
+	device = dev_get_drvdata(&cdev->dev);
 	if (!device) {
-		PRINT_ERR("tape_generic_offline: no such device\n");
 		return -ENODEV;
 	}
 
@@ -436,9 +511,6 @@ tape_generic_offline(struct tape_device *device)
 			DBF_EVENT(3, "(%08x): Set offline failed "
 				"- drive in use.\n",
 				device->cdev_id);
-			PRINT_WARN("(%s): Set offline failed "
-				"- drive in use.\n",
-				device->cdev->dev.bus_id);
 			spin_unlock_irq(get_ccwdev_lock(device->cdev));
 			return -EBUSY;
 	}
@@ -458,20 +530,19 @@ tape_alloc_device(void)
 	device = kzalloc(sizeof(struct tape_device), GFP_KERNEL);
 	if (device == NULL) {
 		DBF_EXCEPTION(2, "ti:no mem\n");
-		PRINT_INFO ("can't allocate memory for "
-			    "tape info structure\n");
 		return ERR_PTR(-ENOMEM);
 	}
 	device->modeset_byte = kmalloc(1, GFP_KERNEL | GFP_DMA);
 	if (device->modeset_byte == NULL) {
 		DBF_EXCEPTION(2, "ti:no mem\n");
-		PRINT_INFO("can't allocate memory for modeset byte\n");
 		kfree(device);
 		return ERR_PTR(-ENOMEM);
 	}
+	mutex_init(&device->mutex);
 	INIT_LIST_HEAD(&device->req_queue);
 	INIT_LIST_HEAD(&device->node);
 	init_waitqueue_head(&device->state_change_wq);
+	init_waitqueue_head(&device->wait_queue);
 	device->tape_state = TS_INIT;
 	device->medium_state = MS_UNKNOWN;
 	*device->modeset_byte = 0;
@@ -487,11 +558,12 @@ tape_alloc_device(void)
  * increment the reference count.
  */
 struct tape_device *
-tape_get_device_reference(struct tape_device *device)
+tape_get_device(struct tape_device *device)
 {
-	DBF_EVENT(4, "tape_get_device_reference(%p) = %i\n", device,
-		atomic_inc_return(&device->ref_count));
+	int count;
 
+	count = atomic_inc_return(&device->ref_count);
+	DBF_EVENT(4, "tape_get_device(%p) = %i\n", device, count);
 	return device;
 }
 
@@ -501,33 +573,25 @@ tape_get_device_reference(struct tape_device *device)
  * The function returns a NULL pointer to be used by the caller
  * for clearing reference pointers.
  */
-struct tape_device *
+void
 tape_put_device(struct tape_device *device)
 {
-	int remain;
+	int count;
 
-	remain = atomic_dec_return(&device->ref_count);
-	if (remain > 0) {
-		DBF_EVENT(4, "tape_put_device(%p) -> %i\n", device, remain);
-	} else {
-		if (remain < 0) {
-			DBF_EVENT(4, "put device without reference\n");
-			PRINT_ERR("put device without reference\n");
-		} else {
-			DBF_EVENT(4, "tape_free_device(%p)\n", device);
-			kfree(device->modeset_byte);
-			kfree(device);
-		}
+	count = atomic_dec_return(&device->ref_count);
+	DBF_EVENT(4, "tape_put_device(%p) -> %i\n", device, count);
+	BUG_ON(count < 0);
+	if (count == 0) {
+		kfree(device->modeset_byte);
+		kfree(device);
 	}
-
-	return NULL;			
 }
 
 /*
  * Find tape device by a device index.
  */
 struct tape_device *
-tape_get_device(int devindex)
+tape_find_device(int devindex)
 {
 	struct tape_device *device, *tmp;
 
@@ -535,7 +599,7 @@ tape_get_device(int devindex)
 	read_lock(&tape_device_lock);
 	list_for_each_entry(tmp, &tape_device_list, node) {
 		if (tmp->first_minor / TAPE_MINORS_PER_DEV == devindex) {
-			device = tape_get_device_reference(tmp);
+			device = tape_get_device(tmp);
 			break;
 		}
 	}
@@ -551,22 +615,23 @@ tape_generic_probe(struct ccw_device *cdev)
 {
 	struct tape_device *device;
 	int ret;
+	struct ccw_dev_id dev_id;
 
 	device = tape_alloc_device();
 	if (IS_ERR(device))
 		return -ENODEV;
-	ccw_device_set_options(cdev, CCWDEV_DO_PATHGROUP);
+	ccw_device_set_options(cdev, CCWDEV_DO_PATHGROUP |
+				     CCWDEV_DO_MULTIPATH);
 	ret = sysfs_create_group(&cdev->dev.kobj, &tape_attr_group);
 	if (ret) {
 		tape_put_device(device);
-		PRINT_ERR("probe failed for tape device %s\n", cdev->dev.bus_id);
 		return ret;
 	}
-	cdev->dev.driver_data = device;
+	dev_set_drvdata(&cdev->dev, device);
 	cdev->handler = __tape_do_irq;
 	device->cdev = cdev;
-	device->cdev_id = busid_to_int(cdev->dev.bus_id);
-	PRINT_INFO("tape device %s found\n", cdev->dev.bus_id);
+	ccw_device_get_id(cdev, &dev_id);
+	device->cdev_id = devid_to_int(&dev_id);
 	return ret;
 }
 
@@ -583,7 +648,8 @@ __tape_discard_requests(struct tape_device *device)
 		list_del(&request->list);
 
 		/* Decrease ref_count for removed request. */
-		request->device = tape_put_device(device);
+		request->device = NULL;
+		tape_put_device(device);
 		request->rc = -EIO;
 		if (request->callback != NULL)
 			request->callback(request, request->callback_data);
@@ -601,9 +667,8 @@ tape_generic_remove(struct ccw_device *cdev)
 {
 	struct tape_device *	device;
 
-	device = cdev->dev.driver_data;
+	device = dev_get_drvdata(&cdev->dev);
 	if (!device) {
-		PRINT_ERR("No device pointer in tape_generic_remove!\n");
 		return;
 	}
 	DBF_LH(3, "(%08x): tape_generic_remove(%p)\n", device->cdev_id, cdev);
@@ -634,19 +699,19 @@ tape_generic_remove(struct ccw_device *cdev)
 			 */
 			DBF_EVENT(3, "(%08x): Drive in use vanished!\n",
 				device->cdev_id);
-			PRINT_WARN("(%s): Drive in use vanished - "
-				"expect trouble!\n",
-				device->cdev->dev.bus_id);
-			PRINT_WARN("State was %i\n", device->tape_state);
+			pr_warning("%s: A tape unit was detached while in "
+				   "use\n", dev_name(&device->cdev->dev));
 			tape_state_set(device, TS_NOT_OPER);
 			__tape_discard_requests(device);
 			spin_unlock_irq(get_ccwdev_lock(device->cdev));
 			tape_cleanup_device(device);
 	}
 
-	if (cdev->dev.driver_data != NULL) {
+	device = dev_get_drvdata(&cdev->dev);
+	if (device) {
 		sysfs_remove_group(&cdev->dev.kobj, &tape_attr_group);
-		cdev->dev.driver_data = tape_put_device(cdev->dev.driver_data);
+		dev_set_drvdata(&cdev->dev, NULL);
+		tape_put_device(device);
 	}
 }
 
@@ -658,8 +723,7 @@ tape_alloc_request(int cplength, int datasize)
 {
 	struct tape_request *request;
 
-	if (datasize > PAGE_SIZE || (cplength*sizeof(struct ccw1)) > PAGE_SIZE)
-		BUG();
+	BUG_ON(datasize > PAGE_SIZE || (cplength*sizeof(struct ccw1)) > PAGE_SIZE);
 
 	DBF_LH(6, "tape_alloc_request(%d, %d)\n", cplength, datasize);
 
@@ -702,9 +766,8 @@ tape_free_request (struct tape_request * request)
 {
 	DBF_LH(6, "Free request %p\n", request);
 
-	if (request->device != NULL) {
-		request->device = tape_put_device(request->device);
-	}
+	if (request->device)
+		tape_put_device(request->device);
 	kfree(request->cpdata);
 	kfree(request->cpaddr);
 	kfree(request);
@@ -715,10 +778,6 @@ __tape_start_io(struct tape_device *device, struct tape_request *request)
 {
 	int rc;
 
-#ifdef CONFIG_S390_TAPE_BLOCK
-	if (request->op == TO_BLOCK)
-		device->discipline->check_locate(device, request);
-#endif
 	rc = ccw_device_start(
 		device->cdev,
 		request->cpaddr,
@@ -816,11 +875,11 @@ static void tape_long_busy_timeout(unsigned long data)
 	device = (struct tape_device *) data;
 	spin_lock_irq(get_ccwdev_lock(device->cdev));
 	request = list_entry(device->req_queue.next, struct tape_request, list);
-	if (request->status != TAPE_REQUEST_LONG_BUSY)
-		BUG();
+	BUG_ON(request->status != TAPE_REQUEST_LONG_BUSY);
 	DBF_LH(6, "%08x: Long busy timeout.\n", device->cdev_id);
 	__tape_start_next_request(device);
-	device->lb_timeout.data = (unsigned long) tape_put_device(device);
+	device->lb_timeout.data = 0UL;
+	tape_put_device(device);
 	spin_unlock_irq(get_ccwdev_lock(device->cdev));
 }
 
@@ -849,30 +908,6 @@ __tape_end_request(
 }
 
 /*
- * Write sense data to console/dbf
- */
-void
-tape_dump_sense(struct tape_device* device, struct tape_request *request,
-		struct irb *irb)
-{
-	unsigned int *sptr;
-
-	PRINT_INFO("-------------------------------------------------\n");
-	PRINT_INFO("DSTAT : %02x  CSTAT: %02x	CPA: %04x\n",
-		   irb->scsw.dstat, irb->scsw.cstat, irb->scsw.cpa);
-	PRINT_INFO("DEVICE: %s\n", device->cdev->dev.bus_id);
-	if (request != NULL)
-		PRINT_INFO("OP	  : %s\n", tape_op_verbose[request->op]);
-
-	sptr = (unsigned int *) irb->ecw;
-	PRINT_INFO("Sense data: %08X %08X %08X %08X \n",
-		   sptr[0], sptr[1], sptr[2], sptr[3]);
-	PRINT_INFO("Sense data: %08X %08X %08X %08X \n",
-		   sptr[4], sptr[5], sptr[6], sptr[7]);
-	PRINT_INFO("--------------------------------------------------\n");
-}
-
-/*
  * Write sense data to dbf
  */
 void
@@ -887,7 +922,7 @@ tape_dump_sense_dbf(struct tape_device *device, struct tape_request *request,
 	else
 		op = "---";
 	DBF_EVENT(3, "DSTAT : %02x   CSTAT: %02x\n",
-		  irb->scsw.dstat,irb->scsw.cstat);
+		  irb->scsw.cmd.dstat, irb->scsw.cmd.cstat);
 	DBF_EVENT(3, "DEVICE: %08x OP\t: %s\n", device->cdev_id, op);
 	sptr = (unsigned int *) irb->ecw;
 	DBF_EVENT(3, "%08x %08x\n", sptr[0], sptr[1]);
@@ -924,7 +959,7 @@ __tape_start_request(struct tape_device *device, struct tape_request *request)
 	}
 
 	/* Increase use count of device for the added request. */
-	request->device = tape_get_device_reference(device);
+	request->device = tape_get_device(device);
 
 	if (list_empty(&device->req_queue)) {
 		/* No other requests are on the queue. Start this one. */
@@ -975,21 +1010,19 @@ __tape_wake_up(struct tape_request *request, void *data)
 int
 tape_do_io(struct tape_device *device, struct tape_request *request)
 {
-	wait_queue_head_t wq;
 	int rc;
 
-	init_waitqueue_head(&wq);
 	spin_lock_irq(get_ccwdev_lock(device->cdev));
 	/* Setup callback */
 	request->callback = __tape_wake_up;
-	request->callback_data = &wq;
+	request->callback_data = &device->wait_queue;
 	/* Add request to request queue and try to start it. */
 	rc = __tape_start_request(device, request);
 	spin_unlock_irq(get_ccwdev_lock(device->cdev));
 	if (rc)
 		return rc;
 	/* Request added to the queue. Wait for its completion. */
-	wait_event(wq, (request->callback == NULL));
+	wait_event(device->wait_queue, (request->callback == NULL));
 	/* Get rc from request */
 	return request->rc;
 }
@@ -1010,20 +1043,19 @@ int
 tape_do_io_interruptible(struct tape_device *device,
 			 struct tape_request *request)
 {
-	wait_queue_head_t wq;
 	int rc;
 
-	init_waitqueue_head(&wq);
 	spin_lock_irq(get_ccwdev_lock(device->cdev));
 	/* Setup callback */
 	request->callback = __tape_wake_up_interruptible;
-	request->callback_data = &wq;
+	request->callback_data = &device->wait_queue;
 	rc = __tape_start_request(device, request);
 	spin_unlock_irq(get_ccwdev_lock(device->cdev));
 	if (rc)
 		return rc;
 	/* Request added to the queue. Wait for its completion. */
-	rc = wait_event_interruptible(wq, (request->callback == NULL));
+	rc = wait_event_interruptible(device->wait_queue,
+				      (request->callback == NULL));
 	if (rc != -ERESTARTSYS)
 		/* Request finished normally. */
 		return request->rc;
@@ -1036,7 +1068,7 @@ tape_do_io_interruptible(struct tape_device *device,
 		/* Wait for the interrupt that acknowledges the halt. */
 		do {
 			rc = wait_event_interruptible(
-				wq,
+				device->wait_queue,
 				(request->callback == NULL)
 			);
 		} while (rc == -ERESTARTSYS);
@@ -1071,10 +1103,8 @@ __tape_do_irq (struct ccw_device *cdev, unsigned long intparm, struct irb *irb)
 	struct tape_request *request;
 	int rc;
 
-	device = (struct tape_device *) cdev->dev.driver_data;
+	device = dev_get_drvdata(&cdev->dev);
 	if (device == NULL) {
-		PRINT_ERR("could not get device structure for %s "
-			  "in interrupt\n", cdev->dev.bus_id);
 		return;
 	}
 	request = (struct tape_request *) intparm;
@@ -1086,15 +1116,14 @@ __tape_do_irq (struct ccw_device *cdev, unsigned long intparm, struct irb *irb)
 		/* FIXME: What to do with the request? */
 		switch (PTR_ERR(irb)) {
 			case -ETIMEDOUT:
-				PRINT_WARN("(%s): Request timed out\n",
-					cdev->dev.bus_id);
+				DBF_LH(1, "(%08x): Request timed out\n",
+				       device->cdev_id);
 			case -EIO:
 				__tape_end_request(device, request, -EIO);
 				break;
 			default:
-				PRINT_ERR("(%s): Unexpected i/o error %li\n",
-					cdev->dev.bus_id,
-					PTR_ERR(irb));
+				DBF_LH(1, "(%08x): Unexpected i/o error %li\n",
+				       device->cdev_id,	PTR_ERR(irb));
 		}
 		return;
 	}
@@ -1106,10 +1135,11 @@ __tape_do_irq (struct ccw_device *cdev, unsigned long intparm, struct irb *irb)
 	 * error might still apply. So we just schedule the request to be
 	 * started later.
 	 */
-	if (irb->scsw.cc != 0 && (irb->scsw.fctl & SCSW_FCTL_START_FUNC) &&
+	if (irb->scsw.cmd.cc != 0 &&
+	    (irb->scsw.cmd.fctl & SCSW_FCTL_START_FUNC) &&
 	    (request->status == TAPE_REQUEST_IN_IO)) {
 		DBF_EVENT(3,"(%08x): deferred cc=%i, fctl=%i. restarting\n",
-			device->cdev_id, irb->scsw.cc, irb->scsw.fctl);
+			device->cdev_id, irb->scsw.cmd.cc, irb->scsw.cmd.fctl);
 		request->status = TAPE_REQUEST_QUEUED;
 		schedule_delayed_work(&device->tape_dnr, HZ);
 		return;
@@ -1117,8 +1147,8 @@ __tape_do_irq (struct ccw_device *cdev, unsigned long intparm, struct irb *irb)
 
 	/* May be an unsolicited irq */
 	if(request != NULL)
-		request->rescnt = irb->scsw.count;
-	else if ((irb->scsw.dstat == 0x85 || irb->scsw.dstat == 0x80) &&
+		request->rescnt = irb->scsw.cmd.count;
+	else if ((irb->scsw.cmd.dstat == 0x85 || irb->scsw.cmd.dstat == 0x80) &&
 		 !list_empty(&device->req_queue)) {
 		/* Not Ready to Ready after long busy ? */
 		struct tape_request *req;
@@ -1127,14 +1157,14 @@ __tape_do_irq (struct ccw_device *cdev, unsigned long intparm, struct irb *irb)
 		if (req->status == TAPE_REQUEST_LONG_BUSY) {
 			DBF_EVENT(3, "(%08x): del timer\n", device->cdev_id);
 			if (del_timer(&device->lb_timeout)) {
-				device->lb_timeout.data = (unsigned long)
-					tape_put_device(device);
+				device->lb_timeout.data = 0UL;
+				tape_put_device(device);
 				__tape_start_next_request(device);
 			}
 			return;
 		}
 	}
-	if (irb->scsw.dstat != 0x0c) {
+	if (irb->scsw.cmd.dstat != 0x0c) {
 		/* Set the 'ONLINE' flag depending on sense byte 1 */
 		if(*(((__u8 *) irb->ecw) + 1) & SENSE_DRIVE_ONLINE)
 			device->tape_generic_status |= GMT_ONLINE(~0);
@@ -1183,7 +1213,7 @@ __tape_do_irq (struct ccw_device *cdev, unsigned long intparm, struct irb *irb)
 			break;
 		case TAPE_IO_LONG_BUSY:
 			device->lb_timeout.data =
-				(unsigned long)tape_get_device_reference(device);
+				(unsigned long) tape_get_device(device);
 			device->lb_timeout.expires = jiffies +
 				LONG_BUSY_TIMEOUT * HZ;
 			DBF_EVENT(3, "(%08x): add timer\n", device->cdev_id);
@@ -1203,8 +1233,6 @@ __tape_do_irq (struct ccw_device *cdev, unsigned long intparm, struct irb *irb)
 		default:
 			if (rc > 0) {
 				DBF_EVENT(6, "xunknownrc\n");
-				PRINT_ERR("Invalid return code from discipline "
-				  	"interrupt function.\n");
 				__tape_end_request(device, request, -EIO);
 			} else {
 				__tape_end_request(device, request, rc);
@@ -1214,14 +1242,14 @@ __tape_do_irq (struct ccw_device *cdev, unsigned long intparm, struct irb *irb)
 }
 
 /*
- * Tape device open function used by tape_char & tape_block frontends.
+ * Tape device open function used by tape_char frontend.
  */
 int
 tape_open(struct tape_device *device)
 {
 	int rc;
 
-	spin_lock(get_ccwdev_lock(device->cdev));
+	spin_lock_irq(get_ccwdev_lock(device->cdev));
 	if (device->tape_state == TS_NOT_OPER) {
 		DBF_EVENT(6, "TAPE:nodev\n");
 		rc = -ENODEV;
@@ -1239,21 +1267,21 @@ tape_open(struct tape_device *device)
 		tape_state_set(device, TS_IN_USE);
 		rc = 0;
 	}
-	spin_unlock(get_ccwdev_lock(device->cdev));
+	spin_unlock_irq(get_ccwdev_lock(device->cdev));
 	return rc;
 }
 
 /*
- * Tape device release function used by tape_char & tape_block frontends.
+ * Tape device release function used by tape_char frontend.
  */
 int
 tape_release(struct tape_device *device)
 {
-	spin_lock(get_ccwdev_lock(device->cdev));
+	spin_lock_irq(get_ccwdev_lock(device->cdev));
 	if (device->tape_state == TS_IN_USE)
 		tape_state_set(device, TS_UNUSED);
 	module_put(device->discipline->owner);
-	spin_unlock(get_ccwdev_lock(device->cdev));
+	spin_unlock_irq(get_ccwdev_lock(device->cdev));
 	return 0;
 }
 
@@ -1305,7 +1333,6 @@ tape_init (void)
 	DBF_EVENT(3, "tape init\n");
 	tape_proc_init();
 	tapechar_init ();
-	tapeblock_init ();
 	return 0;
 }
 
@@ -1319,7 +1346,6 @@ tape_exit(void)
 
 	/* Get rid of the frontends */
 	tapechar_exit();
-	tapeblock_exit();
 	tape_proc_cleanup();
 	debug_unregister (TAPE_DBF_AREA);
 }
@@ -1336,15 +1362,15 @@ EXPORT_SYMBOL(tape_generic_remove);
 EXPORT_SYMBOL(tape_generic_probe);
 EXPORT_SYMBOL(tape_generic_online);
 EXPORT_SYMBOL(tape_generic_offline);
+EXPORT_SYMBOL(tape_generic_pm_suspend);
 EXPORT_SYMBOL(tape_put_device);
-EXPORT_SYMBOL(tape_get_device_reference);
+EXPORT_SYMBOL(tape_get_device);
 EXPORT_SYMBOL(tape_state_verbose);
 EXPORT_SYMBOL(tape_op_verbose);
 EXPORT_SYMBOL(tape_state_set);
 EXPORT_SYMBOL(tape_med_state_set);
 EXPORT_SYMBOL(tape_alloc_request);
 EXPORT_SYMBOL(tape_free_request);
-EXPORT_SYMBOL(tape_dump_sense);
 EXPORT_SYMBOL(tape_dump_sense_dbf);
 EXPORT_SYMBOL(tape_do_io);
 EXPORT_SYMBOL(tape_do_io_async);

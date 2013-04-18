@@ -56,10 +56,6 @@
 #include "rivafb.h"
 #include "nvreg.h"
 
-#ifndef CONFIG_PCI		/* sanity check */
-#error This driver requires PCI support.
-#endif
-
 /* version number of this driver */
 #define RIVAFB_VERSION "0.9.5b"
 
@@ -74,14 +70,14 @@
 #define NVTRACE          if(0) printk
 #endif
 
-#define NVTRACE_ENTER(...)  NVTRACE("%s START\n", __FUNCTION__)
-#define NVTRACE_LEAVE(...)  NVTRACE("%s END\n", __FUNCTION__)
+#define NVTRACE_ENTER(...)  NVTRACE("%s START\n", __func__)
+#define NVTRACE_LEAVE(...)  NVTRACE("%s END\n", __func__)
 
 #ifdef CONFIG_FB_RIVA_DEBUG
 #define assert(expr) \
 	if(!(expr)) { \
 	printk( "Assertion failed! %s,%s,%s,line=%d\n",\
-	#expr,__FILE__,__FUNCTION__,__LINE__); \
+	#expr,__FILE__,__func__,__LINE__); \
 	BUG(); \
 	}
 #else
@@ -209,28 +205,28 @@ MODULE_DEVICE_TABLE(pci, rivafb_pci_tbl);
  * ------------------------------------------------------------------------- */
 
 /* command line data, set in rivafb_setup() */
-static int flatpanel __devinitdata = -1; /* Autodetect later */
-static int forceCRTC __devinitdata = -1;
-static int noaccel   __devinitdata = 0;
+static int flatpanel = -1; /* Autodetect later */
+static int forceCRTC = -1;
+static bool noaccel  = 0;
 #ifdef CONFIG_MTRR
-static int nomtrr __devinitdata = 0;
+static bool nomtrr = 0;
 #endif
 #ifdef CONFIG_PMAC_BACKLIGHT
-static int backlight __devinitdata = 1;
+static int backlight = 1;
 #else
-static int backlight __devinitdata = 0;
+static int backlight = 0;
 #endif
 
-static char *mode_option __devinitdata = NULL;
-static int  strictmode       = 0;
+static char *mode_option = NULL;
+static bool strictmode       = 0;
 
-static struct fb_fix_screeninfo __devinitdata rivafb_fix = {
+static struct fb_fix_screeninfo rivafb_fix = {
 	.type		= FB_TYPE_PACKED_PIXELS,
 	.xpanstep	= 1,
 	.ypanstep	= 1,
 };
 
-static struct fb_var_screeninfo __devinitdata rivafb_default_var = {
+static struct fb_var_screeninfo rivafb_default_var = {
 	.xres		= 640,
 	.yres		= 480,
 	.xres_virtual	= 640,
@@ -307,7 +303,7 @@ static int riva_bl_get_level_brightness(struct riva_par *par,
 
 static int riva_bl_update_status(struct backlight_device *bd)
 {
-	struct riva_par *par = class_get_devdata(&bd->class_dev);
+	struct riva_par *par = bl_get_data(bd);
 	U032 tmp_pcrt, tmp_pmc;
 	int level;
 
@@ -335,13 +331,14 @@ static int riva_bl_get_brightness(struct backlight_device *bd)
 	return bd->props.brightness;
 }
 
-static struct backlight_ops riva_bl_ops = {
+static const struct backlight_ops riva_bl_ops = {
 	.get_brightness = riva_bl_get_brightness,
 	.update_status	= riva_bl_update_status,
 };
 
 static void riva_bl_init(struct riva_par *par)
 {
+	struct backlight_properties props;
 	struct fb_info *info = pci_get_drvdata(par->pdev);
 	struct backlight_device *bd;
 	char name[12];
@@ -357,7 +354,11 @@ static void riva_bl_init(struct riva_par *par)
 
 	snprintf(name, sizeof(name), "rivabl%d", info->node);
 
-	bd = backlight_device_register(name, info->dev, par, &riva_bl_ops);
+	memset(&props, 0, sizeof(struct backlight_properties));
+	props.type = BACKLIGHT_RAW;
+	props.max_brightness = FB_BACKLIGHT_LEVELS - 1;
+	bd = backlight_device_register(name, info->dev, par, &riva_bl_ops,
+				       &props);
 	if (IS_ERR(bd)) {
 		info->bl_dev = NULL;
 		printk(KERN_WARNING "riva: Backlight registration failed\n");
@@ -369,7 +370,6 @@ static void riva_bl_init(struct riva_par *par)
 		MIN_LEVEL * FB_BACKLIGHT_MAX / MAX_LEVEL,
 		FB_BACKLIGHT_MAX);
 
-	bd->props.max_brightness = FB_BACKLIGHT_LEVELS - 1;
 	bd->props.brightness = bd->props.max_brightness;
 	bd->props.power = FB_BLANK_UNBLANK;
 	backlight_update_status(bd);
@@ -1709,7 +1709,7 @@ static struct fb_ops riva_fb_ops = {
 	.fb_sync 	= rivafb_sync,
 };
 
-static int __devinit riva_set_fbinfo(struct fb_info *info)
+static int riva_set_fbinfo(struct fb_info *info)
 {
 	unsigned int cmap_len;
 	struct riva_par *par = info->par;
@@ -1747,7 +1747,7 @@ static int __devinit riva_set_fbinfo(struct fb_info *info)
 }
 
 #ifdef CONFIG_PPC_OF
-static int __devinit riva_get_EDID_OF(struct fb_info *info, struct pci_dev *pd)
+static int riva_get_EDID_OF(struct fb_info *info, struct pci_dev *pd)
 {
 	struct riva_par *par = info->par;
 	struct device_node *dp;
@@ -1780,7 +1780,7 @@ static int __devinit riva_get_EDID_OF(struct fb_info *info, struct pci_dev *pd)
 #endif /* CONFIG_PPC_OF */
 
 #if defined(CONFIG_FB_RIVA_I2C) && !defined(CONFIG_PPC_OF)
-static int __devinit riva_get_EDID_i2c(struct fb_info *info)
+static int riva_get_EDID_i2c(struct fb_info *info)
 {
 	struct riva_par *par = info->par;
 	struct fb_var_screeninfo var;
@@ -1803,8 +1803,8 @@ static int __devinit riva_get_EDID_i2c(struct fb_info *info)
 }
 #endif /* CONFIG_FB_RIVA_I2C */
 
-static void __devinit riva_update_default_var(struct fb_var_screeninfo *var,
-					      struct fb_info *info)
+static void riva_update_default_var(struct fb_var_screeninfo *var,
+				    struct fb_info *info)
 {
 	struct fb_monspecs *specs = &info->monspecs;
 	struct fb_videomode modedb;
@@ -1816,6 +1816,8 @@ static void __devinit riva_update_default_var(struct fb_var_screeninfo *var,
 			     specs->modedb, specs->modedb_len,
 			     NULL, 8);
 	} else if (specs->modedb != NULL) {
+		/* get first mode in database as fallback */
+		modedb = specs->modedb[0];
 		/* get preferred timing */
 		if (info->monspecs.misc & FB_MISC_1ST_DETAIL) {
 			int i;
@@ -1826,9 +1828,6 @@ static void __devinit riva_update_default_var(struct fb_var_screeninfo *var,
 					break;
 				}
 			}
-		} else {
-			/* otherwise, get first mode in database */
-			modedb = specs->modedb[0];
 		}
 		var->bits_per_pixel = 8;
 		riva_update_var(var, &modedb);
@@ -1837,7 +1836,7 @@ static void __devinit riva_update_default_var(struct fb_var_screeninfo *var,
 }
 
 
-static void __devinit riva_get_EDID(struct fb_info *info, struct pci_dev *pdev)
+static void riva_get_EDID(struct fb_info *info, struct pci_dev *pdev)
 {
 	NVTRACE_ENTER();
 #ifdef CONFIG_PPC_OF
@@ -1851,7 +1850,7 @@ static void __devinit riva_get_EDID(struct fb_info *info, struct pci_dev *pdev)
 }
 
 
-static void __devinit riva_get_edidinfo(struct fb_info *info)
+static void riva_get_edidinfo(struct fb_info *info)
 {
 	struct fb_var_screeninfo *var = &rivafb_default_var;
 	struct riva_par *par = info->par;
@@ -1872,7 +1871,7 @@ static void __devinit riva_get_edidinfo(struct fb_info *info)
  *
  * ------------------------------------------------------------------------- */
 
-static u32 __devinit riva_get_arch(struct pci_dev *pd)
+static u32 riva_get_arch(struct pci_dev *pd)
 {
     	u32 arch = 0;
 
@@ -1910,8 +1909,7 @@ static u32 __devinit riva_get_arch(struct pci_dev *pd)
 	return arch;
 }
 
-static int __devinit rivafb_probe(struct pci_dev *pd,
-			     	const struct pci_device_id *ent)
+static int rivafb_probe(struct pci_dev *pd, const struct pci_device_id *ent)
 {
 	struct riva_par *default_par;
 	struct fb_info *info;
@@ -2106,7 +2104,7 @@ err_ret:
 	return ret;
 }
 
-static void __devexit rivafb_remove(struct pci_dev *pd)
+static void rivafb_remove(struct pci_dev *pd)
 {
 	struct fb_info *info = pci_get_drvdata(pd);
 	struct riva_par *par = info->par;
@@ -2146,7 +2144,7 @@ static void __devexit rivafb_remove(struct pci_dev *pd)
  * ------------------------------------------------------------------------- */
 
 #ifndef MODULE
-static int __init rivafb_setup(char *options)
+static int rivafb_setup(char *options)
 {
 	char *this_opt;
 
@@ -2187,7 +2185,7 @@ static struct pci_driver rivafb_driver = {
 	.name		= "rivafb",
 	.id_table	= rivafb_pci_tbl,
 	.probe		= rivafb_probe,
-	.remove		= __devexit_p(rivafb_remove),
+	.remove		= rivafb_remove,
 };
 
 
@@ -2198,7 +2196,7 @@ static struct pci_driver rivafb_driver = {
  *
  * ------------------------------------------------------------------------- */
 
-static int __devinit rivafb_init(void)
+static int rivafb_init(void)
 {
 #ifndef MODULE
 	char *option = NULL;
@@ -2213,14 +2211,12 @@ static int __devinit rivafb_init(void)
 
 module_init(rivafb_init);
 
-#ifdef MODULE
 static void __exit rivafb_exit(void)
 {
 	pci_unregister_driver(&rivafb_driver);
 }
 
 module_exit(rivafb_exit);
-#endif /* MODULE */
 
 module_param(noaccel, bool, 0);
 MODULE_PARM_DESC(noaccel, "bool: disable acceleration");

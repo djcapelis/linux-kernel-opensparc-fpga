@@ -1,6 +1,4 @@
 /*
- * $Id: magellan.c,v 1.16 2002/01/22 20:28:39 vojtech Exp $
- *
  *  Copyright (c) 1999-2001 Vojtech Pavlik
  */
 
@@ -170,7 +168,7 @@ static int magellan_connect(struct serio *serio, struct serio_driver *drv)
 	input_dev->id.version = 0x0100;
 	input_dev->dev.parent = &serio->dev;
 
-	input_dev->evbit[0] = BIT(EV_KEY) | BIT(EV_ABS);
+	input_dev->evbit[0] = BIT_MASK(EV_KEY) | BIT_MASK(EV_ABS);
 
 	for (i = 0; i < 9; i++)
 		set_bit(magellan_buttons[i], input_dev->keybit);
@@ -224,19 +222,4 @@ static struct serio_driver magellan_drv = {
 	.disconnect	= magellan_disconnect,
 };
 
-/*
- * The functions for inserting/removing us as a module.
- */
-
-static int __init magellan_init(void)
-{
-	return serio_register_driver(&magellan_drv);
-}
-
-static void __exit magellan_exit(void)
-{
-	serio_unregister_driver(&magellan_drv);
-}
-
-module_init(magellan_init);
-module_exit(magellan_exit);
+module_serio_driver(magellan_drv);

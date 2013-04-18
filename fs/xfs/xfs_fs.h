@@ -66,6 +66,7 @@ struct fsxattr {
 #define XFS_XFLAG_EXTSIZE	0x00000800	/* extent size allocator hint */
 #define XFS_XFLAG_EXTSZINHERIT	0x00001000	/* inherit inode extent size */
 #define XFS_XFLAG_NODEFRAG	0x00002000  	/* do not defragment */
+#define XFS_XFLAG_FILESTREAM	0x00004000	/* use filestream allocator */
 #define XFS_XFLAG_HASATTR	0x80000000	/* no DIFLAG for this	*/
 
 /*
@@ -112,22 +113,16 @@ struct getbmapx {
 #define BMV_IF_ATTRFORK		0x1	/* return attr fork rather than data */
 #define BMV_IF_NO_DMAPI_READ	0x2	/* Do not generate DMAPI read event  */
 #define BMV_IF_PREALLOC		0x4	/* rtn status BMV_OF_PREALLOC if req */
-#define BMV_IF_VALID	(BMV_IF_ATTRFORK|BMV_IF_NO_DMAPI_READ|BMV_IF_PREALLOC)
-#ifdef __KERNEL__
-#define BMV_IF_EXTENDED 0x40000000	/* getpmapx if set */
-#endif
+#define BMV_IF_DELALLOC		0x8	/* rtn status BMV_OF_DELALLOC if req */
+#define BMV_IF_NO_HOLES		0x10	/* Do not return holes */
+#define BMV_IF_VALID	\
+	(BMV_IF_ATTRFORK|BMV_IF_NO_DMAPI_READ|BMV_IF_PREALLOC|	\
+	 BMV_IF_DELALLOC|BMV_IF_NO_HOLES)
 
-/*	bmv_oflags values - returned for for each non-header segment */
+/*	bmv_oflags values - returned for each non-header segment */
 #define BMV_OF_PREALLOC		0x1	/* segment = unwritten pre-allocation */
-
-/*	Convert getbmap <-> getbmapx - move fields from p1 to p2. */
-#define GETBMAP_CONVERT(p1,p2) {	\
-	p2.bmv_offset = p1.bmv_offset;	\
-	p2.bmv_block = p1.bmv_block;	\
-	p2.bmv_length = p1.bmv_length;	\
-	p2.bmv_count = p1.bmv_count;	\
-	p2.bmv_entries = p1.bmv_entries;  }
-
+#define BMV_OF_DELALLOC		0x2	/* segment = delayed allocation */
+#define BMV_OF_LAST		0x4	/* segment is the last in the file */
 
 /*
  * Structure for XFS_IOC_FSSETDM.
@@ -238,16 +233,27 @@ typedef struct xfs_fsop_resblks {
 #define XFS_FSOP_GEOM_FLAGS_LOGV2	0x0100	/* log format version 2	*/
 #define XFS_FSOP_GEOM_FLAGS_SECTOR	0x0200	/* sector sizes >1BB	*/
 #define XFS_FSOP_GEOM_FLAGS_ATTR2	0x0400	/* inline attributes rework */
+#define XFS_FSOP_GEOM_FLAGS_PROJID32	0x0800  /* 32-bit project IDs	*/
+#define XFS_FSOP_GEOM_FLAGS_DIRV2CI	0x1000	/* ASCII only CI names	*/
+#define XFS_FSOP_GEOM_FLAGS_LAZYSB	0x4000	/* lazy superblock counters */
 
 
 /*
  * Minimum and maximum sizes need for growth checks
  */
 #define XFS_MIN_AG_BLOCKS	64
-#define XFS_MIN_LOG_BLOCKS	512
-#define XFS_MAX_LOG_BLOCKS	(64 * 1024)
-#define XFS_MIN_LOG_BYTES	(256 * 1024)
-#define XFS_MAX_LOG_BYTES	(128 * 1024 * 1024)
+#define XFS_MIN_LOG_BLOCKS	512ULL
+#define XFS_MAX_LOG_BLOCKS	(1024 * 1024ULL)
+#define XFS_MIN_LOG_BYTES	(10 * 1024 * 1024ULL)
+
+/* keep the maximum size under 2^31 by a small amount */
+#define XFS_MAX_LOG_BYTES \
+	((2 * 1024 * 1024 * 1024ULL) - XFS_MIN_LOG_BYTES)
+
+/* Used for sanity checks on superblock */
+#define XFS_MAX_DBLOCKS(s) ((xfs_drfsbno_t)(s)->sb_agcount * (s)->sb_agblocks)
+#define XFS_MIN_DBLOCKS(s) ((xfs_drfsbno_t)((s)->sb_agcount - 1) *	\
+			 (s)->sb_agblocks + XFS_MIN_AG_BLOCKS)
 
 /*
  * Structures for XFS_IOC_FSGROWFSDATA, XFS_IOC_FSGROWFSLOG & XFS_IOC_FSGROWFSRT
@@ -293,8 +299,11 @@ typedef struct xfs_bstat {
 	__s32		bs_extsize;	/* extent size			*/
 	__s32		bs_extents;	/* number of extents		*/
 	__u32		bs_gen;		/* generation count		*/
-	__u16		bs_projid;	/* project id			*/
-	unsigned char	bs_pad[14];	/* pad space, unused		*/
+	__u16		bs_projid_lo;	/* lower part of project id	*/
+#define	bs_projid	bs_projid_lo	/* (previously just bs_projid)	*/
+	__u16		bs_forkoff;	/* inode fork offset in bytes	*/
+	__u16		bs_projid_hi;	/* higher part of project id	*/
+	unsigned char	bs_pad[10];	/* pad space, unused		*/
 	__u32		bs_dmevmask;	/* DMIG event mask		*/
 	__u16		bs_dmstate;	/* DMIG state info		*/
 	__u16		bs_aextents;	/* attribute number of extents	*/
@@ -328,6 +337,35 @@ typedef struct xfs_error_injection {
 	__s32		fd;
 	__s32		errtag;
 } xfs_error_injection_t;
+
+
+/*
+ * Speculative preallocation trimming.
+ */
+#define XFS_EOFBLOCKS_VERSION		1
+struct xfs_eofblocks {
+	__u32		eof_version;
+	__u32		eof_flags;
+	uid_t		eof_uid;
+	gid_t		eof_gid;
+	prid_t		eof_prid;
+	__u32		pad32;
+	__u64		eof_min_file_size;
+	__u64		pad64[12];
+};
+
+/* eof_flags values */
+#define XFS_EOF_FLAGS_SYNC		(1 << 0) /* sync/wait mode scan */
+#define XFS_EOF_FLAGS_UID		(1 << 1) /* filter by uid */
+#define XFS_EOF_FLAGS_GID		(1 << 2) /* filter by gid */
+#define XFS_EOF_FLAGS_PRID		(1 << 3) /* filter by project id */
+#define XFS_EOF_FLAGS_MINFILESIZE	(1 << 4) /* filter by min file size */
+#define XFS_EOF_FLAGS_VALID	\
+	(XFS_EOF_FLAGS_SYNC |	\
+	 XFS_EOF_FLAGS_UID |	\
+	 XFS_EOF_FLAGS_GID |	\
+	 XFS_EOF_FLAGS_PRID |	\
+	 XFS_EOF_FLAGS_MINFILESIZE)
 
 
 /*
@@ -369,6 +407,9 @@ typedef struct xfs_fsop_attrlist_handlereq {
 
 typedef struct xfs_attr_multiop {
 	__u32		am_opcode;
+#define ATTR_OP_GET	1	/* return the indicated attr's value */
+#define ATTR_OP_SET	2	/* set/create the indicated attr/value pair */
+#define ATTR_OP_REMOVE	3	/* remove the indicated attr */
 	__s32		am_error;
 	void		__user *am_attrname;
 	void		__user *am_attrvalue;
@@ -387,29 +428,12 @@ typedef struct xfs_fsop_attrmulti_handlereq {
  */
 typedef struct { __u32 val[2]; } xfs_fsid_t; /* file system id type */
 
-
-#ifndef HAVE_FID
-#define MAXFIDSZ	46
-
-typedef struct fid {
-	__u16		fid_len;		/* length of data in bytes */
-	unsigned char	fid_data[MAXFIDSZ];	/* data (fid_len worth)  */
-} fid_t;
-#endif
-
 typedef struct xfs_fid {
-	__u16	xfs_fid_len;		/* length of remainder	*/
-	__u16	xfs_fid_pad;
-	__u32	xfs_fid_gen;		/* generation number	*/
-	__u64	xfs_fid_ino;		/* 64 bits inode number */
+	__u16	fid_len;		/* length of remainder	*/
+	__u16	fid_pad;
+	__u32	fid_gen;		/* generation number	*/
+	__u64	fid_ino;		/* 64 bits inode number */
 } xfs_fid_t;
-
-typedef struct xfs_fid2 {
-	__u16	fid_len;	/* length of remainder */
-	__u16	fid_pad;	/* padding, must be zero */
-	__u32	fid_gen;	/* generation number */
-	__u64	fid_ino;	/* inode number */
-} xfs_fid2_t;
 
 typedef struct xfs_handle {
 	union {
@@ -420,9 +444,9 @@ typedef struct xfs_handle {
 } xfs_handle_t;
 #define ha_fsid ha_u._ha_fsid
 
-#define XFS_HSIZE(handle)	(((char *) &(handle).ha_fid.xfs_fid_pad	 \
+#define XFS_HSIZE(handle)	(((char *) &(handle).ha_fid.fid_pad	 \
 				 - (char *) &(handle))			  \
-				 + (handle).ha_fid.xfs_fid_len)
+				 + (handle).ha_fid.fid_len)
 
 /*
  * Flags for going down operation
@@ -434,9 +458,9 @@ typedef struct xfs_handle {
 /*
  * ioctl commands that are used by Linux filesystems
  */
-#define XFS_IOC_GETXFLAGS	_IOR('f', 1, long)
-#define XFS_IOC_SETXFLAGS	_IOW('f', 2, long)
-#define XFS_IOC_GETVERSION	_IOR('v', 1, long)
+#define XFS_IOC_GETXFLAGS	FS_IOC_GETFLAGS
+#define XFS_IOC_SETXFLAGS	FS_IOC_SETFLAGS
+#define XFS_IOC_GETVERSION	FS_IOC_GETVERSION
 
 /*
  * ioctl commands that replace IRIX fcntl()'s
@@ -461,6 +485,8 @@ typedef struct xfs_handle {
 /*	XFS_IOC_SETBIOSIZE ---- deprecated 46	   */
 /*	XFS_IOC_GETBIOSIZE ---- deprecated 47	   */
 #define XFS_IOC_GETBMAPX	_IOWR('X', 56, struct getbmap)
+#define XFS_IOC_ZERO_RANGE	_IOW ('X', 57, struct xfs_flock64)
+#define XFS_IOC_FREE_EOFBLOCKS	_IOR ('X', 58, struct xfs_eofblocks)
 
 /*
  * ioctl commands that replace IRIX syssgi()'s
@@ -484,8 +510,8 @@ typedef struct xfs_handle {
 #define XFS_IOC_ERROR_INJECTION	     _IOW ('X', 116, struct xfs_error_injection)
 #define XFS_IOC_ERROR_CLEARALL	     _IOW ('X', 117, struct xfs_error_injection)
 /*	XFS_IOC_ATTRCTL_BY_HANDLE -- deprecated 118	 */
-#define XFS_IOC_FREEZE		     _IOWR('X', 119, int)
-#define XFS_IOC_THAW		     _IOWR('X', 120, int)
+/*	XFS_IOC_FREEZE		  -- FIFREEZE   119	 */
+/*	XFS_IOC_THAW		  -- FITHAW     120	 */
 #define XFS_IOC_FSSETDM_BY_HANDLE    _IOW ('X', 121, struct xfs_fsop_setdm_handlereq)
 #define XFS_IOC_ATTRLIST_BY_HANDLE   _IOW ('X', 122, struct xfs_fsop_attrlist_handlereq)
 #define XFS_IOC_ATTRMULTI_BY_HANDLE  _IOW ('X', 123, struct xfs_fsop_attrmulti_handlereq)

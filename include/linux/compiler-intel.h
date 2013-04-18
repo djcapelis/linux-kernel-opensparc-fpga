@@ -1,4 +1,6 @@
-/* Never include this file directly.  Include <linux/compiler.h> instead.  */
+#ifndef __LINUX_COMPILER_H
+#error "Please don't include <linux/compiler-intel.h> directly, include <linux/compiler.h> instead."
+#endif
 
 #ifdef __ECC
 
@@ -27,3 +29,10 @@
 #endif
 
 #define uninitialized_var(x) x
+
+#ifndef __HAVE_BUILTIN_BSWAP16__
+/* icc has this, but it's called _bswap16 */
+#define __HAVE_BUILTIN_BSWAP16__
+#define __builtin_bswap16 _bswap16
+#endif
+

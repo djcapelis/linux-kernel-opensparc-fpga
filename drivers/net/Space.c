@@ -29,7 +29,6 @@
  */
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
-#include <linux/trdevice.h>
 #include <linux/errno.h>
 #include <linux/init.h>
 #include <linux/netlink.h>
@@ -55,8 +54,6 @@ extern struct net_device *eth16i_probe(int unit);
 extern struct net_device *i82596_probe(int unit);
 extern struct net_device *ewrk3_probe(int unit);
 extern struct net_device *el1_probe(int unit);
-extern struct net_device *wavelan_probe(int unit);
-extern struct net_device *arlan_probe(int unit);
 extern struct net_device *el16_probe(int unit);
 extern struct net_device *elmc_probe(int unit);
 extern struct net_device *elplus_probe(int unit);
@@ -68,18 +65,13 @@ extern struct net_device *ni5010_probe(int unit);
 extern struct net_device *ni52_probe(int unit);
 extern struct net_device *ni65_probe(int unit);
 extern struct net_device *sonic_probe(int unit);
-extern struct net_device *SK_init(int unit);
 extern struct net_device *seeq8005_probe(int unit);
 extern struct net_device *smc_init(int unit);
 extern struct net_device *atarilance_probe(int unit);
 extern struct net_device *sun3lance_probe(int unit);
 extern struct net_device *sun3_82586_probe(int unit);
 extern struct net_device *apne_probe(int unit);
-extern struct net_device *bionet_probe(int unit);
-extern struct net_device *pamsnet_probe(int unit);
 extern struct net_device *cs89x0_probe(int unit);
-extern struct net_device *hplance_probe(int unit);
-extern struct net_device *bagetlance_probe(int unit);
 extern struct net_device *mvme147lance_probe(int unit);
 extern struct net_device *tc515_probe(int unit);
 extern struct net_device *lance_probe(int unit);
@@ -141,22 +133,9 @@ static struct devprobe2 eisa_probes[] __initdata = {
 	{NULL, 0},
 };
 
-static struct devprobe2 mca_probes[] __initdata = {
-#ifdef CONFIG_NE2_MCA
-	{ne2_probe, 0},
-#endif
-#ifdef CONFIG_ELMC		/* 3c523 */
-	{elmc_probe, 0},
-#endif
-#ifdef CONFIG_ELMC_II		/* 3c527 */
-	{mc32_probe, 0},
-#endif
-	{NULL, 0},
-};
-
 /*
  * ISA probes that touch addresses < 0x400 (including those that also
- * look for EISA/PCI/MCA cards in addition to ISA cards).
+ * look for EISA/PCI cards in addition to ISA cards).
  */
 static struct devprobe2 isa_probes[] __initdata = {
 #if defined(CONFIG_HP100) && defined(CONFIG_ISA)	/* ISA, EISA */
@@ -197,7 +176,9 @@ static struct devprobe2 isa_probes[] __initdata = {
 	{seeq8005_probe, 0},
 #endif
 #ifdef CONFIG_CS89x0
+#ifndef CONFIG_CS89x0_PLATFORM
  	{cs89x0_probe, 0},
+#endif
 #endif
 #ifdef CONFIG_AT1700
 	{at1700_probe, 0},
@@ -219,12 +200,6 @@ static struct devprobe2 isa_probes[] __initdata = {
 #endif
 #ifdef CONFIG_EL1		/* 3c501 */
 	{el1_probe, 0},
-#endif
-#ifdef CONFIG_WAVELAN		/* WaveLAN */
-	{wavelan_probe, 0},
-#endif
-#ifdef CONFIG_ARLAN		/* Aironet */
-	{arlan_probe, 0},
 #endif
 #ifdef CONFIG_EL16		/* 3c507 */
 	{el16_probe, 0},
@@ -264,12 +239,6 @@ static struct devprobe2 m68k_probes[] __initdata = {
 #ifdef CONFIG_APNE		/* A1200 PCMCIA NE2000 */
 	{apne_probe, 0},
 #endif
-#ifdef CONFIG_ATARI_BIONET	/* Atari Bionet Ethernet board */
-	{bionet_probe, 0},
-#endif
-#ifdef CONFIG_ATARI_PAMSNET	/* Atari PAMsNet Ethernet board */
-	{pamsnet_probe, 0},
-#endif
 #ifdef CONFIG_MVME147_NET	/* MVME147 internal Ethernet */
 	{mvme147lance_probe, 0},
 #endif
@@ -296,50 +265,9 @@ static void __init ethif_probe2(int unit)
 
 	(void)(	probe_list2(unit, m68k_probes, base_addr == 0) &&
 		probe_list2(unit, eisa_probes, base_addr == 0) &&
-		probe_list2(unit, mca_probes, base_addr == 0) &&
 		probe_list2(unit, isa_probes, base_addr == 0) &&
 		probe_list2(unit, parport_probes, base_addr == 0));
 }
-
-#ifdef CONFIG_TR
-/* Token-ring device probe */
-extern int ibmtr_probe_card(struct net_device *);
-extern struct net_device *smctr_probe(int unit);
-
-static struct devprobe2 tr_probes2[] __initdata = {
-#ifdef CONFIG_SMCTR
-	{smctr_probe, 0},
-#endif
-	{NULL, 0},
-};
-
-static __init int trif_probe(int unit)
-{
-	int err = -ENODEV;
-#ifdef CONFIG_IBMTR
-	struct net_device *dev = alloc_trdev(0);
-	if (!dev)
-		return -ENOMEM;
-
-	sprintf(dev->name, "tr%d", unit);
-	netdev_boot_setup_check(dev);
-	err = ibmtr_probe_card(dev);
-	if (err)
-		free_netdev(dev);
-#endif
-	return err;
-}
-
-static void __init trif_probe2(int unit)
-{
-	unsigned long base_addr = netdev_boot_base("tr", unit);
-
-	if (base_addr == 1)
-		return;
-	probe_list2(unit, tr_probes2, base_addr == 0);
-}
-#endif
-
 
 /*  Statically configured drivers -- order matters here. */
 static int __init net_olddevs_init(void)
@@ -349,11 +277,6 @@ static int __init net_olddevs_init(void)
 #ifdef CONFIG_SBNI
 	for (num = 0; num < 8; ++num)
 		sbni_probe(num);
-#endif
-#ifdef CONFIG_TR
-	for (num = 0; num < 8; ++num)
-		if (!trif_probe(num))
-			trif_probe2(num);
 #endif
 	for (num = 0; num < 8; ++num)
 		ethif_probe2(num);

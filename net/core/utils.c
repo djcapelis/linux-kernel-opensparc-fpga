@@ -22,25 +22,26 @@
 #include <linux/net.h>
 #include <linux/string.h>
 #include <linux/types.h>
-#include <linux/random.h>
 #include <linux/percpu.h>
 #include <linux/init.h>
+#include <linux/ratelimit.h>
+
+#include <net/sock.h>
+#include <net/net_ratelimit.h>
 
 #include <asm/byteorder.h>
-#include <asm/system.h>
 #include <asm/uaccess.h>
 
-int net_msg_cost __read_mostly = 5*HZ;
-int net_msg_burst __read_mostly = 10;
 int net_msg_warn __read_mostly = 1;
 EXPORT_SYMBOL(net_msg_warn);
 
+DEFINE_RATELIMIT_STATE(net_ratelimit_state, 5 * HZ, 10);
 /*
  * All net warning printk()s should be guarded by this function.
  */
 int net_ratelimit(void)
 {
-	return __printk_ratelimit(net_msg_cost, net_msg_burst);
+	return __ratelimit(&net_ratelimit_state);
 }
 EXPORT_SYMBOL(net_ratelimit);
 
@@ -57,14 +58,11 @@ __be32 in_aton(const char *str)
 	int i;
 
 	l = 0;
-	for (i = 0; i < 4; i++)
-	{
+	for (i = 0; i < 4; i++)	{
 		l <<= 8;
-		if (*str != '\0')
-		{
+		if (*str != '\0') {
 			val = 0;
-			while (*str != '\0' && *str != '.' && *str != '\n')
-			{
+			while (*str != '\0' && *str != '.' && *str != '\n') {
 				val *= 10;
 				val += *str - '0';
 				str++;
@@ -74,9 +72,8 @@ __be32 in_aton(const char *str)
 				str++;
 		}
 	}
-	return(htonl(l));
+	return htonl(l);
 }
-
 EXPORT_SYMBOL(in_aton);
 
 #define IN6PTON_XDIGIT		0x00010000
@@ -90,36 +87,38 @@ EXPORT_SYMBOL(in_aton);
 #define IN6PTON_NULL		0x20000000	/* first/tail */
 #define IN6PTON_UNKNOWN		0x40000000
 
-static inline int digit2bin(char c, int delim)
-{
-	if (c == delim || c == '\0')
-		return IN6PTON_DELIM;
-	if (c == '.')
-		return IN6PTON_DOT;
-	if (c >= '0' && c <= '9')
-		return (IN6PTON_DIGIT | (c - '0'));
-	return IN6PTON_UNKNOWN;
-}
-
 static inline int xdigit2bin(char c, int delim)
 {
+	int val;
+
 	if (c == delim || c == '\0')
 		return IN6PTON_DELIM;
 	if (c == ':')
 		return IN6PTON_COLON_MASK;
 	if (c == '.')
 		return IN6PTON_DOT;
-	if (c >= '0' && c <= '9')
-		return (IN6PTON_XDIGIT | IN6PTON_DIGIT| (c - '0'));
-	if (c >= 'a' && c <= 'f')
-		return (IN6PTON_XDIGIT | (c - 'a' + 10));
-	if (c >= 'A' && c <= 'F')
-		return (IN6PTON_XDIGIT | (c - 'A' + 10));
+
+	val = hex_to_bin(c);
+	if (val >= 0)
+		return val | IN6PTON_XDIGIT | (val < 10 ? IN6PTON_DIGIT : 0);
+
 	if (delim == -1)
 		return IN6PTON_DELIM;
 	return IN6PTON_UNKNOWN;
 }
 
+/**
+ * in4_pton - convert an IPv4 address from literal to binary representation
+ * @src: the start of the IPv4 address string
+ * @srclen: the length of the string, -1 means strlen(src)
+ * @dst: the binary (u8[4] array) representation of the IPv4 address
+ * @delim: the delimiter of the IPv4 address in @src, -1 means no delimiter
+ * @end: A pointer to the end of the parsed string will be placed here
+ *
+ * Return one on success, return zero when any error occurs
+ * and @end will point to the end of the parsed string.
+ *
+ */
 int in4_pton(const char *src, int srclen,
 	     u8 *dst,
 	     int delim, const char **end)
@@ -172,9 +171,20 @@ out:
 		*end = s;
 	return ret;
 }
-
 EXPORT_SYMBOL(in4_pton);
 
+/**
+ * in6_pton - convert an IPv6 address from literal to binary representation
+ * @src: the start of the IPv6 address string
+ * @srclen: the length of the string, -1 means strlen(src)
+ * @dst: the binary (u8[16] array) representation of the IPv6 address
+ * @delim: the delimiter of the IPv6 address in @src, -1 means no delimiter
+ * @end: A pointer to the end of the parsed string will be placed here
+ *
+ * Return one on success, return zero when any error occurs
+ * and @end will point to the end of the parsed string.
+ *
+ */
 int in6_pton(const char *src, int srclen,
 	     u8 *dst,
 	     int delim, const char **end)
@@ -290,5 +300,64 @@ out:
 		*end = s;
 	return ret;
 }
-
 EXPORT_SYMBOL(in6_pton);
+
+void inet_proto_csum_replace4(__sum16 *sum, struct sk_buff *skb,
+			      __be32 from, __be32 to, int pseudohdr)
+{
+	__be32 diff[] = { ~from, to };
+	if (skb->ip_summed != CHECKSUM_PARTIAL) {
+		*sum = csum_fold(csum_partial(diff, sizeof(diff),
+				~csum_unfold(*sum)));
+		if (skb->ip_summed == CHECKSUM_COMPLETE && pseudohdr)
+			skb->csum = ~csum_partial(diff, sizeof(diff),
+						~skb->csum);
+	} else if (pseudohdr)
+		*sum = ~csum_fold(csum_partial(diff, sizeof(diff),
+				csum_unfold(*sum)));
+}
+EXPORT_SYMBOL(inet_proto_csum_replace4);
+
+void inet_proto_csum_replace16(__sum16 *sum, struct sk_buff *skb,
+			       const __be32 *from, const __be32 *to,
+			       int pseudohdr)
+{
+	__be32 diff[] = {
+		~from[0], ~from[1], ~from[2], ~from[3],
+		to[0], to[1], to[2], to[3],
+	};
+	if (skb->ip_summed != CHECKSUM_PARTIAL) {
+		*sum = csum_fold(csum_partial(diff, sizeof(diff),
+				 ~csum_unfold(*sum)));
+		if (skb->ip_summed == CHECKSUM_COMPLETE && pseudohdr)
+			skb->csum = ~csum_partial(diff, sizeof(diff),
+						  ~skb->csum);
+	} else if (pseudohdr)
+		*sum = ~csum_fold(csum_partial(diff, sizeof(diff),
+				  csum_unfold(*sum)));
+}
+EXPORT_SYMBOL(inet_proto_csum_replace16);
+
+int mac_pton(const char *s, u8 *mac)
+{
+	int i;
+
+	/* XX:XX:XX:XX:XX:XX */
+	if (strlen(s) < 3 * ETH_ALEN - 1)
+		return 0;
+
+	/* Don't dirty result unless string is valid MAC. */
+	for (i = 0; i < ETH_ALEN; i++) {
+		if (!strchr("0123456789abcdefABCDEF", s[i * 3]))
+			return 0;
+		if (!strchr("0123456789abcdefABCDEF", s[i * 3 + 1]))
+			return 0;
+		if (i != ETH_ALEN - 1 && s[i * 3 + 2] != ':')
+			return 0;
+	}
+	for (i = 0; i < ETH_ALEN; i++) {
+		mac[i] = (hex_to_bin(s[i * 3]) << 4) | hex_to_bin(s[i * 3 + 1]);
+	}
+	return 1;
+}
+EXPORT_SYMBOL(mac_pton);

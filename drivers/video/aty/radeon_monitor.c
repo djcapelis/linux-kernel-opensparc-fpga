@@ -1,4 +1,7 @@
 #include "radeonfb.h"
+
+#include <linux/slab.h>
+
 #include "../edid.h"
 
 static struct fb_var_screeninfo radeonfb_default_var = {
@@ -59,8 +62,8 @@ static char *radeon_get_mon_name(int type)
  * models with broken OF probing by hard-coding known EDIDs for some Mac
  * laptops internal LVDS panel. (XXX: not done yet)
  */
-static int __devinit radeon_parse_montype_prop(struct device_node *dp, u8 **out_EDID,
-					       int hdno)
+static int radeon_parse_montype_prop(struct device_node *dp, u8 **out_EDID,
+				     int hdno)
 {
         static char *propnames[] = { "DFP,EDID", "LCD,EDID", "EDID",
 				     "EDID1", "EDID2",  NULL };
@@ -69,11 +72,11 @@ static int __devinit radeon_parse_montype_prop(struct device_node *dp, u8 **out_
 	u8 *tmp;
         int i, mt = MT_NONE;  
 	
-	RTRACE("analyzing OF properties...\n");
+	pr_debug("analyzing OF properties...\n");
 	pmt = of_get_property(dp, "display-type", NULL);
 	if (!pmt)
 		return MT_NONE;
-	RTRACE("display-type: %s\n", pmt);
+	pr_debug("display-type: %s\n", pmt);
 	/* OF says "LCD" for DFP as well, we discriminate from the caller of this
 	 * function
 	 */
@@ -112,12 +115,12 @@ static int __devinit radeon_parse_montype_prop(struct device_node *dp, u8 **out_
 	return mt;
 }
 
-static int __devinit radeon_probe_OF_head(struct radeonfb_info *rinfo, int head_no,
-					  u8 **out_EDID)
+static int radeon_probe_OF_head(struct radeonfb_info *rinfo, int head_no,
+				u8 **out_EDID)
 {
         struct device_node *dp;
 
-	RTRACE("radeon_probe_OF_head\n");
+	pr_debug("radeon_probe_OF_head\n");
 
         dp = rinfo->of_node;
         while (dp == NULL)
@@ -135,7 +138,7 @@ static int __devinit radeon_probe_OF_head(struct radeonfb_info *rinfo, int head_
 			if (!pname)
 				return MT_NONE;
 			len = strlen(pname);
-			RTRACE("head: %s (letter: %c, head_no: %d)\n",
+			pr_debug("head: %s (letter: %c, head_no: %d)\n",
 			       pname, pname[len-1], head_no);
 			if (pname[len-1] == 'A' && head_no == 0) {
 				int mt = radeon_parse_montype_prop(dp, out_EDID, 0);
@@ -160,7 +163,7 @@ static int __devinit radeon_probe_OF_head(struct radeonfb_info *rinfo, int head_
 #endif /* CONFIG_PPC_OF || CONFIG_SPARC */
 
 
-static int __devinit radeon_get_panel_info_BIOS(struct radeonfb_info *rinfo)
+static int radeon_get_panel_info_BIOS(struct radeonfb_info *rinfo)
 {
 	unsigned long tmp, tmp0;
 	char stmp[30];
@@ -185,7 +188,7 @@ static int __devinit radeon_get_panel_info_BIOS(struct radeonfb_info *rinfo)
 		rinfo->panel_info.xres, rinfo->panel_info.yres);
 
 	rinfo->panel_info.pwr_delay = BIOS_IN16(tmp + 44);
-	RTRACE("BIOS provided panel power delay: %d\n", rinfo->panel_info.pwr_delay);
+	pr_debug("BIOS provided panel power delay: %d\n", rinfo->panel_info.pwr_delay);
 	if (rinfo->panel_info.pwr_delay > 2000 || rinfo->panel_info.pwr_delay <= 0)
 		rinfo->panel_info.pwr_delay = 2000;
 
@@ -199,16 +202,16 @@ static int __devinit radeon_get_panel_info_BIOS(struct radeonfb_info *rinfo)
 	    rinfo->panel_info.fbk_divider > 3) {
 		rinfo->panel_info.use_bios_dividers = 1;
 		printk(KERN_INFO "radeondb: BIOS provided dividers will be used\n");
-		RTRACE("ref_divider = %x\n", rinfo->panel_info.ref_divider);
-		RTRACE("post_divider = %x\n", rinfo->panel_info.post_divider);
-		RTRACE("fbk_divider = %x\n", rinfo->panel_info.fbk_divider);
+		pr_debug("ref_divider = %x\n", rinfo->panel_info.ref_divider);
+		pr_debug("post_divider = %x\n", rinfo->panel_info.post_divider);
+		pr_debug("fbk_divider = %x\n", rinfo->panel_info.fbk_divider);
 	}
-	RTRACE("Scanning BIOS table ...\n");
+	pr_debug("Scanning BIOS table ...\n");
 	for(i=0; i<32; i++) {
 		tmp0 = BIOS_IN16(tmp+64+i*2);
 		if (tmp0 == 0)
 			break;
-		RTRACE(" %d x %d\n", BIOS_IN16(tmp0), BIOS_IN16(tmp0+2));
+		pr_debug(" %d x %d\n", BIOS_IN16(tmp0), BIOS_IN16(tmp0+2));
 		if ((BIOS_IN16(tmp0) == rinfo->panel_info.xres) &&
 		    (BIOS_IN16(tmp0+2) == rinfo->panel_info.yres)) {
 			rinfo->panel_info.hblank = (BIOS_IN16(tmp0+17) - BIOS_IN16(tmp0+19)) * 8;
@@ -227,19 +230,19 @@ static int __devinit radeon_get_panel_info_BIOS(struct radeonfb_info *rinfo)
 			/* Mark panel infos valid */
 			rinfo->panel_info.valid = 1;
 
-			RTRACE("Found panel in BIOS table:\n");
-			RTRACE("  hblank: %d\n", rinfo->panel_info.hblank);
-			RTRACE("  hOver_plus: %d\n", rinfo->panel_info.hOver_plus);
-			RTRACE("  hSync_width: %d\n", rinfo->panel_info.hSync_width);
-			RTRACE("  vblank: %d\n", rinfo->panel_info.vblank);
-			RTRACE("  vOver_plus: %d\n", rinfo->panel_info.vOver_plus);
-			RTRACE("  vSync_width: %d\n", rinfo->panel_info.vSync_width);
-			RTRACE("  clock: %d\n", rinfo->panel_info.clock);
+			pr_debug("Found panel in BIOS table:\n");
+			pr_debug("  hblank: %d\n", rinfo->panel_info.hblank);
+			pr_debug("  hOver_plus: %d\n", rinfo->panel_info.hOver_plus);
+			pr_debug("  hSync_width: %d\n", rinfo->panel_info.hSync_width);
+			pr_debug("  vblank: %d\n", rinfo->panel_info.vblank);
+			pr_debug("  vOver_plus: %d\n", rinfo->panel_info.vOver_plus);
+			pr_debug("  vSync_width: %d\n", rinfo->panel_info.vSync_width);
+			pr_debug("  clock: %d\n", rinfo->panel_info.clock);
 				
 			return 1;
 		}
 	}
-	RTRACE("Didn't find panel in BIOS table !\n");
+	pr_debug("Didn't find panel in BIOS table !\n");
 
 	return 0;
 }
@@ -248,7 +251,7 @@ static int __devinit radeon_get_panel_info_BIOS(struct radeonfb_info *rinfo)
  * doesn't quite work yet, but it's output is still useful for
  * debugging
  */
-static void __devinit radeon_parse_connector_info(struct radeonfb_info *rinfo)
+static void radeon_parse_connector_info(struct radeonfb_info *rinfo)
 {
 	int offset, chips, connectors, tmp, i, conn, type;
 
@@ -271,18 +274,18 @@ static void __devinit radeon_parse_connector_info(struct radeonfb_info *rinfo)
 	 * DEBUG is enabled
 	 */
 	chips = BIOS_IN8(offset++) >> 4;
-	RTRACE("%d chips in connector info\n", chips);
+	pr_debug("%d chips in connector info\n", chips);
 	for (i = 0; i < chips; i++) {
 		tmp = BIOS_IN8(offset++);
 		connectors = tmp & 0x0f;
-		RTRACE(" - chip %d has %d connectors\n", tmp >> 4, connectors);
+		pr_debug(" - chip %d has %d connectors\n", tmp >> 4, connectors);
 		for (conn = 0; ; conn++) {
 			tmp = BIOS_IN16(offset);
 			if (tmp == 0)
 				break;
 			offset += 2;
 			type = (tmp >> 12) & 0x0f;
-			RTRACE("  * connector %d of type %d (%s) : %04x\n",
+			pr_debug("  * connector %d of type %d (%s) : %04x\n",
 			       conn, type, __conn_type_table[type], tmp);
 		}
 	}
@@ -294,7 +297,7 @@ static void __devinit radeon_parse_connector_info(struct radeonfb_info *rinfo)
  * as well and currently is only implemented for the CRT DAC, the
  * code for the TVDAC is commented out in XFree as "non working"
  */
-static int __devinit radeon_crt_is_connected(struct radeonfb_info *rinfo, int is_crt_dac)
+static int radeon_crt_is_connected(struct radeonfb_info *rinfo, int is_crt_dac)
 {
     int	          connected = 0;
 
@@ -366,8 +369,8 @@ static int __devinit radeon_crt_is_connected(struct radeonfb_info *rinfo, int is
  * Parse the "monitor_layout" string if any. This code is mostly
  * copied from XFree's radeon driver
  */
-static int __devinit radeon_parse_monitor_layout(struct radeonfb_info *rinfo,
-						 const char *monitor_layout)
+static int radeon_parse_monitor_layout(struct radeonfb_info *rinfo,
+				       const char *monitor_layout)
 {
 	char s1[5], s2[5];
 	int i = 0, second = 0;
@@ -430,8 +433,8 @@ static int __devinit radeon_parse_monitor_layout(struct radeonfb_info *rinfo,
  * try to retrieve EDID. The algorithm here comes from XFree's radeon
  * driver
  */
-void __devinit radeon_probe_screens(struct radeonfb_info *rinfo,
-				    const char *monitor_layout, int ignore_edid)
+void radeon_probe_screens(struct radeonfb_info *rinfo,
+			  const char *monitor_layout, int ignore_edid)
 {
 #ifdef CONFIG_FB_RADEON_I2C
 	int ddc_crt2_used = 0;	
@@ -449,7 +452,7 @@ void __devinit radeon_probe_screens(struct radeonfb_info *rinfo,
 		 * a layout for each card ?
 		 */
 
-		RTRACE("Using specified monitor layout: %s", monitor_layout);
+		pr_debug("Using specified monitor layout: %s", monitor_layout);
 #ifdef CONFIG_FB_RADEON_I2C
 		if (!ignore_edid) {
 			if (rinfo->mon1_type != MT_NONE)
@@ -479,9 +482,9 @@ void __devinit radeon_probe_screens(struct radeonfb_info *rinfo,
 		 * Auto-detecting display type (well... trying to ...)
 		 */
 		
-		RTRACE("Starting monitor auto detection...\n");
+		pr_debug("Starting monitor auto detection...\n");
 
-#if DEBUG && defined(CONFIG_FB_RADEON_I2C)
+#if defined(DEBUG) && defined(CONFIG_FB_RADEON_I2C)
 		{
 			u8 *EDIDs[4] = { NULL, NULL, NULL, NULL };
 			int mon_types[4] = {MT_NONE, MT_NONE, MT_NONE, MT_NONE};
@@ -727,11 +730,30 @@ static void radeon_videomode_to_var(struct fb_var_screeninfo *var,
 	var->vmode = mode->vmode;
 }
 
+#ifdef CONFIG_PPC_PSERIES
+static int is_powerblade(const char *model)
+{
+	struct device_node *root;
+	const char* cp;
+	int len, l, rc = 0;
+
+	root = of_find_node_by_path("/");
+	if (root && model) {
+		l = strlen(model);
+		cp = of_get_property(root, "model", &len);
+		if (cp)
+			rc = memcmp(model, cp, min(len, l)) == 0;
+		of_node_put(root);
+	}
+	return rc;
+}
+#endif
+
 /*
  * Build the modedb for head 1 (head 2 will come later), check panel infos
  * from either BIOS or EDID, and pick up the default mode
  */
-void __devinit radeon_check_modes(struct radeonfb_info *rinfo, const char *mode_option)
+void radeon_check_modes(struct radeonfb_info *rinfo, const char *mode_option)
 {
 	struct fb_info * info = rinfo->info;
 	int has_default_mode = 0;
@@ -756,7 +778,7 @@ void __devinit radeon_check_modes(struct radeonfb_info *rinfo, const char *mode_
 	if (!rinfo->panel_info.use_bios_dividers && rinfo->mon1_type != MT_CRT
 	    && rinfo->mon1_EDID) {
 		struct fb_var_screeninfo var;
-		RTRACE("Parsing EDID data for panel info\n");
+		pr_debug("Parsing EDID data for panel info\n");
 		if (fb_parse_edid(rinfo->mon1_EDID, &var) == 0) {
 			if (var.xres >= rinfo->panel_info.xres &&
 			    var.yres >= rinfo->panel_info.yres)
@@ -776,7 +798,7 @@ void __devinit radeon_check_modes(struct radeonfb_info *rinfo, const char *mode_
 	if (rinfo->mon1_type != MT_CRT && rinfo->panel_info.valid) {
 		struct fb_var_screeninfo *var = &info->var;
 
-		RTRACE("Setting up default mode based on panel info\n");
+		pr_debug("Setting up default mode based on panel info\n");
 		var->xres = rinfo->panel_info.xres;
 		var->yres = rinfo->panel_info.yres;
 		var->xres_virtual = rinfo->panel_info.xres;
@@ -824,7 +846,7 @@ void __devinit radeon_check_modes(struct radeonfb_info *rinfo, const char *mode_
 		int			dbsize;
 		char			modename[32];
 
-		RTRACE("Guessing panel info...\n");
+		pr_debug("Guessing panel info...\n");
 		if (rinfo->panel_info.xres == 0 || rinfo->panel_info.yres == 0) {
 			u32 tmp = INREG(FP_HORZ_STRETCH) & HORZ_PANEL_SIZE;
 			rinfo->panel_info.xres = ((tmp >> HORZ_PANEL_SHIFT) + 1) * 8;
@@ -861,6 +883,22 @@ void __devinit radeon_check_modes(struct radeonfb_info *rinfo, const char *mode_
 				 info->monspecs.modedb_len, NULL, 8) != 0)
 			has_default_mode = 1;
  	}
+
+#ifdef CONFIG_PPC_PSERIES
+	if (!has_default_mode && (
+		is_powerblade("IBM,8842") || /* JS20 */
+		is_powerblade("IBM,8844") || /* JS21 */
+		is_powerblade("IBM,7998") || /* JS12/JS21/JS22 */
+		is_powerblade("IBM,0792") || /* QS21 */
+		is_powerblade("IBM,0793")    /* QS22 */
+	    )) {
+		printk("Falling back to 800x600 on JSxx hardware\n");
+		if (fb_find_mode(&info->var, info, "800x600@60",
+				 info->monspecs.modedb,
+				 info->monspecs.modedb_len, NULL, 8) != 0)
+			has_default_mode = 1;
+	}
+#endif
 
 	/*
 	 * Still no mode, let's pick up a default from the db

@@ -48,7 +48,7 @@ static int m68kspkr_event(struct input_dev *dev, unsigned int type, unsigned int
 	return 0;
 }
 
-static int __devinit m68kspkr_probe(struct platform_device *dev)
+static int m68kspkr_probe(struct platform_device *dev)
 {
 	struct input_dev *input_dev;
 	int err;
@@ -65,8 +65,8 @@ static int __devinit m68kspkr_probe(struct platform_device *dev)
 	input_dev->id.version = 0x0100;
 	input_dev->dev.parent = &dev->dev;
 
-	input_dev->evbit[0] = BIT(EV_SND);
-	input_dev->sndbit[0] = BIT(SND_BELL) | BIT(SND_TONE);
+	input_dev->evbit[0] = BIT_MASK(EV_SND);
+	input_dev->sndbit[0] = BIT_MASK(SND_BELL) | BIT_MASK(SND_TONE);
 	input_dev->event = m68kspkr_event;
 
 	err = input_register_device(input_dev);
@@ -80,7 +80,7 @@ static int __devinit m68kspkr_probe(struct platform_device *dev)
 	return 0;
 }
 
-static int __devexit m68kspkr_remove(struct platform_device *dev)
+static int m68kspkr_remove(struct platform_device *dev)
 {
 	struct input_dev *input_dev = platform_get_drvdata(dev);
 
@@ -104,7 +104,7 @@ static struct platform_driver m68kspkr_platform_driver = {
 		.owner	= THIS_MODULE,
 	},
 	.probe		= m68kspkr_probe,
-	.remove		= __devexit_p(m68kspkr_remove),
+	.remove		= m68kspkr_remove,
 	.shutdown	= m68kspkr_shutdown,
 };
 

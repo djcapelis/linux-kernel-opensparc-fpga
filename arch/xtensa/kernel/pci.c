@@ -46,7 +46,6 @@
  * pcibios_fixups
  * pcibios_align_resource
  * pcibios_fixup_bus
- * pcibios_setup
  * pci_bus_add_device
  * pci_mmap_page_range
  */
@@ -69,26 +68,25 @@ static int pci_bus_count;
  * but we want to try to avoid allocating at 0x2900-0x2bff
  * which might have be mirrored at 0x0100-0x03ff..
  */
-void
-pcibios_align_resource(void *data, struct resource *res, resource_size_t size,
-    		       resource_size_t align)
+resource_size_t
+pcibios_align_resource(void *data, const struct resource *res,
+		       resource_size_t size, resource_size_t align)
 {
 	struct pci_dev *dev = data;
+	resource_size_t start = res->start;
 
 	if (res->flags & IORESOURCE_IO) {
-		resource_size_t start = res->start;
-
 		if (size > 0x100) {
 			printk(KERN_ERR "PCI: I/O Region %s/%d too large"
 			       " (%ld bytes)\n", pci_name(dev),
 			       dev->resource - res, size);
 		}
 
-		if (start & 0x300) {
+		if (start & 0x300)
 			start = (start + 0x3ff) & ~0x3ff;
-			res->start = start;
-		}
 	}
+
+	return start;
 }
 
 int
@@ -135,9 +133,46 @@ struct pci_controller * __init pcibios_alloc_controller(void)
 	return pci_ctrl;
 }
 
+static void __init pci_controller_apertures(struct pci_controller *pci_ctrl,
+					    struct list_head *resources)
+{
+	struct resource *res;
+	unsigned long io_offset;
+	int i;
+
+	io_offset = (unsigned long)pci_ctrl->io_space.base;
+	res = &pci_ctrl->io_resource;
+	if (!res->flags) {
+		if (io_offset)
+			printk (KERN_ERR "I/O resource not set for host"
+				" bridge %d\n", pci_ctrl->index);
+		res->start = 0;
+		res->end = IO_SPACE_LIMIT;
+		res->flags = IORESOURCE_IO;
+	}
+	res->start += io_offset;
+	res->end += io_offset;
+	pci_add_resource_offset(resources, res, io_offset);
+
+	for (i = 0; i < 3; i++) {
+		res = &pci_ctrl->mem_resources[i];
+		if (!res->flags) {
+			if (i > 0)
+				continue;
+			printk(KERN_ERR "Memory resource not set for "
+			       "host bridge %d\n", pci_ctrl->index);
+			res->start = 0;
+			res->end = ~0U;
+			res->flags = IORESOURCE_MEM;
+		}
+		pci_add_resource(resources, res);
+	}
+}
+
 static int __init pcibios_init(void)
 {
 	struct pci_controller *pci_ctrl;
+	struct list_head resources;
 	struct pci_bus *bus;
 	int next_busno = 0, i;
 
@@ -146,21 +181,12 @@ static int __init pcibios_init(void)
 	/* Scan all of the recorded PCI controllers.  */
 	for (pci_ctrl = pci_ctrl_head; pci_ctrl; pci_ctrl = pci_ctrl->next) {
 		pci_ctrl->last_busno = 0xff;
-		bus = pci_scan_bus(pci_ctrl->first_busno, pci_ctrl->ops,
-				   pci_ctrl);
-		if (pci_ctrl->io_resource.flags) {
-			unsigned long offs;
-
-			offs = (unsigned long)pci_ctrl->io_space.base;
-			pci_ctrl->io_resource.start += offs;
-			pci_ctrl->io_resource.end += offs;
-			bus->resource[0] = &pci_ctrl->io_resource;
-		}
-		for (i = 0; i < 3; ++i)
-			if (pci_ctrl->mem_resources[i].flags)
-				bus->resource[i+1] =&pci_ctrl->mem_resources[i];
+		INIT_LIST_HEAD(&resources);
+		pci_controller_apertures(pci_ctrl, &resources);
+		bus = pci_scan_root_bus(NULL, pci_ctrl->first_busno,
+					pci_ctrl->ops, pci_ctrl, &resources);
 		pci_ctrl->bus = bus;
-		pci_ctrl->last_busno = bus->subordinate;
+		pci_ctrl->last_busno = bus->busn_res.end;
 		if (next_busno <= pci_ctrl->last_busno)
 			next_busno = pci_ctrl->last_busno+1;
 	}
@@ -173,67 +199,15 @@ subsys_initcall(pcibios_init);
 
 void __init pcibios_fixup_bus(struct pci_bus *bus)
 {
-	struct pci_controller *pci_ctrl = bus->sysdata;
-	struct resource *res;
-	unsigned long io_offset;
-	int i;
-
-	io_offset = (unsigned long)pci_ctrl->io_space.base;
-	if (bus->parent == NULL) {
-		/* this is a host bridge - fill in its resources */
-		pci_ctrl->bus = bus;
-
-		bus->resource[0] = res = &pci_ctrl->io_resource;
-		if (!res->flags) {
-			if (io_offset)
-				printk (KERN_ERR "I/O resource not set for host"
-					" bridge %d\n", pci_ctrl->index);
-			res->start = 0;
-			res->end = IO_SPACE_LIMIT;
-			res->flags = IORESOURCE_IO;
-		}
-		res->start += io_offset;
-		res->end += io_offset;
-
-		for (i = 0; i < 3; i++) {
-			res = &pci_ctrl->mem_resources[i];
-			if (!res->flags) {
-				if (i > 0)
-					continue;
-				printk(KERN_ERR "Memory resource not set for "
-				       "host bridge %d\n", pci_ctrl->index);
-				res->start = 0;
-				res->end = ~0U;
-				res->flags = IORESOURCE_MEM;
-			}
-			bus->resource[i+1] = res;
-		}
-	} else {
+	if (bus->parent) {
 		/* This is a subordinate bridge */
 		pci_read_bridge_bases(bus);
-
-		for (i = 0; i < 4; i++) {
-			if ((res = bus->resource[i]) == NULL || !res->flags)
-				continue;
-			if (io_offset && (res->flags & IORESOURCE_IO)) {
-				res->start += io_offset;
-				res->end += io_offset;
-			}
-		}
 	}
 }
 
-char __init *pcibios_setup(char *str)
+void pcibios_set_master(struct pci_dev *dev)
 {
-	return str;
-}
-
-/* the next one is stolen from the alpha port... */
-
-void __init
-pcibios_update_irq(struct pci_dev *dev, int irq)
-{
-	pci_write_config_byte(dev, PCI_INTERRUPT_LINE, irq);
+	/* No special bus mastering setup handling */
 }
 
 int pcibios_enable_device(struct pci_dev *dev, int mask)
@@ -359,7 +333,7 @@ __pci_mmap_set_pgprot(struct pci_dev *dev, struct vm_area_struct *vma,
 	int prot = pgprot_val(vma->vm_page_prot);
 
 	/* Set to write-through */
-	prot &= ~_PAGE_NO_CACHE;
+	prot = (prot & _PAGE_CA_MASK) | _PAGE_CA_WT;
 #if 0
 	if (!write_combine)
 		prot |= _PAGE_WRITETHRU;
@@ -394,72 +368,3 @@ int pci_mmap_page_range(struct pci_dev *dev, struct vm_area_struct *vma,
 
 	return ret;
 }
-
-/*
- * This probably belongs here rather than ioport.c because
- * we do not want this crud linked into SBus kernels.
- * Also, think for a moment about likes of floppy.c that
- * include architecture specific parts. They may want to redefine ins/outs.
- *
- * We do not use horrible macros here because we want to
- * advance pointer by sizeof(size).
- */
-void outsb(unsigned long addr, const void *src, unsigned long count) {
-        while (count) {
-                count -= 1;
-                writeb(*(const char *)src, addr);
-                src += 1;
-                addr += 1;
-        }
-}
-
-void outsw(unsigned long addr, const void *src, unsigned long count) {
-        while (count) {
-                count -= 2;
-                writew(*(const short *)src, addr);
-                src += 2;
-                addr += 2;
-        }
-}
-
-void outsl(unsigned long addr, const void *src, unsigned long count) {
-        while (count) {
-                count -= 4;
-                writel(*(const long *)src, addr);
-                src += 4;
-                addr += 4;
-        }
-}
-
-void insb(unsigned long addr, void *dst, unsigned long count) {
-        while (count) {
-                count -= 1;
-                *(unsigned char *)dst = readb(addr);
-                dst += 1;
-                addr += 1;
-        }
-}
-
-void insw(unsigned long addr, void *dst, unsigned long count) {
-        while (count) {
-                count -= 2;
-                *(unsigned short *)dst = readw(addr);
-                dst += 2;
-                addr += 2;
-        }
-}
-
-void insl(unsigned long addr, void *dst, unsigned long count) {
-        while (count) {
-                count -= 4;
-                /*
-                 * XXX I am sure we are in for an unaligned trap here.
-                 */
-                *(unsigned long *)dst = readl(addr);
-                dst += 4;
-                addr += 4;
-        }
-}
-
-
-

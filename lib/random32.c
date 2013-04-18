@@ -35,17 +35,20 @@
 
 #include <linux/types.h>
 #include <linux/percpu.h>
-#include <linux/module.h>
+#include <linux/export.h>
 #include <linux/jiffies.h>
 #include <linux/random.h>
 
-struct rnd_state {
-	u32 s1, s2, s3;
-};
-
 static DEFINE_PER_CPU(struct rnd_state, net_rand_state);
 
-static u32 __random32(struct rnd_state *state)
+/**
+ *	prandom_u32_state - seeded pseudo-random number generator.
+ *	@state: pointer to state structure holding seeded state.
+ *
+ *	This is used for pseudo-randomness with no outside seeding.
+ *	For more random results, use prandom_u32().
+ */
+u32 prandom_u32_state(struct rnd_state *state)
 {
 #define TAUSWORTHE(s,a,b,c,d) ((s&c)<<d) ^ (((s <<a) ^ s)>>b)
 
@@ -55,89 +58,142 @@ static u32 __random32(struct rnd_state *state)
 
 	return (state->s1 ^ state->s2 ^ state->s3);
 }
-
-static void __set_random32(struct rnd_state *state, unsigned long s)
-{
-	if (s == 0)
-		s = 1;      /* default seed is 1 */
-
-#define LCG(n) (69069 * n)
-	state->s1 = LCG(s);
-	state->s2 = LCG(state->s1);
-	state->s3 = LCG(state->s2);
-
-	/* "warm it up" */
-	__random32(state);
-	__random32(state);
-	__random32(state);
-	__random32(state);
-	__random32(state);
-	__random32(state);
-}
+EXPORT_SYMBOL(prandom_u32_state);
 
 /**
- *	random32 - pseudo random number generator
+ *	prandom_u32 - pseudo random number generator
  *
  *	A 32 bit pseudo-random number is generated using a fast
  *	algorithm suitable for simulation. This algorithm is NOT
  *	considered safe for cryptographic use.
  */
-u32 random32(void)
+u32 prandom_u32(void)
 {
 	unsigned long r;
 	struct rnd_state *state = &get_cpu_var(net_rand_state);
-	r = __random32(state);
+	r = prandom_u32_state(state);
 	put_cpu_var(state);
 	return r;
 }
-EXPORT_SYMBOL(random32);
+EXPORT_SYMBOL(prandom_u32);
+
+/*
+ *	prandom_bytes_state - get the requested number of pseudo-random bytes
+ *
+ *	@state: pointer to state structure holding seeded state.
+ *	@buf: where to copy the pseudo-random bytes to
+ *	@bytes: the requested number of bytes
+ *
+ *	This is used for pseudo-randomness with no outside seeding.
+ *	For more random results, use prandom_bytes().
+ */
+void prandom_bytes_state(struct rnd_state *state, void *buf, int bytes)
+{
+	unsigned char *p = buf;
+	int i;
+
+	for (i = 0; i < round_down(bytes, sizeof(u32)); i += sizeof(u32)) {
+		u32 random = prandom_u32_state(state);
+		int j;
+
+		for (j = 0; j < sizeof(u32); j++) {
+			p[i + j] = random;
+			random >>= BITS_PER_BYTE;
+		}
+	}
+	if (i < bytes) {
+		u32 random = prandom_u32_state(state);
+
+		for (; i < bytes; i++) {
+			p[i] = random;
+			random >>= BITS_PER_BYTE;
+		}
+	}
+}
+EXPORT_SYMBOL(prandom_bytes_state);
 
 /**
- *	srandom32 - add entropy to pseudo random number generator
- *	@seed: seed value
- *
- *	Add some additional seeding to the random32() pool.
- *	Note: this pool is per cpu so it only affects current CPU.
+ *	prandom_bytes - get the requested number of pseudo-random bytes
+ *	@buf: where to copy the pseudo-random bytes to
+ *	@bytes: the requested number of bytes
  */
-void srandom32(u32 entropy)
+void prandom_bytes(void *buf, int bytes)
 {
 	struct rnd_state *state = &get_cpu_var(net_rand_state);
-	__set_random32(state, state->s1 ^ entropy);
+
+	prandom_bytes_state(state, buf, bytes);
 	put_cpu_var(state);
 }
-EXPORT_SYMBOL(srandom32);
+EXPORT_SYMBOL(prandom_bytes);
+
+/**
+ *	prandom_seed - add entropy to pseudo random number generator
+ *	@seed: seed value
+ *
+ *	Add some additional seeding to the prandom pool.
+ */
+void prandom_seed(u32 entropy)
+{
+	int i;
+	/*
+	 * No locking on the CPUs, but then somewhat random results are, well,
+	 * expected.
+	 */
+	for_each_possible_cpu (i) {
+		struct rnd_state *state = &per_cpu(net_rand_state, i);
+		state->s1 = __seed(state->s1 ^ entropy, 1);
+	}
+}
+EXPORT_SYMBOL(prandom_seed);
 
 /*
  *	Generate some initially weak seeding values to allow
- *	to start the random32() engine.
+ *	to start the prandom_u32() engine.
  */
-static int __init random32_init(void)
+static int __init prandom_init(void)
 {
 	int i;
 
 	for_each_possible_cpu(i) {
 		struct rnd_state *state = &per_cpu(net_rand_state,i);
-		__set_random32(state, i + jiffies);
+
+#define LCG(x)	((x) * 69069)	/* super-duper LCG */
+		state->s1 = __seed(LCG(i + jiffies), 1);
+		state->s2 = __seed(LCG(state->s1), 7);
+		state->s3 = __seed(LCG(state->s2), 15);
+
+		/* "warm it up" */
+		prandom_u32_state(state);
+		prandom_u32_state(state);
+		prandom_u32_state(state);
+		prandom_u32_state(state);
+		prandom_u32_state(state);
+		prandom_u32_state(state);
 	}
 	return 0;
 }
-core_initcall(random32_init);
+core_initcall(prandom_init);
 
 /*
  *	Generate better values after random number generator
- *	is fully initalized.
+ *	is fully initialized.
  */
-static int __init random32_reseed(void)
+static int __init prandom_reseed(void)
 {
 	int i;
-	unsigned long seed;
 
 	for_each_possible_cpu(i) {
 		struct rnd_state *state = &per_cpu(net_rand_state,i);
+		u32 seeds[3];
 
-		get_random_bytes(&seed, sizeof(seed));
-		__set_random32(state, seed);
+		get_random_bytes(&seeds, sizeof(seeds));
+		state->s1 = __seed(seeds[0], 1);
+		state->s2 = __seed(seeds[1], 7);
+		state->s3 = __seed(seeds[2], 15);
+
+		/* mix it in */
+		prandom_u32_state(state);
 	}
 	return 0;
 }
-late_initcall(random32_reseed);
+late_initcall(prandom_reseed);

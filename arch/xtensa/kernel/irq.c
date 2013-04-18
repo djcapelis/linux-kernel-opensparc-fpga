@@ -18,6 +18,8 @@
 #include <linux/interrupt.h>
 #include <linux/irq.h>
 #include <linux/kernel_stat.h>
+#include <linux/irqdomain.h>
+#include <linux/of.h>
 
 #include <asm/uaccess.h>
 #include <asm/platform.h>
@@ -26,14 +28,7 @@ static unsigned int cached_irq_mask;
 
 atomic_t irq_err_count;
 
-/*
- * 'what should we do if we get a hw irq event on an illegal vector'.
- * each architecture has to answer this themselves.
- */
-void ack_bad_irq(unsigned int irq)
-{
-          printk("unexpected IRQ trap at vector %02x\n", irq);
-}
+static struct irq_domain *root_domain;
 
 /*
  * do_IRQ handles all normal device IRQ's (the special
@@ -41,14 +36,14 @@ void ack_bad_irq(unsigned int irq)
  * handlers).
  */
 
-asmlinkage void do_IRQ(int irq, struct pt_regs *regs)
+asmlinkage void do_IRQ(int hwirq, struct pt_regs *regs)
 {
 	struct pt_regs *old_regs = set_irq_regs(regs);
-	struct irq_desc *desc = irq_desc + irq;
+	int irq = irq_find_mapping(root_domain, hwirq);
 
-	if (irq >= NR_IRQS) {
+	if (hwirq >= NR_IRQS) {
 		printk(KERN_EMERG "%s: cannot handle IRQ %d\n",
-				__FUNCTION__, irq);
+				__func__, hwirq);
 	}
 
 	irq_enter();
@@ -66,121 +61,157 @@ asmlinkage void do_IRQ(int irq, struct pt_regs *regs)
 			       sp - sizeof(struct thread_info));
 	}
 #endif
-	desc->handle_irq(irq, desc);
+	generic_handle_irq(irq);
 
 	irq_exit();
 	set_irq_regs(old_regs);
 }
 
-/*
- * Generic, controller-independent functions:
- */
-
-int show_interrupts(struct seq_file *p, void *v)
+int arch_show_interrupts(struct seq_file *p, int prec)
 {
-	int i = *(loff_t *) v, j;
-	struct irqaction * action;
-	unsigned long flags;
+	seq_printf(p, "%*s: ", prec, "ERR");
+	seq_printf(p, "%10u\n", atomic_read(&irq_err_count));
+	return 0;
+}
 
-	if (i == 0) {
-		seq_printf(p, "           ");
-		for_each_online_cpu(j)
-			seq_printf(p, "CPU%d       ",j);
-		seq_putc(p, '\n');
-	}
+static void xtensa_irq_mask(struct irq_data *d)
+{
+	cached_irq_mask &= ~(1 << d->hwirq);
+	set_sr (cached_irq_mask, intenable);
+}
 
-	if (i < NR_IRQS) {
-		spin_lock_irqsave(&irq_desc[i].lock, flags);
-		action = irq_desc[i].action;
-		if (!action)
-			goto skip;
-		seq_printf(p, "%3d: ",i);
-#ifndef CONFIG_SMP
-		seq_printf(p, "%10u ", kstat_irqs(i));
-#else
-		for_each_online_cpu(j)
-			seq_printf(p, "%10u ", kstat_cpu(j).irqs[i]);
-#endif
-		seq_printf(p, " %14s", irq_desc[i].chip->typename);
-		seq_printf(p, "  %s", action->name);
+static void xtensa_irq_unmask(struct irq_data *d)
+{
+	cached_irq_mask |= 1 << d->hwirq;
+	set_sr (cached_irq_mask, intenable);
+}
 
-		for (action=action->next; action; action = action->next)
-			seq_printf(p, ", %s", action->name);
+static void xtensa_irq_enable(struct irq_data *d)
+{
+	variant_irq_enable(d->hwirq);
+	xtensa_irq_unmask(d);
+}
 
-		seq_putc(p, '\n');
-skip:
-		spin_unlock_irqrestore(&irq_desc[i].lock, flags);
-	} else if (i == NR_IRQS) {
-		seq_printf(p, "NMI: ");
-		for_each_online_cpu(j)
-			seq_printf(p, "%10u ", nmi_count(j));
-		seq_putc(p, '\n');
-		seq_printf(p, "ERR: %10u\n", atomic_read(&irq_err_count));
+static void xtensa_irq_disable(struct irq_data *d)
+{
+	xtensa_irq_mask(d);
+	variant_irq_disable(d->hwirq);
+}
+
+static void xtensa_irq_ack(struct irq_data *d)
+{
+	set_sr(1 << d->hwirq, intclear);
+}
+
+static int xtensa_irq_retrigger(struct irq_data *d)
+{
+	set_sr(1 << d->hwirq, intset);
+	return 1;
+}
+
+static struct irq_chip xtensa_irq_chip = {
+	.name		= "xtensa",
+	.irq_enable	= xtensa_irq_enable,
+	.irq_disable	= xtensa_irq_disable,
+	.irq_mask	= xtensa_irq_mask,
+	.irq_unmask	= xtensa_irq_unmask,
+	.irq_ack	= xtensa_irq_ack,
+	.irq_retrigger	= xtensa_irq_retrigger,
+};
+
+static int xtensa_irq_map(struct irq_domain *d, unsigned int irq,
+		irq_hw_number_t hw)
+{
+	u32 mask = 1 << hw;
+
+	if (mask & XCHAL_INTTYPE_MASK_SOFTWARE) {
+		irq_set_chip_and_handler_name(irq, &xtensa_irq_chip,
+				handle_simple_irq, "level");
+		irq_set_status_flags(irq, IRQ_LEVEL);
+	} else if (mask & XCHAL_INTTYPE_MASK_EXTERN_EDGE) {
+		irq_set_chip_and_handler_name(irq, &xtensa_irq_chip,
+				handle_edge_irq, "edge");
+		irq_clear_status_flags(irq, IRQ_LEVEL);
+	} else if (mask & XCHAL_INTTYPE_MASK_EXTERN_LEVEL) {
+		irq_set_chip_and_handler_name(irq, &xtensa_irq_chip,
+				handle_level_irq, "level");
+		irq_set_status_flags(irq, IRQ_LEVEL);
+	} else if (mask & XCHAL_INTTYPE_MASK_TIMER) {
+		irq_set_chip_and_handler_name(irq, &xtensa_irq_chip,
+				handle_edge_irq, "edge");
+		irq_clear_status_flags(irq, IRQ_LEVEL);
+	} else {/* XCHAL_INTTYPE_MASK_WRITE_ERROR */
+		/* XCHAL_INTTYPE_MASK_NMI */
+
+		irq_set_chip_and_handler_name(irq, &xtensa_irq_chip,
+				handle_level_irq, "level");
+		irq_set_status_flags(irq, IRQ_LEVEL);
 	}
 	return 0;
 }
 
-static void xtensa_irq_mask(unsigned int irq)
+static unsigned map_ext_irq(unsigned ext_irq)
 {
-	cached_irq_mask &= ~(1 << irq);
-	set_sr (cached_irq_mask, INTENABLE);
+	unsigned mask = XCHAL_INTTYPE_MASK_EXTERN_EDGE |
+		XCHAL_INTTYPE_MASK_EXTERN_LEVEL;
+	unsigned i;
+
+	for (i = 0; mask; ++i, mask >>= 1) {
+		if ((mask & 1) && ext_irq-- == 0)
+			return i;
+	}
+	return XCHAL_NUM_INTERRUPTS;
 }
 
-static void xtensa_irq_unmask(unsigned int irq)
+/*
+ * Device Tree IRQ specifier translation function which works with one or
+ * two cell bindings. First cell value maps directly to the hwirq number.
+ * Second cell if present specifies whether hwirq number is external (1) or
+ * internal (0).
+ */
+int xtensa_irq_domain_xlate(struct irq_domain *d, struct device_node *ctrlr,
+		const u32 *intspec, unsigned int intsize,
+		unsigned long *out_hwirq, unsigned int *out_type)
 {
-	cached_irq_mask |= 1 << irq;
-	set_sr (cached_irq_mask, INTENABLE);
+	if (WARN_ON(intsize < 1 || intsize > 2))
+		return -EINVAL;
+	if (intsize == 2 && intspec[1] == 1) {
+		unsigned int_irq = map_ext_irq(intspec[0]);
+		if (int_irq < XCHAL_NUM_INTERRUPTS)
+			*out_hwirq = int_irq;
+		else
+			return -EINVAL;
+	} else {
+		*out_hwirq = intspec[0];
+	}
+	*out_type = IRQ_TYPE_NONE;
+	return 0;
 }
 
-static void xtensa_irq_ack(unsigned int irq)
-{
-	set_sr(1 << irq, INTCLEAR);
-}
-
-static int xtensa_irq_retrigger(unsigned int irq)
-{
-	set_sr (1 << irq, INTSET);
-	return 1;
-}
-
-
-static struct irq_chip xtensa_irq_chip = {
-	.name		= "xtensa",
-	.mask		= xtensa_irq_mask,
-	.unmask		= xtensa_irq_unmask,
-	.ack		= xtensa_irq_ack,
-	.retrigger	= xtensa_irq_retrigger,
+static const struct irq_domain_ops xtensa_irq_domain_ops = {
+	.xlate = xtensa_irq_domain_xlate,
+	.map = xtensa_irq_map,
 };
 
 void __init init_IRQ(void)
 {
-	int index;
-
-	for (index = 0; index < XTENSA_NR_IRQS; index++) {
-		int mask = 1 << index;
-
-		if (mask & XCHAL_INTTYPE_MASK_SOFTWARE)
-			set_irq_chip_and_handler(index, &xtensa_irq_chip,
-						 handle_simple_irq);
-
-		else if (mask & XCHAL_INTTYPE_MASK_EXTERN_EDGE)
-			set_irq_chip_and_handler(index, &xtensa_irq_chip,
-						 handle_edge_irq);
-
-		else if (mask & XCHAL_INTTYPE_MASK_EXTERN_LEVEL)
-			set_irq_chip_and_handler(index, &xtensa_irq_chip,
-						 handle_level_irq);
-
-		else if (mask & XCHAL_INTTYPE_MASK_TIMER)
-			set_irq_chip_and_handler(index, &xtensa_irq_chip,
-						 handle_edge_irq);
-
-		else	/* XCHAL_INTTYPE_MASK_WRITE_ERROR */
-			/* XCHAL_INTTYPE_MASK_NMI */
-
-			set_irq_chip_and_handler(index, &xtensa_irq_chip,
-						 handle_level_irq);
-	}
+	struct device_node *intc = NULL;
 
 	cached_irq_mask = 0;
+	set_sr(~0, intclear);
+
+#ifdef CONFIG_OF
+	/* The interrupt controller device node is mandatory */
+	intc = of_find_compatible_node(NULL, NULL, "xtensa,pic");
+	BUG_ON(!intc);
+
+	root_domain = irq_domain_add_linear(intc, NR_IRQS,
+			&xtensa_irq_domain_ops, NULL);
+#else
+	root_domain = irq_domain_add_legacy(intc, NR_IRQS, 0, 0,
+			&xtensa_irq_domain_ops, NULL);
+#endif
+	irq_set_default_host(root_domain);
+
+	variant_init_irq();
 }

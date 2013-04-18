@@ -33,9 +33,7 @@
 #include <linux/init.h>
 #include <asm/macintosh.h>
 #include <asm/macints.h>
-#include <asm/machw.h>
 #include <asm/mac_via.h>
-#include <asm/system.h>
 
 static volatile unsigned char *via;
 
@@ -111,7 +109,7 @@ static enum macii_state {
 static struct adb_request *current_req; /* first request struct in the queue */
 static struct adb_request *last_req;     /* last request struct in the queue */
 static unsigned char reply_buf[16];        /* storage for autopolled replies */
-static unsigned char *reply_ptr;      /* next byte in req->data or reply_buf */
+static unsigned char *reply_ptr;     /* next byte in reply_buf or req->reply */
 static int reading_reply;        /* store reply in reply_buf else req->reply */
 static int data_index;      /* index of the next byte to send from req->data */
 static int reply_len; /* number of bytes received in reply_buf or req->reply */
@@ -160,7 +158,7 @@ int macii_init(void)
 	err = macii_init_via();
 	if (err) goto out;
 
-	err = request_irq(IRQ_MAC_ADB, macii_interrupt, IRQ_FLG_LOCK, "ADB",
+	err = request_irq(IRQ_MAC_ADB, macii_interrupt, 0, "ADB",
 			  macii_interrupt);
 	if (err) goto out;
 

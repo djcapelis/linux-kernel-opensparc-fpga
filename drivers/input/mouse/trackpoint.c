@@ -8,10 +8,10 @@
  * Trademarks are the property of their respective owners.
  */
 
+#include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/serio.h>
 #include <linux/module.h>
-#include <linux/moduleparam.h>
 #include <linux/input.h>
 #include <linux/libps2.h>
 #include <linux/proc_fs.h>
@@ -89,12 +89,12 @@ static ssize_t trackpoint_set_int_attr(struct psmouse *psmouse, void *data,
 	struct trackpoint_data *tp = psmouse->private;
 	struct trackpoint_attr_data *attr = data;
 	unsigned char *field = (unsigned char *)((char *)tp + attr->field_offset);
-	unsigned long value;
-	char *rest;
+	unsigned char value;
+	int err;
 
-	value = simple_strtoul(buf, &rest, 10);
-	if (*rest || value > 255)
-		return -EINVAL;
+	err = kstrtou8(buf, 10, &value);
+	if (err)
+		return err;
 
 	*field = value;
 	trackpoint_write(&psmouse->ps2dev, attr->command, value);
@@ -117,11 +117,14 @@ static ssize_t trackpoint_set_bit_attr(struct psmouse *psmouse, void *data,
 	struct trackpoint_data *tp = psmouse->private;
 	struct trackpoint_attr_data *attr = data;
 	unsigned char *field = (unsigned char *)((char *)tp + attr->field_offset);
-	unsigned long value;
-	char *rest;
+	unsigned int value;
+	int err;
 
-	value = simple_strtoul(buf, &rest, 10);
-	if (*rest || value > 1)
+	err = kstrtouint(buf, 10, &value);
+	if (err)
+		return err;
+
+	if (value > 1)
 		return -EINVAL;
 
 	if (attr->inverted)
@@ -287,9 +290,8 @@ static int trackpoint_reconnect(struct psmouse *psmouse)
 	return 0;
 }
 
-int trackpoint_detect(struct psmouse *psmouse, int set_properties)
+int trackpoint_detect(struct psmouse *psmouse, bool set_properties)
 {
-	struct trackpoint_data *priv;
 	struct ps2dev *ps2dev = &psmouse->ps2dev;
 	unsigned char firmware_id;
 	unsigned char button_info;
@@ -302,13 +304,13 @@ int trackpoint_detect(struct psmouse *psmouse, int set_properties)
 		return 0;
 
 	if (trackpoint_read(&psmouse->ps2dev, TP_EXT_BTN, &button_info)) {
-		printk(KERN_WARNING "trackpoint.c: failed to get extended button data\n");
+		psmouse_warn(psmouse, "failed to get extended button data\n");
 		button_info = 0;
 	}
 
-	psmouse->private = priv = kzalloc(sizeof(struct trackpoint_data), GFP_KERNEL);
-	if (!priv)
-		return -1;
+	psmouse->private = kzalloc(sizeof(struct trackpoint_data), GFP_KERNEL);
+	if (!psmouse->private)
+		return -ENOMEM;
 
 	psmouse->vendor = "IBM";
 	psmouse->name = "TrackPoint";
@@ -316,20 +318,26 @@ int trackpoint_detect(struct psmouse *psmouse, int set_properties)
 	psmouse->reconnect = trackpoint_reconnect;
 	psmouse->disconnect = trackpoint_disconnect;
 
-	trackpoint_defaults(priv);
+	if ((button_info & 0x0f) >= 3)
+		__set_bit(BTN_MIDDLE, psmouse->dev->keybit);
+
+	trackpoint_defaults(psmouse->private);
 	trackpoint_sync(psmouse);
 
 	error = sysfs_create_group(&ps2dev->serio->dev.kobj, &trackpoint_attr_group);
 	if (error) {
-		printk(KERN_ERR
-			"trackpoint.c: failed to create sysfs attributes, error: %d\n",
-			error);
-		kfree(priv);
+		psmouse_err(psmouse,
+			    "failed to create sysfs attributes, error: %d\n",
+			    error);
+		kfree(psmouse->private);
+		psmouse->private = NULL;
 		return -1;
 	}
 
-	printk(KERN_INFO "IBM TrackPoint firmware: 0x%02x, buttons: %d/%d\n",
-		firmware_id, (button_info & 0xf0) >> 4, button_info & 0x0f);
+	psmouse_info(psmouse,
+		     "IBM TrackPoint firmware: 0x%02x, buttons: %d/%d\n",
+		     firmware_id,
+		     (button_info & 0xf0) >> 4, button_info & 0x0f);
 
 	return 0;
 }

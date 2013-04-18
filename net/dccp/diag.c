@@ -29,11 +29,14 @@ static void dccp_get_info(struct sock *sk, struct tcp_info *info)
 	info->tcpi_backoff	= icsk->icsk_backoff;
 	info->tcpi_pmtu		= icsk->icsk_pmtu_cookie;
 
-	if (dccp_msk(sk)->dccpms_send_ack_vector)
+	if (dp->dccps_hc_rx_ackvec != NULL)
 		info->tcpi_options |= TCPI_OPT_SACK;
 
-	ccid_hc_rx_get_info(dp->dccps_hc_rx_ccid, sk, info);
-	ccid_hc_tx_get_info(dp->dccps_hc_tx_ccid, sk, info);
+	if (dp->dccps_hc_rx_ccid != NULL)
+		ccid_hc_rx_get_info(dp->dccps_hc_rx_ccid, sk, info);
+
+	if (dp->dccps_hc_tx_ccid != NULL)
+		ccid_hc_tx_get_info(dp->dccps_hc_tx_ccid, sk, info);
 }
 
 static void dccp_diag_get_info(struct sock *sk, struct inet_diag_msg *r,
@@ -45,11 +48,23 @@ static void dccp_diag_get_info(struct sock *sk, struct inet_diag_msg *r,
 		dccp_get_info(sk, _info);
 }
 
-static struct inet_diag_handler dccp_diag_handler = {
-	.idiag_hashinfo	 = &dccp_hashinfo,
+static void dccp_diag_dump(struct sk_buff *skb, struct netlink_callback *cb,
+		struct inet_diag_req_v2 *r, struct nlattr *bc)
+{
+	inet_diag_dump_icsk(&dccp_hashinfo, skb, cb, r, bc);
+}
+
+static int dccp_diag_dump_one(struct sk_buff *in_skb, const struct nlmsghdr *nlh,
+		struct inet_diag_req_v2 *req)
+{
+	return inet_diag_dump_one_icsk(&dccp_hashinfo, in_skb, nlh, req);
+}
+
+static const struct inet_diag_handler dccp_diag_handler = {
+	.dump		 = dccp_diag_dump,
+	.dump_one	 = dccp_diag_dump_one,
 	.idiag_get_info	 = dccp_diag_get_info,
-	.idiag_type	 = DCCPDIAG_GETSOCK,
-	.idiag_info_size = sizeof(struct tcp_info),
+	.idiag_type	 = IPPROTO_DCCP,
 };
 
 static int __init dccp_diag_init(void)
@@ -68,3 +83,4 @@ module_exit(dccp_diag_fini);
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Arnaldo Carvalho de Melo <acme@mandriva.com>");
 MODULE_DESCRIPTION("DCCP inet_diag handler");
+MODULE_ALIAS_NET_PF_PROTO_TYPE(PF_NETLINK, NETLINK_SOCK_DIAG, 2-33 /* AF_INET - IPPROTO_DCCP */);

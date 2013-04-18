@@ -12,9 +12,8 @@
 #include <linux/spinlock.h>
 #include <linux/completion.h>
 #include <linux/buffer_head.h>
-#include <linux/gfs2_ondisk.h>
 #include <linux/kallsyms.h>
-#include <linux/lm_interface.h>
+#include <linux/gfs2_ondisk.h>
 
 #include "gfs2.h"
 #include "incore.h"
@@ -24,6 +23,7 @@
 #include "meta_io.h"
 #include "trans.h"
 #include "util.h"
+#include "trace_gfs2.h"
 
 int gfs2_trans_begin(struct gfs2_sbd *sdp, unsigned int blocks,
 		     unsigned int revokes)
@@ -33,6 +33,9 @@ int gfs2_trans_begin(struct gfs2_sbd *sdp, unsigned int blocks,
 
 	BUG_ON(current->journal_info);
 	BUG_ON(blocks == 0 && revokes == 0);
+
+	if (!test_bit(SDF_JOURNAL_LIVE, &sdp->sd_flags))
+		return -EROFS;
 
 	tr = kzalloc(sizeof(struct gfs2_trans), GFP_NOFS);
 	if (!tr)
@@ -47,19 +50,12 @@ int gfs2_trans_begin(struct gfs2_sbd *sdp, unsigned int blocks,
 	if (revokes)
 		tr->tr_reserved += gfs2_struct2blk(sdp, revokes,
 						   sizeof(u64));
-	INIT_LIST_HEAD(&tr->tr_list_buf);
-
+	sb_start_intwrite(sdp->sd_vfs);
 	gfs2_holder_init(sdp->sd_trans_gl, LM_ST_SHARED, 0, &tr->tr_t_gh);
 
 	error = gfs2_glock_nq(&tr->tr_t_gh);
 	if (error)
 		goto fail_holder_uninit;
-
-	if (!test_bit(SDF_JOURNAL_LIVE, &sdp->sd_flags)) {
-		tr->tr_t_gh.gh_flags |= GL_NOCACHE;
-		error = -EROFS;
-		goto fail_gunlock;
-	}
 
 	error = gfs2_log_reserve(sdp, tr->tr_reserved);
 	if (error)
@@ -73,50 +69,77 @@ fail_gunlock:
 	gfs2_glock_dq(&tr->tr_t_gh);
 
 fail_holder_uninit:
+	sb_end_intwrite(sdp->sd_vfs);
 	gfs2_holder_uninit(&tr->tr_t_gh);
 	kfree(tr);
 
 	return error;
 }
 
+/**
+ * gfs2_log_release - Release a given number of log blocks
+ * @sdp: The GFS2 superblock
+ * @blks: The number of blocks
+ *
+ */
+
+static void gfs2_log_release(struct gfs2_sbd *sdp, unsigned int blks)
+{
+
+	atomic_add(blks, &sdp->sd_log_blks_free);
+	trace_gfs2_log_blocks(sdp, blks);
+	gfs2_assert_withdraw(sdp, atomic_read(&sdp->sd_log_blks_free) <=
+				  sdp->sd_jdesc->jd_blocks);
+	up_read(&sdp->sd_log_flush_lock);
+}
+
+static void gfs2_print_trans(const struct gfs2_trans *tr)
+{
+	print_symbol(KERN_WARNING "GFS2: Transaction created at: %s\n", tr->tr_ip);
+	printk(KERN_WARNING "GFS2: blocks=%u revokes=%u reserved=%u touched=%d\n",
+	       tr->tr_blocks, tr->tr_revokes, tr->tr_reserved, tr->tr_touched);
+	printk(KERN_WARNING "GFS2: Buf %u/%u Databuf %u/%u Revoke %u/%u\n",
+	       tr->tr_num_buf_new, tr->tr_num_buf_rm,
+	       tr->tr_num_databuf_new, tr->tr_num_databuf_rm,
+	       tr->tr_num_revoke, tr->tr_num_revoke_rm);
+}
+
 void gfs2_trans_end(struct gfs2_sbd *sdp)
 {
 	struct gfs2_trans *tr = current->journal_info;
-
+	s64 nbuf;
 	BUG_ON(!tr);
 	current->journal_info = NULL;
 
 	if (!tr->tr_touched) {
 		gfs2_log_release(sdp, tr->tr_reserved);
-		gfs2_glock_dq(&tr->tr_t_gh);
-		gfs2_holder_uninit(&tr->tr_t_gh);
-		kfree(tr);
+		if (tr->tr_t_gh.gh_gl) {
+			gfs2_glock_dq(&tr->tr_t_gh);
+			gfs2_holder_uninit(&tr->tr_t_gh);
+			kfree(tr);
+		}
+		sb_end_intwrite(sdp->sd_vfs);
 		return;
 	}
 
-	if (gfs2_assert_withdraw(sdp, tr->tr_num_buf <= tr->tr_blocks)) {
-		fs_err(sdp, "tr_num_buf = %u, tr_blocks = %u ",
-		       tr->tr_num_buf, tr->tr_blocks);
-		print_symbol(KERN_WARNING "GFS2: Transaction created at: %s\n", tr->tr_ip);
-	}
-	if (gfs2_assert_withdraw(sdp, tr->tr_num_revoke <= tr->tr_revokes)) {
-		fs_err(sdp, "tr_num_revoke = %u, tr_revokes = %u ",
-		       tr->tr_num_revoke, tr->tr_revokes);
-		print_symbol(KERN_WARNING "GFS2: Transaction created at: %s\n", tr->tr_ip);
-	}
+	nbuf = tr->tr_num_buf_new + tr->tr_num_databuf_new;
+	nbuf -= tr->tr_num_buf_rm;
+	nbuf -= tr->tr_num_databuf_rm;
+
+	if (gfs2_assert_withdraw(sdp, (nbuf <= tr->tr_blocks) &&
+				       (tr->tr_num_revoke <= tr->tr_revokes)))
+		gfs2_print_trans(tr);
 
 	gfs2_log_commit(sdp, tr);
-        gfs2_glock_dq(&tr->tr_t_gh);
-        gfs2_holder_uninit(&tr->tr_t_gh);
-        kfree(tr);
+	if (tr->tr_t_gh.gh_gl) {
+		gfs2_glock_dq(&tr->tr_t_gh);
+		gfs2_holder_uninit(&tr->tr_t_gh);
+		kfree(tr);
+	}
 
 	if (sdp->sd_vfs->s_flags & MS_SYNCHRONOUS)
 		gfs2_log_flush(sdp, NULL);
-}
-
-void gfs2_trans_add_gl(struct gfs2_glock *gl)
-{
-	lops_add(gl->gl_sbd, &gl->gl_le);
+	sb_end_intwrite(sdp->sd_vfs);
 }
 
 /**
@@ -132,53 +155,51 @@ void gfs2_trans_add_bh(struct gfs2_glock *gl, struct buffer_head *bh, int meta)
 	struct gfs2_sbd *sdp = gl->gl_sbd;
 	struct gfs2_bufdata *bd;
 
+	lock_buffer(bh);
+	gfs2_log_lock(sdp);
 	bd = bh->b_private;
 	if (bd)
 		gfs2_assert(sdp, bd->bd_gl == gl);
 	else {
+		gfs2_log_unlock(sdp);
+		unlock_buffer(bh);
 		gfs2_attach_bufdata(gl, bh, meta);
 		bd = bh->b_private;
+		lock_buffer(bh);
+		gfs2_log_lock(sdp);
 	}
-	lops_add(sdp, &bd->bd_le);
+	lops_add(sdp, bd);
+	gfs2_log_unlock(sdp);
+	unlock_buffer(bh);
 }
 
-void gfs2_trans_add_revoke(struct gfs2_sbd *sdp, u64 blkno)
+void gfs2_trans_add_revoke(struct gfs2_sbd *sdp, struct gfs2_bufdata *bd)
 {
-	struct gfs2_revoke *rv = kmalloc(sizeof(struct gfs2_revoke),
-					 GFP_NOFS | __GFP_NOFAIL);
-	lops_init_le(&rv->rv_le, &gfs2_revoke_lops);
-	rv->rv_blkno = blkno;
-	lops_add(sdp, &rv->rv_le);
+	BUG_ON(!list_empty(&bd->bd_list));
+	BUG_ON(!list_empty(&bd->bd_ail_st_list));
+	BUG_ON(!list_empty(&bd->bd_ail_gl_list));
+	lops_init_le(bd, &gfs2_revoke_lops);
+	lops_add(sdp, bd);
 }
 
-void gfs2_trans_add_unrevoke(struct gfs2_sbd *sdp, u64 blkno)
+void gfs2_trans_add_unrevoke(struct gfs2_sbd *sdp, u64 blkno, unsigned int len)
 {
-	struct gfs2_revoke *rv;
-	int found = 0;
+	struct gfs2_bufdata *bd, *tmp;
+	struct gfs2_trans *tr = current->journal_info;
+	unsigned int n = len;
 
 	gfs2_log_lock(sdp);
-
-	list_for_each_entry(rv, &sdp->sd_log_le_revoke, rv_le.le_list) {
-		if (rv->rv_blkno == blkno) {
-			list_del(&rv->rv_le.le_list);
+	list_for_each_entry_safe(bd, tmp, &sdp->sd_log_le_revoke, bd_list) {
+		if ((bd->bd_blkno >= blkno) && (bd->bd_blkno < (blkno + len))) {
+			list_del_init(&bd->bd_list);
 			gfs2_assert_withdraw(sdp, sdp->sd_log_num_revoke);
 			sdp->sd_log_num_revoke--;
-			found = 1;
-			break;
+			kmem_cache_free(gfs2_bufdata_cachep, bd);
+			tr->tr_num_revoke_rm++;
+			if (--n == 0)
+				break;
 		}
 	}
-
 	gfs2_log_unlock(sdp);
-
-	if (found) {
-		struct gfs2_trans *tr = current->journal_info;
-		kfree(rv);
-		tr->tr_num_revoke_rm++;
-	}
-}
-
-void gfs2_trans_add_rg(struct gfs2_rgrpd *rgd)
-{
-	lops_add(rgd->rd_sbd, &rgd->rd_le);
 }
 

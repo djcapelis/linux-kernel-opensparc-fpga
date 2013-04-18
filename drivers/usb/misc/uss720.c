@@ -3,7 +3,7 @@
 /*
  *	uss720.c  --  USS720 USB Parport Cable.
  *
- *	Copyright (C) 1999, 2005
+ *	Copyright (C) 1999, 2005, 2010
  *	    Thomas Sailer (t.sailer@alumni.ethz.ch)
  *
  *	This program is free software; you can redistribute it and/or modify
@@ -49,6 +49,7 @@
 #include <linux/delay.h>
 #include <linux/completion.h>
 #include <linux/kref.h>
+#include <linux/slab.h>
 
 /*
  * Version Information
@@ -84,9 +85,9 @@ static void destroy_priv(struct kref *kref)
 {
 	struct parport_uss720_private *priv = container_of(kref, struct parport_uss720_private, ref_count);
 
+	dev_dbg(&priv->usbdev->dev, "destroying priv datastructure\n");
 	usb_put_dev(priv->usbdev);
 	kfree(priv);
-	dbg("destroying priv datastructure");
 }
 
 static void destroy_async(struct kref *kref)
@@ -111,23 +112,27 @@ static void async_complete(struct urb *urb)
 	struct uss720_async_request *rq;
 	struct parport *pp;
 	struct parport_uss720_private *priv;
+	int status = urb->status;
 
 	rq = urb->context;
 	priv = rq->priv;
 	pp = priv->pp;
-	if (urb->status) {
-		err("async_complete: urb error %d", urb->status);
+	if (status) {
+		dev_err(&urb->dev->dev, "async_complete: urb error %d\n",
+			status);
 	} else if (rq->dr.bRequest == 3) {
 		memcpy(priv->reg, rq->reg, sizeof(priv->reg));
 #if 0
-		dbg("async_complete regs %02x %02x %02x %02x %02x %02x %02x",
-		    (unsigned int)priv->reg[0], (unsigned int)priv->reg[1], (unsigned int)priv->reg[2],
-		    (unsigned int)priv->reg[3], (unsigned int)priv->reg[4], (unsigned int)priv->reg[5],
-		    (unsigned int)priv->reg[6]);
+		dev_dbg(&priv->usbdev->dev,
+			"async_complete regs %02x %02x %02x %02x %02x %02x %02x\n",
+			(unsigned int)priv->reg[0], (unsigned int)priv->reg[1],
+			(unsigned int)priv->reg[2], (unsigned int)priv->reg[3],
+			(unsigned int)priv->reg[4], (unsigned int)priv->reg[5],
+			(unsigned int)priv->reg[6]);
 #endif
 		/* if nAck interrupts are enabled and we have an interrupt, call the interrupt procedure */
 		if (rq->reg[2] & rq->reg[1] & 0x10 && pp)
-			parport_generic_irq(0, pp);
+			parport_generic_irq(pp);
 	}
 	complete(&rq->compl);
 	kref_put(&rq->ref_count, destroy_async);
@@ -149,7 +154,7 @@ static struct uss720_async_request *submit_async_request(struct parport_uss720_p
 		return NULL;
 	rq = kmalloc(sizeof(struct uss720_async_request), mem_flags);
 	if (!rq) {
-		err("submit_async_request out of memory");
+		dev_err(&usbdev->dev, "submit_async_request out of memory\n");
 		return NULL;
 	}
 	kref_init(&rq->ref_count);
@@ -160,7 +165,7 @@ static struct uss720_async_request *submit_async_request(struct parport_uss720_p
 	rq->urb = usb_alloc_urb(0, mem_flags);
 	if (!rq->urb) {
 		kref_put(&rq->ref_count, destroy_async);
-		err("submit_async_request out of memory");
+		dev_err(&usbdev->dev, "submit_async_request out of memory\n");
 		return NULL;
 	}
 	rq->dr.bRequestType = requesttype;
@@ -175,13 +180,12 @@ static struct uss720_async_request *submit_async_request(struct parport_uss720_p
 	spin_lock_irqsave(&priv->asynclock, flags);
 	list_add_tail(&rq->asynclist, &priv->asynclist);
 	spin_unlock_irqrestore(&priv->asynclock, flags);
+	kref_get(&rq->ref_count);
 	ret = usb_submit_urb(rq->urb, mem_flags);
-	if (!ret) {
-		kref_get(&rq->ref_count);
+	if (!ret)
 		return rq;
-	}
-	kref_put(&rq->ref_count, destroy_async);
-	err("submit_async_request submit_urb failed with %d", ret);
+	destroy_async(&rq->ref_count);
+	dev_err(&usbdev->dev, "submit_async_request submit_urb failed with %d\n", ret);
 	return NULL;
 }
 
@@ -216,7 +220,8 @@ static int get_1284_register(struct parport *pp, unsigned char reg, unsigned cha
 	priv = pp->private_data;
 	rq = submit_async_request(priv, 3, 0xc0, ((unsigned int)reg) << 8, 0, mem_flags);
 	if (!rq) {
-		err("get_1284_register(%u) failed", (unsigned int)reg);
+		dev_err(&priv->usbdev->dev, "get_1284_register(%u) failed",
+			(unsigned int)reg);
 		return -EIO;
 	}
 	if (!val) {
@@ -227,11 +232,12 @@ static int get_1284_register(struct parport *pp, unsigned char reg, unsigned cha
 		ret = rq->urb->status;
 		*val = priv->reg[(reg >= 9) ? 0 : regindex[reg]];
 		if (ret)
-			warn("get_1284_register: usb error %d", ret);
+			printk(KERN_WARNING "get_1284_register: "
+			       "usb error %d\n", ret);
 		kref_put(&rq->ref_count, destroy_async);
 		return ret;
 	}
-	warn("get_1284_register timeout");
+	printk(KERN_WARNING "get_1284_register timeout\n");
 	kill_all_async_requests_priv(priv);
 	return -EIO;
 }
@@ -246,7 +252,8 @@ static int set_1284_register(struct parport *pp, unsigned char reg, unsigned cha
 	priv = pp->private_data;
 	rq = submit_async_request(priv, 4, 0x40, (((unsigned int)reg) << 8) | val, 0, mem_flags);
 	if (!rq) {
-		err("set_1284_register(%u,%u) failed", (unsigned int)reg, (unsigned int)val);
+		dev_err(&priv->usbdev->dev, "set_1284_register(%u,%u) failed",
+			(unsigned int)reg, (unsigned int)val);
 		return -EIO;
 	}
 	kref_put(&rq->ref_count, destroy_async);
@@ -336,7 +343,7 @@ static int uss720_irq(int usbstatus, void *buffer, int len, void *dev_id)
 	memcpy(priv->reg, buffer, 4);
 	/* if nAck interrupts are enabled and we have an interrupt, call the interrupt procedure */
 	if (priv->reg[2] & priv->reg[1] & 0x10)
-		parport_generic_irq(0, pp);
+		parport_generic_irq(pp);
 	return 1;
 }
 #endif
@@ -688,9 +695,9 @@ static int uss720_probe(struct usb_interface *intf,
 	unsigned char reg;
 	int i;
 
-	dbg("probe: vendor id 0x%x, device id 0x%x\n",
-	    le16_to_cpu(usbdev->descriptor.idVendor),
-	    le16_to_cpu(usbdev->descriptor.idProduct));
+	dev_dbg(&intf->dev, "probe: vendor id 0x%x, device id 0x%x\n",
+		le16_to_cpu(usbdev->descriptor.idVendor),
+		le16_to_cpu(usbdev->descriptor.idProduct));
 
 	/* our known interfaces have 3 alternate settings */
 	if (intf->num_altsetting != 3) {
@@ -698,7 +705,7 @@ static int uss720_probe(struct usb_interface *intf,
 		return -ENODEV;
 	}
 	i = usb_set_interface(usbdev, intf->altsetting->desc.bInterfaceNumber, 2);
-	dbg("set inteface result %d", i);
+	dev_dbg(&intf->dev, "set inteface result %d\n", i);
 
 	interface = intf->cur_altsetting;
 
@@ -715,7 +722,7 @@ static int uss720_probe(struct usb_interface *intf,
 	spin_lock_init(&priv->asynclock);
 	INIT_LIST_HEAD(&priv->asynclist);
 	if (!(pp = parport_register_port(0, PARPORT_IRQ_NONE, PARPORT_DMA_NONE, &parport_uss720_ops))) {
-		warn("could not register parport");
+		printk(KERN_WARNING "uss720: could not register parport\n");
 		goto probe_abort;
 	}
 
@@ -729,11 +736,13 @@ static int uss720_probe(struct usb_interface *intf,
 	set_1284_register(pp, 2, 0x0c, GFP_KERNEL);
 	/* debugging */
 	get_1284_register(pp, 0, &reg, GFP_KERNEL);
-	dbg("reg: %02x %02x %02x %02x %02x %02x %02x",
-	    priv->reg[0], priv->reg[1], priv->reg[2], priv->reg[3], priv->reg[4], priv->reg[5], priv->reg[6]);
+	dev_dbg(&intf->dev, "reg: %02x %02x %02x %02x %02x %02x %02x\n",
+		priv->reg[0], priv->reg[1], priv->reg[2], priv->reg[3],
+		priv->reg[4], priv->reg[5], priv->reg[6]);
 
 	endpoint = &interface->endpoint[2];
-	dbg("epaddr %d interval %d", endpoint->desc.bEndpointAddress, endpoint->desc.bInterval);
+	dev_dbg(&intf->dev, "epaddr %d interval %d\n",
+		endpoint->desc.bEndpointAddress, endpoint->desc.bInterval);
 	parport_announce_port(pp);
 
 	usb_set_intfdata(intf, pp);
@@ -751,28 +760,29 @@ static void uss720_disconnect(struct usb_interface *intf)
 	struct parport_uss720_private *priv;
 	struct usb_device *usbdev;
 
-	dbg("disconnect");
+	dev_dbg(&intf->dev, "disconnect\n");
 	usb_set_intfdata(intf, NULL);
 	if (pp) {
 		priv = pp->private_data;
 		usbdev = priv->usbdev;
 		priv->usbdev = NULL;
 		priv->pp = NULL;
-		dbg("parport_remove_port");
+		dev_dbg(&intf->dev, "parport_remove_port\n");
 		parport_remove_port(pp);
 		parport_put_port(pp);
 		kill_all_async_requests_priv(priv);
 		kref_put(&priv->ref_count, destroy_priv);
 	}
-	dbg("disconnect done");
+	dev_dbg(&intf->dev, "disconnect done\n");
 }
 
 /* table of cables that work through this driver */
-static struct usb_device_id uss720_table [] = {
+static const struct usb_device_id uss720_table[] = {
 	{ USB_DEVICE(0x047e, 0x1001) },
 	{ USB_DEVICE(0x0557, 0x2001) },
 	{ USB_DEVICE(0x0729, 0x1284) },
 	{ USB_DEVICE(0x1293, 0x0002) },
+	{ USB_DEVICE(0x050d, 0x0002) },
 	{ }						/* Terminating entry */
 };
 
@@ -799,10 +809,14 @@ static int __init uss720_init(void)
 	if (retval)
 		goto out;
 
-	info(DRIVER_VERSION ":" DRIVER_DESC);
-	info("NOTE: this is a special purpose driver to allow nonstandard");
-	info("protocols (eg. bitbang) over USS720 usb to parallel cables");
-	info("If you just want to connect to a printer, use usblp instead");
+	printk(KERN_INFO KBUILD_MODNAME ": " DRIVER_VERSION ":"
+	       DRIVER_DESC "\n");
+	printk(KERN_INFO KBUILD_MODNAME ": NOTE: this is a special purpose "
+	       "driver to allow nonstandard\n");
+	printk(KERN_INFO KBUILD_MODNAME ": protocols (eg. bitbang) over "
+	       "USS720 usb to parallel cables\n");
+	printk(KERN_INFO KBUILD_MODNAME ": If you just want to connect to a "
+	       "printer, use usblp instead\n");
 out:
 	return retval;
 }

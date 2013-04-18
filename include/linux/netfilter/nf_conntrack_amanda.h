@@ -2,8 +2,9 @@
 #define _NF_CONNTRACK_AMANDA_H
 /* AMANDA tracking. */
 
-extern unsigned int (*nf_nat_amanda_hook)(struct sk_buff **pskb,
+extern unsigned int (*nf_nat_amanda_hook)(struct sk_buff *skb,
 					  enum ip_conntrack_info ctinfo,
+					  unsigned int protoff,
 					  unsigned int matchoff,
 					  unsigned int matchlen,
 					  struct nf_conntrack_expect *exp);

@@ -10,7 +10,6 @@
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/mm.h>
-#include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/init.h>
 #include <linux/fb.h>
@@ -207,9 +206,10 @@ static struct fb_ops hpfb_ops = {
 #define HPFB_FBOMSB	0x5d	/* Frame buffer offset		*/
 #define HPFB_FBOLSB	0x5f
 
-static int __init hpfb_init_one(unsigned long phys_base, unsigned long virt_base)
+static int hpfb_init_one(unsigned long phys_base, unsigned long virt_base)
 {
 	unsigned long fboff, fb_width, fb_height, fb_start;
+	int ret;
 
 	fb_regs = virt_base;
 	fboff = (in_8(fb_regs + HPFB_FBOMSB) << 8) | in_8(fb_regs + HPFB_FBOLSB);
@@ -290,19 +290,29 @@ static int __init hpfb_init_one(unsigned long phys_base, unsigned long virt_base
 	fb_info.var   = hpfb_defined;
 	fb_info.screen_base = (char *)fb_start;
 
-	fb_alloc_cmap(&fb_info.cmap, 1 << hpfb_defined.bits_per_pixel, 0);
+	ret = fb_alloc_cmap(&fb_info.cmap, 1 << hpfb_defined.bits_per_pixel, 0);
+	if (ret < 0)
+		goto unmap_screen_base;
 
-	if (register_framebuffer(&fb_info) < 0) {
-		fb_dealloc_cmap(&fb_info.cmap);
-		iounmap(fb_info.screen_base);
-		fb_info.screen_base = NULL;
-		return 1;
-	}
+	ret = register_framebuffer(&fb_info);
+	if (ret < 0)
+		goto dealloc_cmap;
 
 	printk(KERN_INFO "fb%d: %s frame buffer device\n",
 	       fb_info.node, fb_info.fix.id);
 
 	return 0;
+
+dealloc_cmap:
+	fb_dealloc_cmap(&fb_info.cmap);
+
+unmap_screen_base:
+	if (fb_info.screen_base) {
+		iounmap(fb_info.screen_base);
+		fb_info.screen_base = NULL;
+	}
+
+	return ret;
 }
 
 /* 
@@ -316,16 +326,16 @@ static int __init hpfb_init_one(unsigned long phys_base, unsigned long virt_base
 /* 
  * Initialise the framebuffer
  */
-static int __devinit hpfb_dio_probe(struct dio_dev * d, const struct dio_device_id * ent)
+static int hpfb_dio_probe(struct dio_dev *d, const struct dio_device_id *ent)
 {
 	unsigned long paddr, vaddr;
 
 	paddr = d->resource.start;
-	if (!request_mem_region(d->resource.start, d->resource.end - d->resource.start, d->name))
+	if (!request_mem_region(d->resource.start, resource_size(&d->resource), d->name))
                 return -EBUSY;
 
 	if (d->scode >= DIOII_SCBASE) {
-		vaddr = (unsigned long)ioremap(paddr, d->resource.end - d->resource.start);
+		vaddr = (unsigned long)ioremap(paddr, resource_size(&d->resource));
 	} else {
 		vaddr = paddr + DIO_VIRADDRBASE;
 	}
@@ -339,12 +349,15 @@ static int __devinit hpfb_dio_probe(struct dio_dev * d, const struct dio_device_
 	return 0;
 }
 
-static void __devexit hpfb_remove_one(struct dio_dev *d)
+static void hpfb_remove_one(struct dio_dev *d)
 {
 	unregister_framebuffer(&fb_info);
 	if (d->scode >= DIOII_SCBASE)
 		iounmap((void *)fb_regs);
-        release_mem_region(d->resource.start, d->resource.end - d->resource.start);
+	release_mem_region(d->resource.start, resource_size(&d->resource));
+	fb_dealloc_cmap(&fb_info.cmap);
+	if (fb_info.screen_base)
+		iounmap(fb_info.screen_base);
 }
 
 static struct dio_device_id hpfb_dio_tbl[] = {
@@ -359,7 +372,7 @@ static struct dio_driver hpfb_driver = {
     .name      = "hpfb",
     .id_table  = hpfb_dio_tbl,
     .probe     = hpfb_dio_probe,
-    .remove    = __devexit_p(hpfb_remove_one),
+    .remove    = hpfb_remove_one,
 };
 
 int __init hpfb_init(void)
@@ -381,7 +394,7 @@ int __init hpfb_init(void)
 #define INTFBPADDR 0x560000
 
 	if (!MACH_IS_HP300)
-		return -ENXIO;
+		return -ENODEV;
 
 	if (fb_get_options("hpfb", NULL))
 		return -ENODEV;

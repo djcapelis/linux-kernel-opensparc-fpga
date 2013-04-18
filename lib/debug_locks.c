@@ -10,7 +10,7 @@
  */
 #include <linux/rwsem.h>
 #include <linux/mutex.h>
-#include <linux/module.h>
+#include <linux/export.h>
 #include <linux/spinlock.h>
 #include <linux/debug_locks.h>
 
@@ -22,6 +22,7 @@
  * shut up after that.
  */
 int debug_locks = 1;
+EXPORT_SYMBOL_GPL(debug_locks);
 
 /*
  * The locking-testsuite uses <debug_locks_silent> to get a
@@ -35,7 +36,7 @@ int debug_locks_silent;
  */
 int debug_locks_off(void)
 {
-	if (xchg(&debug_locks, 0)) {
+	if (__debug_locks_off()) {
 		if (!debug_locks_silent) {
 			console_verbose();
 			return 1;

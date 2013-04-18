@@ -1,5 +1,5 @@
-/* Copyright (c) 2006 Coraid, Inc.  See COPYING for GPL terms. */
-#define VERSION "32"
+/* Copyright (c) 2012 Coraid, Inc.  See COPYING for GPL terms. */
+#define VERSION "81"
 #define AOE_MAJOR 152
 #define DEVICE_NAME "aoe"
 
@@ -10,14 +10,12 @@
 #define AOE_PARTITIONS (16)
 #endif
 
-#define SYSMINOR(aoemajor, aoeminor) ((aoemajor) * NPERSHELF + (aoeminor))
-#define AOEMAJOR(sysminor) ((sysminor) / NPERSHELF)
-#define AOEMINOR(sysminor) ((sysminor) % NPERSHELF)
-#define WHITESPACE " \t\v\f\n"
+#define WHITESPACE " \t\v\f\n,"
 
 enum {
 	AOECMD_ATA,
 	AOECMD_CFG,
+	AOECMD_VEND_MIN = 0xf0,
 
 	AOEFL_RSP = (1<<3),
 	AOEFL_ERR = (1<<2),
@@ -48,15 +46,6 @@ struct aoe_hdr {
 	__be32 tag;
 };
 
-#ifdef __KERNEL__
-#include <linux/skbuff.h>
-
-static inline struct aoe_hdr *aoe_hdr(const struct sk_buff *skb)
-{
-	return (struct aoe_hdr *)skb_mac_header(skb);
-}
-#endif
-
 struct aoe_atahdr {
 	unsigned char aflags;
 	unsigned char errfeat;
@@ -83,77 +72,134 @@ enum {
 	DEVFL_UP = 1,	/* device is installed in system and ready for AoE->ATA commands */
 	DEVFL_TKILL = (1<<1),	/* flag for timer to know when to kill self */
 	DEVFL_EXT = (1<<2),	/* device accepts lba48 commands */
-	DEVFL_CLOSEWAIT = (1<<3), /* device is waiting for all closes to revalidate */
-	DEVFL_GDALLOC = (1<<4),	/* need to alloc gendisk */
-	DEVFL_PAUSE = (1<<5),
+	DEVFL_GDALLOC = (1<<3),	/* need to alloc gendisk */
+	DEVFL_GD_NOW = (1<<4),	/* allocating gendisk */
+	DEVFL_KICKME = (1<<5),	/* slow polling network card catch */
 	DEVFL_NEWSIZE = (1<<6),	/* need to update dev size in block layer */
-	DEVFL_MAXBCNT = (1<<7), /* d->maxbcnt is not changeable */
-	DEVFL_KICKME = (1<<8),
-
-	BUFFL_FAIL = 1,
+	DEVFL_FREEING = (1<<7),	/* set when device is being cleaned up */
+	DEVFL_FREED = (1<<8),	/* device has been cleaned up */
 };
 
 enum {
 	DEFAULTBCNT = 2 * 512,	/* 2 sectors */
-	NPERSHELF = 16,		/* number of slots per shelf address */
-	FREETAG = -1,
-	MIN_BUFS = 8,
+	MIN_BUFS = 16,
+	NTARGETS = 4,
+	NAOEIFS = 8,
+	NSKBPOOLMAX = 256,
+	NFACTIVE = 61,
+
+	TIMERTICK = HZ / 10,
+	RTTSCALE = 8,
+	RTTDSCALE = 3,
+	RTTAVG_INIT = USEC_PER_SEC / 4 << RTTSCALE,
+	RTTDEV_INIT = RTTAVG_INIT / 4,
+
+	HARD_SCORN_SECS = 10,	/* try another remote port after this */
+	MAX_TAINT = 1000,	/* cap on aoetgt taint */
 };
 
 struct buf {
-	struct list_head bufs;
-	ulong start_time;	/* for disk stats */
-	ulong flags;
 	ulong nframesout;
-	char *bufaddr;
 	ulong resid;
 	ulong bv_resid;
 	sector_t sector;
 	struct bio *bio;
 	struct bio_vec *bv;
+	struct request *rq;
+};
+
+enum frame_flags {
+	FFL_PROBE = 1,
 };
 
 struct frame {
-	int tag;
+	struct list_head head;
+	u32 tag;
+	struct timeval sent;	/* high-res time packet was sent */
+	u32 sent_jiffs;		/* low-res jiffies-based sent time */
 	ulong waited;
-	struct buf *buf;
-	char *bufaddr;
-	ulong bcnt;
+	ulong waited_total;
+	struct aoetgt *t;		/* parent target I belong to */
 	sector_t lba;
-	struct sk_buff *skb;
+	struct sk_buff *skb;		/* command skb freed on module exit */
+	struct sk_buff *r_skb;		/* response skb for async processing */
+	struct buf *buf;
+	struct bio_vec *bv;
+	ulong bcnt;
+	ulong bv_off;
+	char flags;
+};
+
+struct aoeif {
+	struct net_device *nd;
+	ulong lost;
+	int bcnt;
+};
+
+struct aoetgt {
+	unsigned char addr[6];
+	ushort nframes;		/* cap on frames to use */
+	struct aoedev *d;			/* parent device I belong to */
+	struct list_head ffree;			/* list of free frames */
+	struct aoeif ifs[NAOEIFS];
+	struct aoeif *ifp;	/* current aoeif in use */
+	ushort nout;		/* number of AoE commands outstanding */
+	ushort maxout;		/* current value for max outstanding */
+	ushort next_cwnd;	/* incr maxout after decrementing to zero */
+	ushort ssthresh;	/* slow start threshold */
+	ulong falloc;		/* number of allocated frames */
+	int taint;		/* how much we want to avoid this aoetgt */
+	int minbcnt;
+	int wpkts, rpkts;
+	char nout_probes;
 };
 
 struct aoedev {
 	struct aoedev *next;
-	unsigned char addr[6];	/* remote mac addr */
-	ushort flags;
 	ulong sysminor;
 	ulong aoemajor;
-	ulong aoeminor;
+	u32 rttavg;		/* scaled AoE round trip time average */
+	u32 rttdev;		/* scaled round trip time mean deviation */
+	u16 aoeminor;
+	u16 flags;
 	u16 nopen;		/* (bd_openers isn't available without sleeping) */
-	u16 lasttag;		/* last tag sent */
-	u16 rttavg;		/* round trip average of requests/responses */
-	u16 mintimer;
 	u16 fw_ver;		/* version of blade's firmware */
-	u16 maxbcnt;
+	u16 lasttag;		/* last tag sent */
+	u16 useme;
+	ulong ref;
 	struct work_struct work;/* disk create work struct */
 	struct gendisk *gd;
-	request_queue_t blkq;
-	struct hd_geometry geo; 
+	struct request_queue *blkq;
+	struct hd_geometry geo;
 	sector_t ssize;
 	struct timer_list timer;
 	spinlock_t lock;
-	struct net_device *ifp;	/* interface ed is attached to */
-	struct sk_buff *sendq_hd; /* packets needing to be sent, list head */
-	struct sk_buff *sendq_tl;
+	struct sk_buff_head skbpool;
 	mempool_t *bufpool;	/* for deadlock-free Buf allocation */
-	struct list_head bufq;	/* queue of bios to work on */
-	struct buf *inprocess;	/* the one we're currently working on */
-	ushort lostjumbo;
-	ushort nframes;		/* number of frames below */
-	struct frame *frames;
+	struct {		/* pointers to work in progress */
+		struct buf *buf;
+		struct bio *nxbio;
+		struct request *rq;
+	} ip;
+	ulong maxbcnt;
+	struct list_head factive[NFACTIVE];	/* hash of active frames */
+	struct list_head rexmitq; /* deferred retransmissions */
+	struct aoetgt **targets;
+	ulong ntargets;		/* number of allocated aoetgt pointers */
+	struct aoetgt **tgt;	/* target in use when working */
+	ulong kicked;
+	char ident[512];
 };
 
+/* kthread tracking */
+struct ktstate {
+	struct completion rendez;
+	struct task_struct *task;
+	wait_queue_head_t *waitq;
+	int (*fn) (void);
+	char *name;
+	spinlock_t *lock;
+};
 
 int aoeblk_init(void);
 void aoeblk_exit(void);
@@ -166,22 +212,30 @@ void aoechr_error(char *);
 
 void aoecmd_work(struct aoedev *d);
 void aoecmd_cfg(ushort aoemajor, unsigned char aoeminor);
-void aoecmd_ata_rsp(struct sk_buff *);
+struct sk_buff *aoecmd_ata_rsp(struct sk_buff *);
 void aoecmd_cfg_rsp(struct sk_buff *);
 void aoecmd_sleepwork(struct work_struct *);
-struct sk_buff *new_skb(ulong);
+void aoecmd_wreset(struct aoetgt *t);
+void aoecmd_cleanslate(struct aoedev *);
+void aoecmd_exit(void);
+int aoecmd_init(void);
+struct sk_buff *aoecmd_ata_id(struct aoedev *);
+void aoe_freetframe(struct frame *);
+void aoe_flush_iocq(void);
+void aoe_end_request(struct aoedev *, struct request *, int);
+int aoe_ktstart(struct ktstate *k);
+void aoe_ktstop(struct ktstate *k);
 
 int aoedev_init(void);
 void aoedev_exit(void);
-struct aoedev *aoedev_by_aoeaddr(int maj, int min);
-struct aoedev *aoedev_by_sysminor_m(ulong sysminor, ulong bufcnt);
+struct aoedev *aoedev_by_aoeaddr(ulong maj, int min, int do_alloc);
 void aoedev_downdev(struct aoedev *d);
-int aoedev_isbusy(struct aoedev *d);
+int aoedev_flush(const char __user *str, size_t size);
+void aoe_failbuf(struct aoedev *, struct buf *);
+void aoedev_put(struct aoedev *);
 
 int aoenet_init(void);
 void aoenet_exit(void);
-void aoenet_xmit(struct sk_buff *);
+void aoenet_xmit(struct sk_buff_head *);
 int is_aoe_netif(struct net_device *ifp);
 int set_aoe_iflist(const char __user *str, size_t size);
-
-u64 mac_addr(char addr[6]);

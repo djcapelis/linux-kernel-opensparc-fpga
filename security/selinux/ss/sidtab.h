@@ -26,24 +26,21 @@ struct sidtab {
 	unsigned int nel;	/* number of elements */
 	unsigned int next_sid;	/* next SID to allocate */
 	unsigned char shutdown;
+#define SIDTAB_CACHE_LEN	3
+	struct sidtab_node *cache[SIDTAB_CACHE_LEN];
 	spinlock_t lock;
 };
 
 int sidtab_init(struct sidtab *s);
 int sidtab_insert(struct sidtab *s, u32 sid, struct context *context);
 struct context *sidtab_search(struct sidtab *s, u32 sid);
+struct context *sidtab_search_force(struct sidtab *s, u32 sid);
 
 int sidtab_map(struct sidtab *s,
 	       int (*apply) (u32 sid,
 			     struct context *context,
 			     void *args),
 	       void *args);
-
-void sidtab_map_remove_on_error(struct sidtab *s,
-				int (*apply) (u32 sid,
-					      struct context *context,
-					      void *args),
-				void *args);
 
 int sidtab_context_to_sid(struct sidtab *s,
 			  struct context *context,

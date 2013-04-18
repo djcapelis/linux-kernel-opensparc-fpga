@@ -15,8 +15,10 @@
 
 #define PAGE_CACHE_BITS	(PAGE_CACHE_SIZE * 8)
 
-int hfsplus_block_allocate(struct super_block *sb, u32 size, u32 offset, u32 *max)
+int hfsplus_block_allocate(struct super_block *sb, u32 size,
+		u32 offset, u32 *max)
 {
+	struct hfsplus_sb_info *sbi = HFSPLUS_SB(sb);
 	struct page *page;
 	struct address_space *mapping;
 	__be32 *pptr, *curr, *end;
@@ -29,9 +31,13 @@ int hfsplus_block_allocate(struct super_block *sb, u32 size, u32 offset, u32 *ma
 		return size;
 
 	dprint(DBG_BITMAP, "block_allocate: %u,%u,%u\n", size, offset, len);
-	mutex_lock(&HFSPLUS_SB(sb).alloc_file->i_mutex);
-	mapping = HFSPLUS_SB(sb).alloc_file->i_mapping;
+	mutex_lock(&sbi->alloc_mutex);
+	mapping = sbi->alloc_file->i_mapping;
 	page = read_mapping_page(mapping, offset / PAGE_CACHE_BITS, NULL);
+	if (IS_ERR(page)) {
+		start = size;
+		goto out;
+	}
 	pptr = kmap(page);
 	curr = pptr + (offset & (PAGE_CACHE_BITS - 1)) / 32;
 	i = offset % 32;
@@ -73,6 +79,10 @@ int hfsplus_block_allocate(struct super_block *sb, u32 size, u32 offset, u32 *ma
 			break;
 		page = read_mapping_page(mapping, offset / PAGE_CACHE_BITS,
 					 NULL);
+		if (IS_ERR(page)) {
+			start = size;
+			goto out;
+		}
 		curr = pptr = kmap(page);
 		if ((size ^ offset) / PAGE_CACHE_BITS)
 			end = pptr + PAGE_CACHE_BITS / 32;
@@ -120,6 +130,10 @@ found:
 		offset += PAGE_CACHE_BITS;
 		page = read_mapping_page(mapping, offset / PAGE_CACHE_BITS,
 					 NULL);
+		if (IS_ERR(page)) {
+			start = size;
+			goto out;
+		}
 		pptr = kmap(page);
 		curr = pptr;
 		end = pptr + PAGE_CACHE_BITS / 32;
@@ -138,16 +152,17 @@ done:
 	set_page_dirty(page);
 	kunmap(page);
 	*max = offset + (curr - pptr) * 32 + i - start;
-	HFSPLUS_SB(sb).free_blocks -= *max;
-	sb->s_dirt = 1;
+	sbi->free_blocks -= *max;
+	hfsplus_mark_mdb_dirty(sb);
 	dprint(DBG_BITMAP, "-> %u,%u\n", start, *max);
 out:
-	mutex_unlock(&HFSPLUS_SB(sb).alloc_file->i_mutex);
+	mutex_unlock(&sbi->alloc_mutex);
 	return start;
 }
 
 int hfsplus_block_free(struct super_block *sb, u32 offset, u32 count)
 {
+	struct hfsplus_sb_info *sbi = HFSPLUS_SB(sb);
 	struct page *page;
 	struct address_space *mapping;
 	__be32 *pptr, *curr, *end;
@@ -160,13 +175,15 @@ int hfsplus_block_free(struct super_block *sb, u32 offset, u32 count)
 
 	dprint(DBG_BITMAP, "block_free: %u,%u\n", offset, count);
 	/* are all of the bits in range? */
-	if ((offset + count) > HFSPLUS_SB(sb).total_blocks)
-		return -2;
+	if ((offset + count) > sbi->total_blocks)
+		return -ENOENT;
 
-	mutex_lock(&HFSPLUS_SB(sb).alloc_file->i_mutex);
-	mapping = HFSPLUS_SB(sb).alloc_file->i_mapping;
+	mutex_lock(&sbi->alloc_mutex);
+	mapping = sbi->alloc_file->i_mapping;
 	pnr = offset / PAGE_CACHE_BITS;
 	page = read_mapping_page(mapping, pnr, NULL);
+	if (IS_ERR(page))
+		goto kaboom;
 	pptr = kmap(page);
 	curr = pptr + (offset & (PAGE_CACHE_BITS - 1)) / 32;
 	end = pptr + PAGE_CACHE_BITS / 32;
@@ -199,6 +216,8 @@ int hfsplus_block_free(struct super_block *sb, u32 offset, u32 count)
 		set_page_dirty(page);
 		kunmap(page);
 		page = read_mapping_page(mapping, ++pnr, NULL);
+		if (IS_ERR(page))
+			goto kaboom;
 		pptr = kmap(page);
 		curr = pptr;
 		end = pptr + PAGE_CACHE_BITS / 32;
@@ -212,9 +231,16 @@ done:
 out:
 	set_page_dirty(page);
 	kunmap(page);
-	HFSPLUS_SB(sb).free_blocks += len;
-	sb->s_dirt = 1;
-	mutex_unlock(&HFSPLUS_SB(sb).alloc_file->i_mutex);
+	sbi->free_blocks += len;
+	hfsplus_mark_mdb_dirty(sb);
+	mutex_unlock(&sbi->alloc_mutex);
 
 	return 0;
+
+kaboom:
+	printk(KERN_CRIT "hfsplus: unable to mark blocks free: error %ld\n",
+			PTR_ERR(page));
+	mutex_unlock(&sbi->alloc_mutex);
+
+	return -EIO;
 }

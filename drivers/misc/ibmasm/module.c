@@ -18,9 +18,9 @@
  *
  * Copyright (C) IBM Corporation, 2004
  *
- * Author: Max Asböck <amax@us.ibm.com> 
+ * Author: Max AsbÃ¶ck <amax@us.ibm.com>
  *
- * This driver is based on code originally written by Pete Reynolds 
+ * This driver is based on code originally written by Pete Reynolds
  * and others.
  *
  */
@@ -30,13 +30,13 @@
  *
  * 1) When loaded it sends a message to the service processor,
  * indicating that an OS is * running. This causes the service processor
- * to send periodic heartbeats to the OS. 
+ * to send periodic heartbeats to the OS.
  *
  * 2) Answers the periodic heartbeats sent by the service processor.
  * Failure to do so would result in system reboot.
  *
  * 3) Acts as a pass through for dot commands sent from user applications.
- * The interface for this is the ibmasmfs file system. 
+ * The interface for this is the ibmasmfs file system.
  *
  * 4) Allows user applications to register for event notification. Events
  * are sent to the driver through interrupts. They can be read from user
@@ -52,6 +52,7 @@
 
 #include <linux/pci.h>
 #include <linux/init.h>
+#include <linux/slab.h>
 #include "ibmasm.h"
 #include "lowlevel.h"
 #include "remote.h"
@@ -61,7 +62,7 @@ module_param(ibmasm_debug, int , S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(ibmasm_debug, " Set debug mode on or off");
 
 
-static int __devinit ibmasm_init_one(struct pci_dev *pdev, const struct pci_device_id *id)
+static int ibmasm_init_one(struct pci_dev *pdev, const struct pci_device_id *id)
 {
 	int result;
 	struct service_processor *sp;
@@ -77,13 +78,12 @@ static int __devinit ibmasm_init_one(struct pci_dev *pdev, const struct pci_devi
 	/* vnc client won't work without bus-mastering */
 	pci_set_master(pdev);
 
-	sp = kmalloc(sizeof(struct service_processor), GFP_KERNEL);
+	sp = kzalloc(sizeof(struct service_processor), GFP_KERNEL);
 	if (sp == NULL) {
 		dev_err(&pdev->dev, "Failed to allocate memory\n");
 		result = -ENOMEM;
 		goto error_kmalloc;
 	}
-	memset(sp, 0, sizeof(struct service_processor));
 
 	spin_lock_init(&sp->lock);
 	INIT_LIST_HEAD(&sp->command_queue);
@@ -105,9 +105,8 @@ static int __devinit ibmasm_init_one(struct pci_dev *pdev, const struct pci_devi
 	}
 
 	sp->irq = pdev->irq;
-	sp->base_address = ioremap(pci_resource_start(pdev, 0), 
-					pci_resource_len(pdev, 0));
-	if (sp->base_address == 0) {
+	sp->base_address = pci_ioremap_bar(pdev, 0);
+	if (!sp->base_address) {
 		dev_err(sp->dev, "Failed to ioremap pci memory\n");
 		result =  -ENODEV;
 		goto error_ioremap;
@@ -164,7 +163,7 @@ error_resources:
 	return result;
 }
 
-static void __devexit ibmasm_remove_one(struct pci_dev *pdev)
+static void ibmasm_remove_one(struct pci_dev *pdev)
 {
 	struct service_processor *sp = (struct service_processor *)pci_get_drvdata(pdev);
 
@@ -199,7 +198,7 @@ static struct pci_driver ibmasm_driver = {
 	.name		= DRIVER_NAME,
 	.id_table	= ibmasm_pci_table,
 	.probe		= ibmasm_init_one,
-	.remove		= __devexit_p(ibmasm_remove_one),
+	.remove		= ibmasm_remove_one,
 };
 
 static void __exit ibmasm_exit (void)
@@ -212,18 +211,17 @@ static void __exit ibmasm_exit (void)
 
 static int __init ibmasm_init(void)
 {
-	int result;
+	int result = pci_register_driver(&ibmasm_driver);
+	if (result)
+		return result;
 
 	result = ibmasmfs_register();
 	if (result) {
+		pci_unregister_driver(&ibmasm_driver);
 		err("Failed to register ibmasmfs file system");
 		return result;
 	}
-	result = pci_register_driver(&ibmasm_driver);
-	if (result) {
-		ibmasmfs_unregister();
-		return result;
-	}
+
 	ibmasm_register_panic_notifier();
 	info(DRIVER_DESC " version " DRIVER_VERSION " loaded");
 	return 0;

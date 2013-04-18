@@ -29,6 +29,7 @@
 #include <linux/mount.h>
 #include <linux/pagemap.h>
 #include <linux/init.h>
+#include <linux/slab.h>
 
 #include <linux/configfs.h>
 #include "configfs_internal.h"
@@ -36,8 +37,7 @@
 /* Random magic number */
 #define CONFIGFS_MAGIC 0x62656570
 
-struct vfsmount * configfs_mount = NULL;
-struct super_block * configfs_sb = NULL;
+static struct vfsmount *configfs_mount = NULL;
 struct kmem_cache *configfs_dir_cachep;
 static int configfs_mnt_count = 0;
 
@@ -76,12 +76,11 @@ static int configfs_fill_super(struct super_block *sb, void *data, int silent)
 	sb->s_magic = CONFIGFS_MAGIC;
 	sb->s_op = &configfs_ops;
 	sb->s_time_gran = 1;
-	configfs_sb = sb;
 
 	inode = configfs_new_inode(S_IFDIR | S_IRWXU | S_IRUGO | S_IXUGO,
-				   &configfs_root);
+				   &configfs_root, sb);
 	if (inode) {
-		inode->i_op = &configfs_dir_inode_operations;
+		inode->i_op = &configfs_root_inode_operations;
 		inode->i_fop = &configfs_dir_operations;
 		/* directory inodes start off with i_nlink == 2 (for "." entry) */
 		inc_nlink(inode);
@@ -90,36 +89,37 @@ static int configfs_fill_super(struct super_block *sb, void *data, int silent)
 		return -ENOMEM;
 	}
 
-	root = d_alloc_root(inode);
+	root = d_make_root(inode);
 	if (!root) {
-		pr_debug("%s: could not get root dentry!\n",__FUNCTION__);
-		iput(inode);
+		pr_debug("%s: could not get root dentry!\n",__func__);
 		return -ENOMEM;
 	}
 	config_group_init(&configfs_root_group);
 	configfs_root_group.cg_item.ci_dentry = root;
 	root->d_fsdata = &configfs_root;
 	sb->s_root = root;
+	sb->s_d_op = &configfs_dentry_ops; /* the rest get that */
 	return 0;
 }
 
-static int configfs_get_sb(struct file_system_type *fs_type,
-	int flags, const char *dev_name, void *data, struct vfsmount *mnt)
+static struct dentry *configfs_do_mount(struct file_system_type *fs_type,
+	int flags, const char *dev_name, void *data)
 {
-	return get_sb_single(fs_type, flags, data, configfs_fill_super, mnt);
+	return mount_single(fs_type, flags, data, configfs_fill_super);
 }
 
 static struct file_system_type configfs_fs_type = {
 	.owner		= THIS_MODULE,
 	.name		= "configfs",
-	.get_sb		= configfs_get_sb,
+	.mount		= configfs_do_mount,
 	.kill_sb	= kill_litter_super,
 };
 
-int configfs_pin_fs(void)
+struct dentry *configfs_pin_fs(void)
 {
-	return simple_pin_fs(&configfs_fs_type, &configfs_mount,
+	int err = simple_pin_fs(&configfs_fs_type, &configfs_mount,
 			     &configfs_mnt_count);
+	return err ? ERR_PTR(err) : configfs_mount->mnt_root;
 }
 
 void configfs_release_fs(void)
@@ -128,7 +128,7 @@ void configfs_release_fs(void)
 }
 
 
-static decl_subsys(config, NULL, NULL);
+static struct kobject *config_kobj;
 
 static int __init configfs_init(void)
 {
@@ -136,26 +136,31 @@ static int __init configfs_init(void)
 
 	configfs_dir_cachep = kmem_cache_create("configfs_dir_cache",
 						sizeof(struct configfs_dirent),
-						0, 0, NULL, NULL);
+						0, 0, NULL);
 	if (!configfs_dir_cachep)
 		goto out;
 
-	kobj_set_kset_s(&config_subsys, kernel_subsys);
-	err = subsystem_register(&config_subsys);
-	if (err) {
-		kmem_cache_destroy(configfs_dir_cachep);
-		configfs_dir_cachep = NULL;
-		goto out;
-	}
+	config_kobj = kobject_create_and_add("config", kernel_kobj);
+	if (!config_kobj)
+		goto out2;
+
+	err = configfs_inode_init();
+	if (err)
+		goto out3;
 
 	err = register_filesystem(&configfs_fs_type);
-	if (err) {
-		printk(KERN_ERR "configfs: Unable to register filesystem!\n");
-		subsystem_unregister(&config_subsys);
-		kmem_cache_destroy(configfs_dir_cachep);
-		configfs_dir_cachep = NULL;
-	}
+	if (err)
+		goto out4;
 
+	return 0;
+out4:
+	printk(KERN_ERR "configfs: Unable to register filesystem!\n");
+	configfs_inode_exit();
+out3:
+	kobject_put(config_kobj);
+out2:
+	kmem_cache_destroy(configfs_dir_cachep);
+	configfs_dir_cachep = NULL;
 out:
 	return err;
 }
@@ -163,9 +168,10 @@ out:
 static void __exit configfs_exit(void)
 {
 	unregister_filesystem(&configfs_fs_type);
-	subsystem_unregister(&config_subsys);
+	kobject_put(config_kobj);
 	kmem_cache_destroy(configfs_dir_cachep);
 	configfs_dir_cachep = NULL;
+	configfs_inode_exit();
 }
 
 MODULE_AUTHOR("Oracle");

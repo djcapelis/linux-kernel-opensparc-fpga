@@ -7,31 +7,8 @@
  *  block allocation, deallocation, calculation of free space.
  */
 
+#include <linux/slab.h>
 #include "affs.h"
-
-/* This is, of course, shamelessly stolen from fs/minix */
-
-static int nibblemap[] = { 0,1,1,2,1,2,2,3,1,2,2,3,2,3,3,4 };
-
-static u32
-affs_count_free_bits(u32 blocksize, const void *data)
-{
-	const u32 *map;
-	u32 free;
-	u32 tmp;
-
-	map = data;
-	free = 0;
-	for (blocksize /= 4; blocksize > 0; blocksize--) {
-		tmp = *map++;
-		while (tmp) {
-			free += nibblemap[tmp & 0xf];
-			tmp >>= 4;
-		}
-	}
-
-	return free;
-}
 
 u32
 affs_count_free_blocks(struct super_block *sb)
@@ -45,14 +22,14 @@ affs_count_free_blocks(struct super_block *sb)
 	if (sb->s_flags & MS_RDONLY)
 		return 0;
 
-	down(&AFFS_SB(sb)->s_bmlock);
+	mutex_lock(&AFFS_SB(sb)->s_bmlock);
 
 	bm = AFFS_SB(sb)->s_bitmap;
 	free = 0;
 	for (i = AFFS_SB(sb)->s_bmap_count; i > 0; bm++, i--)
 		free += bm->bm_free;
 
-	up(&AFFS_SB(sb)->s_bmlock);
+	mutex_unlock(&AFFS_SB(sb)->s_bmlock);
 
 	return free;
 }
@@ -76,7 +53,7 @@ affs_free_block(struct super_block *sb, u32 block)
 	bit     = blk % sbi->s_bmap_bits;
 	bm      = &sbi->s_bitmap[bmap];
 
-	down(&sbi->s_bmlock);
+	mutex_lock(&sbi->s_bmlock);
 
 	bh = sbi->s_bmap_bh;
 	if (sbi->s_last_bmap != bmap) {
@@ -102,22 +79,22 @@ affs_free_block(struct super_block *sb, u32 block)
 	*(__be32 *)bh->b_data = cpu_to_be32(tmp - mask);
 
 	mark_buffer_dirty(bh);
-	sb->s_dirt = 1;
+	affs_mark_sb_dirty(sb);
 	bm->bm_free++;
 
-	up(&sbi->s_bmlock);
+	mutex_unlock(&sbi->s_bmlock);
 	return;
 
 err_free:
 	affs_warning(sb,"affs_free_block","Trying to free block %u which is already free", block);
-	up(&sbi->s_bmlock);
+	mutex_unlock(&sbi->s_bmlock);
 	return;
 
 err_bh_read:
 	affs_error(sb,"affs_free_block","Cannot read bitmap block %u", bm->bm_key);
 	sbi->s_bmap_bh = NULL;
 	sbi->s_last_bmap = ~0;
-	up(&sbi->s_bmlock);
+	mutex_unlock(&sbi->s_bmlock);
 	return;
 
 err_range:
@@ -128,7 +105,7 @@ err_range:
 /*
  * Allocate a block in the given allocation zone.
  * Since we have to byte-swap the bitmap on little-endian
- * machines, this is rather expensive. Therefor we will
+ * machines, this is rather expensive. Therefore we will
  * preallocate up to 16 blocks from the same word, if
  * possible. We are not doing preallocations in the
  * header zone, though.
@@ -168,7 +145,7 @@ affs_alloc_block(struct inode *inode, u32 goal)
 	bmap = blk / sbi->s_bmap_bits;
 	bm = &sbi->s_bitmap[bmap];
 
-	down(&sbi->s_bmlock);
+	mutex_lock(&sbi->s_bmlock);
 
 	if (bm->bm_free)
 		goto find_bmap_bit;
@@ -247,9 +224,9 @@ find_bit:
 	*(__be32 *)bh->b_data = cpu_to_be32(tmp + mask);
 
 	mark_buffer_dirty(bh);
-	sb->s_dirt = 1;
+	affs_mark_sb_dirty(sb);
 
-	up(&sbi->s_bmlock);
+	mutex_unlock(&sbi->s_bmlock);
 
 	pr_debug("%d\n", blk);
 	return blk;
@@ -259,7 +236,7 @@ err_bh_read:
 	sbi->s_bmap_bh = NULL;
 	sbi->s_last_bmap = ~0;
 err_full:
-	up(&sbi->s_bmlock);
+	mutex_unlock(&sbi->s_bmlock);
 	pr_debug("failed\n");
 	return 0;
 }
@@ -316,7 +293,7 @@ int affs_init_bitmap(struct super_block *sb, int *flags)
 			goto out;
 		}
 		pr_debug("AFFS: read bitmap block %d: %d\n", blk, bm->bm_key);
-		bm->bm_free = affs_count_free_bits(sb->s_blocksize - 4, bh->b_data + 4);
+		bm->bm_free = memweight(bh->b_data + 4, sb->s_blocksize - 4);
 
 		/* Don't try read the extension if this is the last block,
 		 * but we also need the right bm pointer below
@@ -366,7 +343,7 @@ int affs_init_bitmap(struct super_block *sb, int *flags)
 
 	/* recalculate bitmap count for last block */
 	bm--;
-	bm->bm_free = affs_count_free_bits(sb->s_blocksize - 4, bh->b_data + 4);
+	bm->bm_free = memweight(bh->b_data + 4, sb->s_blocksize - 4);
 
 out:
 	affs_brelse(bh);

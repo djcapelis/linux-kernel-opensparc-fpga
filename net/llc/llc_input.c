@@ -12,6 +12,9 @@
  * See the GNU General Public License for more details.
  */
 #include <linux/netdevice.h>
+#include <linux/slab.h>
+#include <linux/export.h>
+#include <net/net_namespace.h>
 #include <net/llc.h>
 #include <net/llc_pdu.h>
 #include <net/llc_sap.h>
@@ -39,6 +42,7 @@ static void (*llc_type_handlers[2])(struct llc_sap *sap,
 void llc_add_pack(int type, void (*handler)(struct llc_sap *sap,
 					    struct sk_buff *skb))
 {
+	smp_wmb(); /* ensure initialisation is complete before it's called */
 	if (type == LLC_DEST_SAP || type == LLC_DEST_CONN)
 		llc_type_handlers[type - 1] = handler;
 }
@@ -47,11 +51,19 @@ void llc_remove_pack(int type)
 {
 	if (type == LLC_DEST_SAP || type == LLC_DEST_CONN)
 		llc_type_handlers[type - 1] = NULL;
+	synchronize_net();
 }
 
 void llc_set_station_handler(void (*handler)(struct sk_buff *skb))
 {
+	/* Ensure initialisation is complete before it's called */
+	if (handler)
+		smp_wmb();
+
 	llc_station_handler = handler;
+
+	if (!handler)
+		synchronize_net();
 }
 
 /**
@@ -116,8 +128,11 @@ static inline int llc_fixup_skb(struct sk_buff *skb)
 	skb_pull(skb, llc_len);
 	if (skb->protocol == htons(ETH_P_802_2)) {
 		__be16 pdulen = eth_hdr(skb)->h_proto;
-		u16 data_size = ntohs(pdulen) - llc_len;
+		s32 data_size = ntohs(pdulen) - llc_len;
 
+		if (data_size < 0 ||
+		    !pskb_may_pull(skb, data_size))
+			return 0;
 		if (unlikely(pskb_trim_rcsum(skb, data_size)))
 			return 0;
 	}
@@ -144,13 +159,18 @@ int llc_rcv(struct sk_buff *skb, struct net_device *dev,
 	int dest;
 	int (*rcv)(struct sk_buff *, struct net_device *,
 		   struct packet_type *, struct net_device *);
+	void (*sta_handler)(struct sk_buff *skb);
+	void (*sap_handler)(struct llc_sap *sap, struct sk_buff *skb);
+
+	if (!net_eq(dev_net(dev), &init_net))
+		goto drop;
 
 	/*
 	 * When the interface is in promisc. mode, drop all the crap that it
 	 * receives, do not try to analyse it.
 	 */
 	if (unlikely(skb->pkt_type == PACKET_OTHERHOST)) {
-		dprintk("%s: PACKET_OTHERHOST\n", __FUNCTION__);
+		dprintk("%s: PACKET_OTHERHOST\n", __func__);
 		goto drop;
 	}
 	skb = skb_share_check(skb, GFP_ATOMIC);
@@ -163,7 +183,7 @@ int llc_rcv(struct sk_buff *skb, struct net_device *dev,
 	       goto handle_station;
 	sap = llc_sap_find(pdu->dsap);
 	if (unlikely(!sap)) {/* unknown SAP */
-		dprintk("%s: llc_sap_find(%02X) failed!\n", __FUNCTION__,
+		dprintk("%s: llc_sap_find(%02X) failed!\n", __func__,
 			pdu->dsap);
 		goto drop;
 	}
@@ -172,29 +192,32 @@ int llc_rcv(struct sk_buff *skb, struct net_device *dev,
 	 * LLC functionality
 	 */
 	rcv = rcu_dereference(sap->rcv_func);
-	if (rcv) {
-		struct sk_buff *cskb = skb_clone(skb, GFP_ATOMIC);
-		if (cskb)
-			rcv(cskb, dev, pt, orig_dev);
-	}
 	dest = llc_pdu_type(skb);
-	if (unlikely(!dest || !llc_type_handlers[dest - 1]))
-		goto drop_put;
-	llc_type_handlers[dest - 1](sap, skb);
-out_put:
+	sap_handler = dest ? ACCESS_ONCE(llc_type_handlers[dest - 1]) : NULL;
+	if (unlikely(!sap_handler)) {
+		if (rcv)
+			rcv(skb, dev, pt, orig_dev);
+		else
+			kfree_skb(skb);
+	} else {
+		if (rcv) {
+			struct sk_buff *cskb = skb_clone(skb, GFP_ATOMIC);
+			if (cskb)
+				rcv(cskb, dev, pt, orig_dev);
+		}
+		sap_handler(sap, skb);
+	}
 	llc_sap_put(sap);
 out:
 	return 0;
 drop:
 	kfree_skb(skb);
 	goto out;
-drop_put:
-	kfree_skb(skb);
-	goto out_put;
 handle_station:
-	if (!llc_station_handler)
+	sta_handler = ACCESS_ONCE(llc_station_handler);
+	if (!sta_handler)
 		goto drop;
-	llc_station_handler(skb);
+	sta_handler(skb);
 	goto out;
 }
 

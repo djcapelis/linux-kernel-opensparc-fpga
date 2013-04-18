@@ -53,7 +53,7 @@ a3dsrc_GetTimeConsts(a3dsrc_t * a, short *HrtfTrack, short *ItdTrack,
 }
 
 #endif
-/* Atmospheric absorbtion. */
+/* Atmospheric absorption. */
 
 static void
 a3dsrc_SetAtmosTarget(a3dsrc_t * a, short aa, short b, short c, short d,
@@ -462,9 +462,10 @@ static void a3dsrc_ZeroSliceIO(a3dsrc_t * a)
 /* Reset Single A3D source. */
 static void a3dsrc_ZeroState(a3dsrc_t * a)
 {
-
-	//printk("vortex: ZeroState slice: %d, source %d\n", a->slice, a->source);
-
+	/*
+	printk(KERN_DEBUG "vortex: ZeroState slice: %d, source %d\n",
+	       a->slice, a->source);
+	*/
 	a3dsrc_SetAtmosState(a, 0, 0, 0, 0);
 	a3dsrc_SetHrtfState(a, A3dHrirZeros, A3dHrirZeros);
 	a3dsrc_SetItdDline(a, A3dItdDlineZeros);
@@ -593,7 +594,7 @@ static int Vort3DRend_Initialize(vortex_t * v, unsigned short mode)
 static int vortex_a3d_register_controls(vortex_t * vortex);
 static void vortex_a3d_unregister_controls(vortex_t * vortex);
 /* A3D base support init/shudown */
-static void __devinit vortex_Vort3D_enable(vortex_t * v)
+static void vortex_Vort3D_enable(vortex_t *v)
 {
 	int i;
 
@@ -834,7 +835,7 @@ snd_vortex_a3d_filter_put(struct snd_kcontrol *kcontrol,
 		params[i] = ucontrol->value.integer.value[i];
 	/* Translate generic filter params to a3d filter params. */
 	vortex_a3d_translate_filter(a->filter, params);
-	/* Atmospheric absorbtion and filtering. */
+	/* Atmospheric absorption and filtering. */
 	a3dsrc_SetAtmosTarget(a, a->filter[0],
 			      a->filter[1], a->filter[2],
 			      a->filter[3], a->filter[4]);
@@ -844,7 +845,7 @@ snd_vortex_a3d_filter_put(struct snd_kcontrol *kcontrol,
 	return changed;
 }
 
-static struct snd_kcontrol_new vortex_a3d_kcontrol __devinitdata = {
+static struct snd_kcontrol_new vortex_a3d_kcontrol = {
 	.iface = SNDRV_CTL_ELEM_IFACE_PCM,
 	.name = "Playback PCM advanced processing",
 	.access = SNDRV_CTL_ELEM_ACCESS_READWRITE,
@@ -854,7 +855,7 @@ static struct snd_kcontrol_new vortex_a3d_kcontrol __devinitdata = {
 };
 
 /* Control (un)registration. */
-static int __devinit vortex_a3d_register_controls(vortex_t * vortex)
+static int vortex_a3d_register_controls(vortex_t *vortex)
 {
 	struct snd_kcontrol *kcontrol;
 	int err, i;

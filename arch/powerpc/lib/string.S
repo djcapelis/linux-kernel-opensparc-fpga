@@ -13,13 +13,7 @@
 #include <asm/ppc_asm.h>
 
 	.section __ex_table,"a"
-#ifdef CONFIG_PPC64
-	.align	3
-#define EXTBL	.llong
-#else
-	.align	2
-#define EXTBL	.long
-#endif
+	PPC_LONG_ALIGN
 	.text
 	
 _GLOBAL(strcpy)
@@ -34,7 +28,7 @@ _GLOBAL(strcpy)
 /* This clears out any unused part of the destination buffer,
    just as the libc version does.  -- paulus */
 _GLOBAL(strncpy)
-	cmpwi	0,r5,0
+	PPC_LCMPI 0,r5,0
 	beqlr
 	mtctr	r5
 	addi	r6,r3,-1
@@ -45,7 +39,7 @@ _GLOBAL(strncpy)
 	bdnzf	2,1b		/* dec ctr, branch if ctr != 0 && !cr0.eq */
 	bnelr			/* if we didn't hit a null char, we're done */
 	mfctr	r5
-	cmpwi	0,r5,0		/* any space left in destination buffer? */
+	PPC_LCMPI 0,r5,0	/* any space left in destination buffer? */
 	beqlr			/* we know r0 == 0 here */
 2:	stbu	r0,1(r6)	/* clear it out if so */
 	bdnz	2b
@@ -75,6 +69,22 @@ _GLOBAL(strcmp)
 	beq	1b
 	blr
 
+_GLOBAL(strncmp)
+	PPC_LCMPI 0,r5,0
+	beq-	2f
+	mtctr	r5
+	addi	r5,r3,-1
+	addi	r4,r4,-1
+1:	lbzu	r3,1(r5)
+	cmpwi	1,r3,0
+	lbzu	r0,1(r4)
+	subf.	r3,r0,r3
+	beqlr	1
+	bdnzt	eq,1b
+	blr
+2:	li	r3,0
+	blr
+
 _GLOBAL(strlen)
 	addi	r4,r3,-1
 1:	lbzu	r0,1(r4)
@@ -84,8 +94,8 @@ _GLOBAL(strlen)
 	blr
 
 _GLOBAL(memcmp)
-	cmpwi	0,r5,0
-	ble-	2f
+	PPC_LCMPI 0,r5,0
+	beq-	2f
 	mtctr	r5
 	addi	r6,r3,-1
 	addi	r4,r4,-1
@@ -98,8 +108,8 @@ _GLOBAL(memcmp)
 	blr
 
 _GLOBAL(memchr)
-	cmpwi	0,r5,0
-	ble-	2f
+	PPC_LCMPI 0,r5,0
+	beq-	2f
 	mtctr	r5
 	addi	r3,r3,-1
 1:	lbzu	r0,1(r3)
@@ -109,6 +119,7 @@ _GLOBAL(memchr)
 2:	li	r3,0
 	blr
 
+#ifdef CONFIG_PPC32
 _GLOBAL(__clear_user)
 	addi	r6,r3,-4
 	li	r3,0
@@ -146,52 +157,8 @@ _GLOBAL(__clear_user)
 	blr
 
 	.section __ex_table,"a"
-	EXTBL	11b,90b
-	EXTBL	1b,91b
-	EXTBL	8b,92b
+	PPC_LONG	11b,90b
+	PPC_LONG	1b,91b
+	PPC_LONG	8b,92b
 	.text
-
-_GLOBAL(__strncpy_from_user)
-	addi	r6,r3,-1
-	addi	r4,r4,-1
-	cmpwi	0,r5,0
-	beq	2f
-	mtctr	r5
-1:	lbzu	r0,1(r4)
-	cmpwi	0,r0,0
-	stbu	r0,1(r6)
-	bdnzf	2,1b		/* dec ctr, branch if ctr != 0 && !cr0.eq */
-	beq	3f
-2:	addi	r6,r6,1
-3:	subf	r3,r3,r6
-	blr
-99:	li	r3,-EFAULT
-	blr
-
-	.section __ex_table,"a"
-	EXTBL	1b,99b
-	.text
-
-/* r3 = str, r4 = len (> 0), r5 = top (highest addr) */
-_GLOBAL(__strnlen_user)
-	addi	r7,r3,-1
-	subf	r6,r7,r5	/* top+1 - str */
-	cmplw	0,r4,r6
-	bge	0f
-	mr	r6,r4
-0:	mtctr	r6		/* ctr = min(len, top - str) */
-1:	lbzu	r0,1(r7)	/* get next byte */
-	cmpwi	0,r0,0
-	bdnzf	2,1b		/* loop if --ctr != 0 && byte != 0 */
-	addi	r7,r7,1
-	subf	r3,r3,r7	/* number of bytes we have looked at */
-	beqlr			/* return if we found a 0 byte */
-	cmpw	0,r3,r4		/* did we look at all len bytes? */
-	blt	99f		/* if not, must have hit top */
-	addi	r3,r4,1		/* return len + 1 to indicate no null found */
-	blr
-99:	li	r3,0		/* bad address, return 0 */
-	blr
-
-	.section __ex_table,"a"
-	EXTBL	1b,99b
+#endif

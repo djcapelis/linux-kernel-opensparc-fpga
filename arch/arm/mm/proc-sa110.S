@@ -17,8 +17,8 @@
 #include <linux/init.h>
 #include <asm/assembler.h>
 #include <asm/asm-offsets.h>
-#include <asm/elf.h>
-#include <asm/hardware.h>
+#include <asm/hwcap.h>
+#include <mach/hardware.h>
 #include <asm/pgtable-hwdef.h>
 #include <asm/pgtable.h>
 #include <asm/ptrace.h>
@@ -44,17 +44,13 @@ ENTRY(cpu_sa110_proc_init)
  * cpu_sa110_proc_fin()
  */
 ENTRY(cpu_sa110_proc_fin)
-	stmfd	sp!, {lr}
-	mov	ip, #PSR_F_BIT | PSR_I_BIT | SVC_MODE
-	msr	cpsr_c, ip
-	bl	v4wb_flush_kern_cache_all	@ clean caches
-1:	mov	r0, #0
+	mov	r0, #0
 	mcr	p15, 0, r0, c15, c2, 2		@ Disable clock switching
 	mrc	p15, 0, r0, c1, c0, 0		@ ctrl register
 	bic	r0, r0, #0x1000			@ ...i............
 	bic	r0, r0, #0x000e			@ ............wca.
 	mcr	p15, 0, r0, c1, c0, 0		@ disable caches
-	ldmfd	sp!, {pc}
+	mov	pc, lr
 
 /*
  * cpu_sa110_reset(loc)
@@ -66,6 +62,7 @@ ENTRY(cpu_sa110_proc_fin)
  * loc: location to jump to for soft reset
  */
 	.align	5
+	.pushsection	.idmap.text, "ax"
 ENTRY(cpu_sa110_reset)
 	mov	ip, #0
 	mcr	p15, 0, ip, c7, c7, 0		@ invalidate I,D caches
@@ -78,6 +75,8 @@ ENTRY(cpu_sa110_reset)
 	bic	ip, ip, #0x1100			@ ...i...s........
 	mcr	p15, 0, ip, c1, c0, 0		@ ctrl register
 	mov	pc, r0
+ENDPROC(cpu_sa110_reset)
+	.popsection
 
 /*
  * cpu_sa110_do_idle(type)
@@ -153,31 +152,14 @@ ENTRY(cpu_sa110_switch_mm)
 	.align	5
 ENTRY(cpu_sa110_set_pte_ext)
 #ifdef CONFIG_MMU
-	str	r1, [r0], #-2048		@ linux version
-
-	eor	r1, r1, #L_PTE_PRESENT | L_PTE_YOUNG | L_PTE_WRITE | L_PTE_DIRTY
-
-	bic	r2, r1, #PTE_SMALL_AP_MASK
-	bic	r2, r2, #PTE_TYPE_MASK
-	orr	r2, r2, #PTE_TYPE_SMALL
-
-	tst	r1, #L_PTE_USER			@ User?
-	orrne	r2, r2, #PTE_SMALL_AP_URO_SRW
-
-	tst	r1, #L_PTE_WRITE | L_PTE_DIRTY	@ Write and Dirty?
-	orreq	r2, r2, #PTE_SMALL_AP_UNO_SRW
-
-	tst	r1, #L_PTE_PRESENT | L_PTE_YOUNG	@ Present and Young?
-	movne	r2, #0
-
-	str	r2, [r0]			@ hardware version
+	armv3_set_pte_ext wc_disable=0
 	mov	r0, r0
 	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry
 	mcr	p15, 0, r0, c7, c10, 4		@ drain WB
 #endif
 	mov	pc, lr
 
-	__INIT
+	__CPUINIT
 
 	.type	__sa110_setup, #function
 __sa110_setup:
@@ -208,39 +190,14 @@ sa110_crval:
 
 	__INITDATA
 
-/*
- * Purpose : Function pointers used to access above functions - all calls
- *	     come through these
- */
-
-	.type	sa110_processor_functions, #object
-ENTRY(sa110_processor_functions)
-	.word	v4_early_abort
-	.word	cpu_sa110_proc_init
-	.word	cpu_sa110_proc_fin
-	.word	cpu_sa110_reset
-	.word	cpu_sa110_do_idle
-	.word	cpu_sa110_dcache_clean_area
-	.word	cpu_sa110_switch_mm
-	.word	cpu_sa110_set_pte_ext
-	.size	sa110_processor_functions, . - sa110_processor_functions
+	@ define struct processor (see <asm/proc-fns.h> and proc-macros.S)
+	define_processor_functions sa110, dabort=v4_early_abort, pabort=legacy_pabort
 
 	.section ".rodata"
 
-	.type	cpu_arch_name, #object
-cpu_arch_name:
-	.asciz	"armv4"
-	.size	cpu_arch_name, . - cpu_arch_name
-
-	.type	cpu_elf_name, #object
-cpu_elf_name:
-	.asciz	"v4"
-	.size	cpu_elf_name, . - cpu_elf_name
-
-	.type	cpu_sa110_name, #object
-cpu_sa110_name:
-	.asciz	"StrongARM-110"
-	.size	cpu_sa110_name, . - cpu_sa110_name
+	string	cpu_arch_name, "armv4"
+	string	cpu_elf_name, "v4"
+	string	cpu_sa110_name, "StrongARM-110"
 
 	.align
 

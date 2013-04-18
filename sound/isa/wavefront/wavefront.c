@@ -1,6 +1,6 @@
 /*
  *  ALSA card-level driver for Turtle Beach Wavefront cards 
- *                                              (Maui,Tropez,Tropez+)
+ *						(Maui,Tropez,Tropez+)
  *
  *  Copyright (c) 1997-1999 by Paul Barton-Davis <pbd@op.net>
  *
@@ -19,17 +19,16 @@
  *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
-#include <sound/driver.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
-#include <linux/slab.h>
 #include <linux/err.h>
 #include <linux/isa.h>
 #include <linux/pnp.h>
-#include <linux/moduleparam.h>
+#include <linux/module.h>
 #include <sound/core.h>
 #include <sound/initval.h>
 #include <sound/opl3.h>
+#include <sound/wss.h>
 #include <sound/snd_wavefront.h>
 
 MODULE_AUTHOR("Paul Barton-Davis <pbd@op.net>");
@@ -39,9 +38,9 @@ MODULE_SUPPORTED_DEVICE("{{Turtle Beach,Maui/Tropez/Tropez+}}");
 
 static int index[SNDRV_CARDS] = SNDRV_DEFAULT_IDX;	    /* Index 0-MAX */
 static char *id[SNDRV_CARDS] = SNDRV_DEFAULT_STR;	    /* ID for this card */
-static int enable[SNDRV_CARDS] = SNDRV_DEFAULT_ENABLE;	    /* Enable this card */
+static bool enable[SNDRV_CARDS] = SNDRV_DEFAULT_ENABLE;	    /* Enable this card */
 #ifdef CONFIG_PNP
-static int isapnp[SNDRV_CARDS] = {[0 ... (SNDRV_CARDS - 1)] = 1};
+static bool isapnp[SNDRV_CARDS] = {[0 ... (SNDRV_CARDS - 1)] = 1};
 #endif
 static long cs4232_pcm_port[SNDRV_CARDS] = SNDRV_DEFAULT_PORT;	/* PnP setup */
 static int cs4232_pcm_irq[SNDRV_CARDS] = SNDRV_DEFAULT_IRQ; /* 5,7,9,11,12,15 */
@@ -52,7 +51,7 @@ static int ics2115_irq[SNDRV_CARDS] = SNDRV_DEFAULT_IRQ;    /* 2,9,11,12,15 */
 static long fm_port[SNDRV_CARDS] = SNDRV_DEFAULT_PORT;	    /* PnP setup */
 static int dma1[SNDRV_CARDS] = SNDRV_DEFAULT_DMA;	    /* 0,1,3,5,6,7 */
 static int dma2[SNDRV_CARDS] = SNDRV_DEFAULT_DMA;	    /* 0,1,3,5,6,7 */
-static int use_cs4232_midi[SNDRV_CARDS];
+static bool use_cs4232_midi[SNDRV_CARDS];
 
 module_param_array(index, int, NULL, 0444);
 MODULE_PARM_DESC(index, "Index value for WaveFront soundcard.");
@@ -99,26 +98,20 @@ static struct pnp_card_device_id snd_wavefront_pnpids[] = {
 
 MODULE_DEVICE_TABLE(pnp_card, snd_wavefront_pnpids);
 
-static int __devinit
+static int
 snd_wavefront_pnp (int dev, snd_wavefront_card_t *acard, struct pnp_card_link *card,
 		   const struct pnp_card_device_id *id)
 {
 	struct pnp_dev *pdev;
-	struct pnp_resource_table *cfg = kmalloc(sizeof(*cfg), GFP_KERNEL);
 	int err;
-
-	if (!cfg)
-		return -ENOMEM;
 
 	/* Check for each logical device. */
 
 	/* CS4232 chip (aka "windows sound system") is logical device 0 */
 
 	acard->wss = pnp_request_card_device(card, id->devs[0].id, NULL);
-	if (acard->wss == NULL) {
-		kfree(cfg);
+	if (acard->wss == NULL)
 		return -EBUSY;
-	}
 
 	/* there is a game port at logical device 1, but we ignore it completely */
 
@@ -133,25 +126,19 @@ snd_wavefront_pnp (int dev, snd_wavefront_card_t *acard, struct pnp_card_link *c
 
 	if (use_cs4232_midi[dev]) {
 		acard->mpu = pnp_request_card_device(card, id->devs[2].id, NULL);
-		if (acard->mpu == NULL) {
-			kfree(cfg);
+		if (acard->mpu == NULL)
 			return -EBUSY;
-		}
 	}
 
 	/* The ICS2115 synth is logical device 4 */
 
 	acard->synth = pnp_request_card_device(card, id->devs[3].id, NULL);
-	if (acard->synth == NULL) {
-		kfree(cfg);
+	if (acard->synth == NULL)
 		return -EBUSY;
-	}
 
 	/* PCM/FM initialization */
 
 	pdev = acard->wss;
-
-	pnp_init_resource_table(cfg);
 
 	/* An interesting note from the Tropez+ FAQ:
 
@@ -165,23 +152,9 @@ snd_wavefront_pnp (int dev, snd_wavefront_card_t *acard, struct pnp_card_link *c
 
 	*/
 
-	if (cs4232_pcm_port[dev] != SNDRV_AUTO_PORT)
-		pnp_resource_change(&cfg->port_resource[0], cs4232_pcm_port[dev], 4);
-	if (fm_port[dev] != SNDRV_AUTO_PORT)
-		pnp_resource_change(&cfg->port_resource[1], fm_port[dev], 4);
-	if (dma1[dev] != SNDRV_AUTO_DMA)
-		pnp_resource_change(&cfg->dma_resource[0], dma1[dev], 1);
-	if (dma2[dev] != SNDRV_AUTO_DMA)
-		pnp_resource_change(&cfg->dma_resource[1], dma2[dev], 1);
-	if (cs4232_pcm_irq[dev] != SNDRV_AUTO_IRQ)
-		pnp_resource_change(&cfg->irq_resource[0], cs4232_pcm_irq[dev], 1);
-
-	if (pnp_manual_config_dev(pdev, cfg, 0) < 0)
-		snd_printk(KERN_ERR "PnP WSS the requested resources are invalid, using auto config\n");
 	err = pnp_activate_dev(pdev);
 	if (err < 0) {
 		snd_printk(KERN_ERR "PnP WSS pnp configure failure\n");
-		kfree(cfg);
 		return err;
 	}
 
@@ -195,22 +168,9 @@ snd_wavefront_pnp (int dev, snd_wavefront_card_t *acard, struct pnp_card_link *c
 
 	pdev = acard->synth;
 	
-	pnp_init_resource_table(cfg);
-
-	if (ics2115_port[dev] != SNDRV_AUTO_PORT) {
-		pnp_resource_change(&cfg->port_resource[0], ics2115_port[dev], 16);
-	}
-		
-	if (ics2115_port[dev] != SNDRV_AUTO_IRQ) {
-		pnp_resource_change(&cfg->irq_resource[0], ics2115_irq[dev], 1);
-	}
-
-	if (pnp_manual_config_dev(pdev, cfg, 0) < 0)
-		snd_printk(KERN_ERR "PnP ICS2115 the requested resources are invalid, using auto config\n");
 	err = pnp_activate_dev(pdev);
 	if (err < 0) {
 		snd_printk(KERN_ERR "PnP ICS2115 pnp configure failure\n");
-		kfree(cfg);
 		return err;
 	}
 
@@ -226,15 +186,6 @@ snd_wavefront_pnp (int dev, snd_wavefront_card_t *acard, struct pnp_card_link *c
 
 		pdev = acard->mpu;
 
-		pnp_init_resource_table(cfg);
-
-		if (cs4232_mpu_port[dev] != SNDRV_AUTO_PORT)
-			pnp_resource_change(&cfg->port_resource[0], cs4232_mpu_port[dev], 2);
-		if (cs4232_mpu_irq[dev] != SNDRV_AUTO_IRQ)
-			pnp_resource_change(&cfg->port_resource[0], cs4232_mpu_irq[dev], 1);
-
-		if (pnp_manual_config_dev(pdev, cfg, 0) < 0)
-			snd_printk(KERN_ERR "PnP MPU401 the requested resources are invalid, using auto config\n");
 		err = pnp_activate_dev(pdev);
 		if (err < 0) {
 			snd_printk(KERN_ERR "PnP MPU401 pnp configure failure\n");
@@ -258,7 +209,6 @@ snd_wavefront_pnp (int dev, snd_wavefront_card_t *acard, struct pnp_card_link *c
 		    ics2115_port[dev], 
 		    ics2115_irq[dev]);
 	
-	kfree(cfg);
 	return 0;
 }
 
@@ -281,10 +231,9 @@ static irqreturn_t snd_wavefront_ics2115_interrupt(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
-static struct snd_hwdep * __devinit
-snd_wavefront_new_synth (struct snd_card *card,
-			 int hw_dev,
-			 snd_wavefront_card_t *acard)
+static struct snd_hwdep *snd_wavefront_new_synth(struct snd_card *card,
+						 int hw_dev,
+						 snd_wavefront_card_t *acard)
 {
 	struct snd_hwdep *wavefront_synth;
 
@@ -307,11 +256,10 @@ snd_wavefront_new_synth (struct snd_card *card,
 	return wavefront_synth;
 }
 
-static struct snd_hwdep * __devinit
-snd_wavefront_new_fx (struct snd_card *card,
-		      int hw_dev,
-		      snd_wavefront_card_t *acard,
-		      unsigned long port)
+static struct snd_hwdep *snd_wavefront_new_fx(struct snd_card *card,
+					      int hw_dev,
+					      snd_wavefront_card_t *acard,
+					      unsigned long port)
 
 {
 	struct snd_hwdep *fx_processor;
@@ -334,12 +282,11 @@ snd_wavefront_new_fx (struct snd_card *card,
 static snd_wavefront_mpu_id internal_id = internal_mpu;
 static snd_wavefront_mpu_id external_id = external_mpu;
 
-static struct snd_rawmidi *__devinit
-snd_wavefront_new_midi (struct snd_card *card,
-			int midi_dev,
-			snd_wavefront_card_t *acard,
-			unsigned long port,
-			snd_wavefront_mpu_id mpu)
+static struct snd_rawmidi *snd_wavefront_new_midi(struct snd_card *card,
+						  int midi_dev,
+						  snd_wavefront_card_t *acard,
+						  unsigned long port,
+						  snd_wavefront_mpu_id mpu)
 
 {
 	struct snd_rawmidi *rmidi;
@@ -369,8 +316,8 @@ snd_wavefront_new_midi (struct snd_card *card,
 	snd_rawmidi_set_ops(rmidi, SNDRV_RAWMIDI_STREAM_INPUT, &snd_wavefront_midi_input);
 
 	rmidi->info_flags |= SNDRV_RAWMIDI_INFO_OUTPUT |
-	                     SNDRV_RAWMIDI_INFO_INPUT |
-	                     SNDRV_RAWMIDI_INFO_DUPLEX;
+			     SNDRV_RAWMIDI_INFO_INPUT |
+			     SNDRV_RAWMIDI_INFO_DUPLEX;
 
 	return rmidi;
 }
@@ -387,15 +334,16 @@ snd_wavefront_free(struct snd_card *card)
 	}
 }
 
-static struct snd_card *snd_wavefront_card_new(int dev)
+static int snd_wavefront_card_new(int dev, struct snd_card **cardp)
 {
 	struct snd_card *card;
 	snd_wavefront_card_t *acard;
+	int err;
 
-	card = snd_card_new (index[dev], id[dev], THIS_MODULE,
-			     sizeof(snd_wavefront_card_t));
-	if (card == NULL)
-		return NULL;
+	err = snd_card_create(index[dev], id[dev], THIS_MODULE,
+			      sizeof(snd_wavefront_card_t), &card);
+	if (err < 0)
+		return err;
 
 	acard = card->private_data;
 	acard->wavefront.irq = -1;
@@ -406,14 +354,15 @@ static struct snd_card *snd_wavefront_card_new(int dev)
 	acard->wavefront.card = card;
 	card->private_free = snd_wavefront_free;
 
-	return card;
+	*cardp = card;
+	return 0;
 }
 
-static int __devinit
+static int
 snd_wavefront_probe (struct snd_card *card, int dev)
 {
 	snd_wavefront_card_t *acard = card->private_data;
-	struct snd_cs4231 *chip;
+	struct snd_wss *chip;
 	struct snd_hwdep *wavefront_synth;
 	struct snd_rawmidi *ics2115_internal_rmidi = NULL;
 	struct snd_rawmidi *ics2115_external_rmidi = NULL;
@@ -422,21 +371,20 @@ snd_wavefront_probe (struct snd_card *card, int dev)
 
 	/* --------- PCM --------------- */
 
-	if ((err = snd_cs4231_create (card,
-				      cs4232_pcm_port[dev],
-				      -1,
-				      cs4232_pcm_irq[dev],
-				      dma1[dev],
-				      dma2[dev],
-				      CS4231_HW_DETECT, 0, &chip)) < 0) {
-		snd_printk (KERN_ERR "can't allocate CS4231 device\n");
+	err = snd_wss_create(card, cs4232_pcm_port[dev], -1,
+			     cs4232_pcm_irq[dev], dma1[dev], dma2[dev],
+			     WSS_HW_DETECT, 0, &chip);
+	if (err < 0) {
+		snd_printk(KERN_ERR "can't allocate WSS device\n");
 		return err;
 	}
 
-	if ((err = snd_cs4231_pcm (chip, 0, NULL)) < 0)
+	err = snd_wss_pcm(chip, 0, NULL);
+	if (err < 0)
 		return err;
 
-	if ((err = snd_cs4231_timer (chip, 0, NULL)) < 0)
+	err = snd_wss_timer(chip, 0, NULL);
+	if (err < 0)
 		return err;
 
 	/* ---------- OPL3 synth --------- */
@@ -444,30 +392,30 @@ snd_wavefront_probe (struct snd_card *card, int dev)
 	if (fm_port[dev] > 0 && fm_port[dev] != SNDRV_AUTO_PORT) {
 		struct snd_opl3 *opl3;
 
-	        if ((err = snd_opl3_create(card,
-					   fm_port[dev],
-					   fm_port[dev] + 2,
-					   OPL3_HW_OPL3_CS,
-					   0, &opl3)) < 0) {
+		err = snd_opl3_create(card, fm_port[dev], fm_port[dev] + 2,
+				      OPL3_HW_OPL3_CS, 0, &opl3);
+		if (err < 0) {
 			snd_printk (KERN_ERR "can't allocate or detect OPL3 synth\n");
 			return err;
 		}
 
-		if ((err = snd_opl3_hwdep_new(opl3, hw_dev, 1, NULL)) < 0)
+		err = snd_opl3_hwdep_new(opl3, hw_dev, 1, NULL);
+		if (err < 0)
 			return err;
 		hw_dev++;
 	}
 
 	/* ------- ICS2115 Wavetable synth ------- */
 
-	if ((acard->wavefront.res_base = request_region(ics2115_port[dev], 16,
-							"ICS2115")) == NULL) {
+	acard->wavefront.res_base = request_region(ics2115_port[dev], 16,
+						   "ICS2115");
+	if (acard->wavefront.res_base == NULL) {
 		snd_printk(KERN_ERR "unable to grab ICS2115 i/o region 0x%lx-0x%lx\n",
 			   ics2115_port[dev], ics2115_port[dev] + 16 - 1);
 		return -EBUSY;
 	}
 	if (request_irq(ics2115_irq[dev], snd_wavefront_ics2115_interrupt,
-			IRQF_DISABLED, "ICS2115", acard)) {
+			0, "ICS2115", acard)) {
 		snd_printk(KERN_ERR "unable to use ICS2115 IRQ %d\n", ics2115_irq[dev]);
 		return -EBUSY;
 	}
@@ -475,7 +423,8 @@ snd_wavefront_probe (struct snd_card *card, int dev)
 	acard->wavefront.irq = ics2115_irq[dev];
 	acard->wavefront.base = ics2115_port[dev];
 
-	if ((wavefront_synth = snd_wavefront_new_synth (card, hw_dev, acard)) == NULL) {
+	wavefront_synth = snd_wavefront_new_synth(card, hw_dev, acard);
+	if (wavefront_synth == NULL) {
 		snd_printk (KERN_ERR "can't create WaveFront synth device\n");
 		return -ENOMEM;
 	}
@@ -486,7 +435,8 @@ snd_wavefront_probe (struct snd_card *card, int dev)
 
 	/* --------- Mixer ------------ */
 
-	if ((err = snd_cs4231_mixer(chip)) < 0) {
+	err = snd_wss_mixer(chip);
+	if (err < 0) {
 		snd_printk (KERN_ERR "can't allocate mixer device\n");
 		return err;
 	}
@@ -494,11 +444,10 @@ snd_wavefront_probe (struct snd_card *card, int dev)
 	/* -------- CS4232 MPU-401 interface -------- */
 
 	if (cs4232_mpu_port[dev] > 0 && cs4232_mpu_port[dev] != SNDRV_AUTO_PORT) {
-		if ((err = snd_mpu401_uart_new(card, midi_dev, MPU401_HW_CS4232,
-					       cs4232_mpu_port[dev], 0,
-					       cs4232_mpu_irq[dev],
-					       IRQF_DISABLED,
-					       NULL)) < 0) {
+		err = snd_mpu401_uart_new(card, midi_dev, MPU401_HW_CS4232,
+					  cs4232_mpu_port[dev], 0,
+					  cs4232_mpu_irq[dev], NULL);
+		if (err < 0) {
 			snd_printk (KERN_ERR "can't allocate CS4232 MPU-401 device\n");
 			return err;
 		}
@@ -589,8 +538,8 @@ snd_wavefront_probe (struct snd_card *card, int dev)
 	return snd_card_register(card);
 }	
 
-static int __devinit snd_wavefront_isa_match(struct device *pdev,
-					     unsigned int dev)
+static int snd_wavefront_isa_match(struct device *pdev,
+				   unsigned int dev)
 {
 	if (!enable[dev])
 		return 0;
@@ -599,25 +548,25 @@ static int __devinit snd_wavefront_isa_match(struct device *pdev,
 		return 0;
 #endif
 	if (cs4232_pcm_port[dev] == SNDRV_AUTO_PORT) {
-		snd_printk("specify CS4232 port\n");
+		snd_printk(KERN_ERR "specify CS4232 port\n");
 		return 0;
 	}
 	if (ics2115_port[dev] == SNDRV_AUTO_PORT) {
-		snd_printk("specify ICS2115 port\n");
+		snd_printk(KERN_ERR "specify ICS2115 port\n");
 		return 0;
 	}
 	return 1;
 }
 
-static int __devinit snd_wavefront_isa_probe(struct device *pdev,
-					     unsigned int dev)
+static int snd_wavefront_isa_probe(struct device *pdev,
+				   unsigned int dev)
 {
 	struct snd_card *card;
 	int err;
 
-	card = snd_wavefront_card_new(dev);
-	if (! card)
-		return -ENOMEM;
+	err = snd_wavefront_card_new(dev, &card);
+	if (err < 0)
+		return err;
 	snd_card_set_dev(card, pdev);
 	if ((err = snd_wavefront_probe(card, dev)) < 0) {
 		snd_card_free(card);
@@ -628,8 +577,8 @@ static int __devinit snd_wavefront_isa_probe(struct device *pdev,
 	return 0;
 }
 
-static int __devexit snd_wavefront_isa_remove(struct device *devptr,
-					      unsigned int dev)
+static int snd_wavefront_isa_remove(struct device *devptr,
+				    unsigned int dev)
 {
 	snd_card_free(dev_get_drvdata(devptr));
 	dev_set_drvdata(devptr, NULL);
@@ -641,7 +590,7 @@ static int __devexit snd_wavefront_isa_remove(struct device *devptr,
 static struct isa_driver snd_wavefront_driver = {
 	.match		= snd_wavefront_isa_match,
 	.probe		= snd_wavefront_isa_probe,
-	.remove		= __devexit_p(snd_wavefront_isa_remove),
+	.remove		= snd_wavefront_isa_remove,
 	/* FIXME: suspend, resume */
 	.driver		= {
 		.name	= DEV_NAME
@@ -650,8 +599,8 @@ static struct isa_driver snd_wavefront_driver = {
 
 
 #ifdef CONFIG_PNP
-static int __devinit snd_wavefront_pnp_detect(struct pnp_card_link *pcard,
-                                              const struct pnp_card_device_id *pid)
+static int snd_wavefront_pnp_detect(struct pnp_card_link *pcard,
+				    const struct pnp_card_device_id *pid)
 {
 	static int dev;
 	struct snd_card *card;
@@ -664,9 +613,9 @@ static int __devinit snd_wavefront_pnp_detect(struct pnp_card_link *pcard,
 	if (dev >= SNDRV_CARDS)
 		return -ENODEV;
 
-	card = snd_wavefront_card_new(dev);
-	if (! card)
-		return -ENOMEM;
+	res = snd_wavefront_card_new(dev, &card);
+	if (res < 0)
+		return res;
 
 	if (snd_wavefront_pnp (dev, card->private_data, pcard, pid) < 0) {
 		if (cs4232_pcm_port[dev] == SNDRV_AUTO_PORT) {
@@ -685,7 +634,7 @@ static int __devinit snd_wavefront_pnp_detect(struct pnp_card_link *pcard,
 	return 0;
 }
 
-static void __devexit snd_wavefront_pnp_remove(struct pnp_card_link * pcard)
+static void snd_wavefront_pnp_remove(struct pnp_card_link *pcard)
 {
 	snd_card_free(pnp_get_card_drvdata(pcard));
 	pnp_set_card_drvdata(pcard, NULL);
@@ -696,7 +645,7 @@ static struct pnp_card_driver wavefront_pnpc_driver = {
 	.name		= "wavefront",
 	.id_table	= snd_wavefront_pnpids,
 	.probe		= snd_wavefront_pnp_detect,
-	.remove		= __devexit_p(snd_wavefront_pnp_remove),
+	.remove		= snd_wavefront_pnp_remove,
 	/* FIXME: suspend,resume */
 };
 

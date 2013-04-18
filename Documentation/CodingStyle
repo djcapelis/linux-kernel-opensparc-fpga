@@ -77,22 +77,16 @@ Get a decent editor and don't leave whitespace at the end of lines.
 Coding style is all about readability and maintainability using commonly
 available tools.
 
-The limit on the length of lines is 80 columns and this is a hard limit.
+The limit on the length of lines is 80 columns and this is a strongly
+preferred limit.
 
-Statements longer than 80 columns will be broken into sensible chunks.
-Descendants are always substantially shorter than the parent and are placed
-substantially to the right. The same applies to function headers with a long
-argument list. Long strings are as well broken into shorter strings.
+Statements longer than 80 columns will be broken into sensible chunks, unless
+exceeding 80 columns significantly increases readability and does not hide
+information. Descendants are always substantially shorter than the parent and
+are placed substantially to the right. The same applies to function headers
+with a long argument list. However, never break user-visible strings such as
+printk messages, because that breaks the ability to grep for them.
 
-void fun(int a, int b, int c)
-{
-	if (condition)
-		printk(KERN_WARNING "Warning this is a long printk with "
-						"3 parameters a: %u b: %u "
-						"c: %u \n", a, b, c);
-	else
-		next_statement;
-}
 
 		Chapter 3: Placing Braces and Spaces
 
@@ -165,8 +159,15 @@ Do not unnecessarily use braces where a single statement will do.
 if (condition)
 	action();
 
-This does not apply if one branch of a conditional statement is a single
-statement. Use braces in both branches.
+and
+
+if (condition)
+	do_this();
+else
+	do_that();
+
+This does not apply if only one branch of a conditional statement is a single
+statement; in the latter case use braces in both branches:
 
 if (condition) {
 	do_this();
@@ -217,6 +218,18 @@ no space after the prefix increment & decrement unary operators:
 	++  --
 
 and no space around the '.' and "->" structure member operators.
+
+Do not leave trailing whitespace at the ends of lines.  Some editors with
+"smart" indentation will insert whitespace at the beginning of new lines as
+appropriate, so you can start typing the next line of code right away.
+However, some such editors do not remove the whitespace if you end up not
+putting a line of code there, such as if you leave a blank line.  As a result,
+you end up with lines containing trailing whitespace.
+
+Git will warn you about patches that introduce trailing whitespace, and can
+optionally strip the trailing whitespace for you; however, if applying a series
+of patches, this may make later patches in the series fail by changing their
+context lines.
 
 
 		Chapter 4: Naming
@@ -441,6 +454,16 @@ The preferred style for long (multi-line) comments is:
 	 * with beginning and ending almost-blank lines.
 	 */
 
+For files in net/ and drivers/net/ the preferred style for long (multi-line)
+comments is a little different.
+
+	/* The preferred comment style for files in net/ and drivers/net
+	 * looks like this.
+	 *
+	 * It is nearly the same as the generally preferred comment style,
+	 * but there is no initial almost-blank line.
+	 */
+
 It's also important to comment data, whether they are basic types or derived
 types.  To this end, use just one data declaration per line (no commas for
 multiple data declarations).  This leaves you room for a small comment on each
@@ -459,25 +482,37 @@ make a good program).
 So, you can either get rid of GNU emacs, or change it to use saner
 values.  To do the latter, you can stick the following in your .emacs file:
 
-(defun linux-c-mode ()
-  "C mode with adjusted defaults for use with the Linux kernel."
-  (interactive)
-  (c-mode)
-  (c-set-style "K&R")
-  (setq tab-width 8)
-  (setq indent-tabs-mode t)
-  (setq c-basic-offset 8))
+(defun c-lineup-arglist-tabs-only (ignored)
+  "Line up argument lists by tabs, not spaces"
+  (let* ((anchor (c-langelem-pos c-syntactic-element))
+	 (column (c-langelem-2nd-pos c-syntactic-element))
+	 (offset (- (1+ column) anchor))
+	 (steps (floor offset c-basic-offset)))
+    (* (max steps 1)
+       c-basic-offset)))
 
-This will define the M-x linux-c-mode command.  When hacking on a
-module, if you put the string -*- linux-c -*- somewhere on the first
-two lines, this mode will be automatically invoked. Also, you may want
-to add
+(add-hook 'c-mode-common-hook
+          (lambda ()
+            ;; Add kernel style
+            (c-add-style
+             "linux-tabs-only"
+             '("linux" (c-offsets-alist
+                        (arglist-cont-nonempty
+                         c-lineup-gcc-asm-reg
+                         c-lineup-arglist-tabs-only))))))
 
-(setq auto-mode-alist (cons '("/usr/src/linux.*/.*\\.[ch]$" . linux-c-mode)
-			auto-mode-alist))
+(add-hook 'c-mode-hook
+          (lambda ()
+            (let ((filename (buffer-file-name)))
+              ;; Enable kernel mode for the appropriate files
+              (when (and filename
+                         (string-match (expand-file-name "~/src/linux-trees")
+                                       filename))
+                (setq indent-tabs-mode t)
+                (c-set-style "linux-tabs-only")))))
 
-to your .emacs file if you want to have linux-c-mode switched on
-automagically when you edit source files under /usr/src/linux.
+This will make emacs go better with the kernel coding style for C
+files below ~/src/linux-trees.
 
 But even if you fail in getting emacs to do sane formatting, not
 everything is lost: use "indent".
@@ -621,18 +656,34 @@ covers RTL which is used frequently with assembly language in the kernel.
 
 Kernel developers like to be seen as literate. Do mind the spelling
 of kernel messages to make a good impression. Do not use crippled
-words like "dont" and use "do not" or "don't" instead.
+words like "dont"; use "do not" or "don't" instead.  Make the messages
+concise, clear, and unambiguous.
 
 Kernel messages do not have to be terminated with a period.
 
 Printing numbers in parentheses (%d) adds no value and should be avoided.
 
+There are a number of driver model diagnostic macros in <linux/device.h>
+which you should use to make sure messages are matched to the right device
+and driver, and are tagged with the right level:  dev_err(), dev_warn(),
+dev_info(), and so forth.  For messages that aren't associated with a
+particular device, <linux/printk.h> defines pr_debug() and pr_info().
+
+Coming up with good debugging messages can be quite a challenge; and once
+you have them, they can be a huge help for remote troubleshooting.  Such
+messages should be compiled out when the DEBUG symbol is not defined (that
+is, by default they are not included).  When you use dev_dbg() or pr_debug(),
+that's automatic.  Many subsystems have Kconfig options to turn on -DDEBUG.
+A related convention uses VERBOSE_DEBUG to add dev_vdbg() messages to the
+ones already enabled by DEBUG.
+
 
 		Chapter 14: Allocating memory
 
 The kernel provides the following general purpose memory allocators:
-kmalloc(), kzalloc(), kcalloc(), and vmalloc().  Please refer to the API
-documentation for further information about them.
+kmalloc(), kzalloc(), kmalloc_array(), kcalloc(), vmalloc(), and
+vzalloc().  Please refer to the API documentation for further information
+about them.
 
 The preferred form for passing a size of a struct is the following:
 
@@ -646,6 +697,17 @@ Casting the return value which is a void pointer is redundant. The conversion
 from void pointer to any other pointer type is guaranteed by the C programming
 language.
 
+The preferred form for allocating an array is the following:
+
+	p = kmalloc_array(n, sizeof(...), ...);
+
+The preferred form for allocating a zeroed array is the following:
+
+	p = kcalloc(n, sizeof(...), ...);
+
+Both forms check for overflow on the allocation size n * sizeof(...),
+and return NULL if that occurred.
+
 
 		Chapter 15: The inline disease
 
@@ -656,8 +718,8 @@ very often is not. Abundant use of the inline keyword leads to a much bigger
 kernel, which in turn slows the system as a whole down, due to a bigger
 icache footprint for the CPU and simply because there is less memory
 available for the pagecache. Just think about it; a pagecache miss causes a
-disk seek, which easily takes 5 miliseconds. There are a LOT of cpu cycles
-that can go into these 5 miliseconds.
+disk seek, which easily takes 5 milliseconds. There are a LOT of cpu cycles
+that can go into these 5 milliseconds.
 
 A reasonable rule of thumb is to not put inline at functions that have more
 than 3 lines of code in them. An exception to this rule are the cases where
@@ -726,6 +788,62 @@ need them.  Feel free to peruse that header file to see what else is already
 defined that you shouldn't reproduce in your code.
 
 
+		Chapter 18:  Editor modelines and other cruft
+
+Some editors can interpret configuration information embedded in source files,
+indicated with special markers.  For example, emacs interprets lines marked
+like this:
+
+-*- mode: c -*-
+
+Or like this:
+
+/*
+Local Variables:
+compile-command: "gcc -DMAGIC_DEBUG_FLAG foo.c"
+End:
+*/
+
+Vim interprets markers that look like this:
+
+/* vim:set sw=8 noet */
+
+Do not include any of these in source files.  People have their own personal
+editor configurations, and your source files should not override them.  This
+includes markers for indentation and mode configuration.  People may use their
+own custom mode, or may have some other magic method for making indentation
+work correctly.
+
+
+		Chapter 19:  Inline assembly
+
+In architecture-specific code, you may need to use inline assembly to interface
+with CPU or platform functionality.  Don't hesitate to do so when necessary.
+However, don't use inline assembly gratuitously when C can do the job.  You can
+and should poke hardware from C when possible.
+
+Consider writing simple helper functions that wrap common bits of inline
+assembly, rather than repeatedly writing them with slight variations.  Remember
+that inline assembly can use C parameters.
+
+Large, non-trivial assembly functions should go in .S files, with corresponding
+C prototypes defined in C header files.  The C prototypes for assembly
+functions should use "asmlinkage".
+
+You may need to mark your asm statement as volatile, to prevent GCC from
+removing it if GCC doesn't notice any side effects.  You don't always need to
+do so, though, and doing so unnecessarily can limit optimization.
+
+When writing a single inline assembly statement containing multiple
+instructions, put each instruction on a separate line in a separate quoted
+string, and end each string except the last with \n\t to properly indent the
+next instruction in the assembly output:
+
+	asm ("magic %reg1, #42\n\t"
+	     "more_magic %reg2, %reg3"
+	     : /* outputs */ : /* inputs */ : /* clobbers */);
+
+
 
 		Appendix I: References
 
@@ -750,5 +868,3 @@ language C, URL: http://www.open-std.org/JTC1/SC22/WG14/
 Kernel CodingStyle, by greg@kroah.com at OLS 2002:
 http://www.kroah.com/linux/talks/ols_2002_kernel_codingstyle_talk/html/
 
---
-Last updated on 2006-December-06.

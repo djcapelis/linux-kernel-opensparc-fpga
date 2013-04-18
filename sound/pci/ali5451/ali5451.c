@@ -25,14 +25,13 @@
  *
  */
 
-#include <sound/driver.h>
 #include <asm/io.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
 #include <linux/init.h>
 #include <linux/pci.h>
 #include <linux/slab.h>
-#include <linux/moduleparam.h>
+#include <linux/module.h>
 #include <linux/dma-mapping.h>
 #include <sound/core.h>
 #include <sound/pcm.h>
@@ -49,7 +48,7 @@ MODULE_SUPPORTED_DEVICE("{{ALI,M5451,pci},{ALI,M5451}}");
 static int index = SNDRV_DEFAULT_IDX1;	/* Index */
 static char *id = SNDRV_DEFAULT_STR1;	/* ID for this card */
 static int pcm_channels = 32;
-static int spdif;
+static bool spdif;
 
 module_param(index, int, 0444);
 MODULE_PARM_DESC(index, "Index value for ALI M5451 PCI Audio.");
@@ -61,7 +60,7 @@ module_param(spdif, bool, 0444);
 MODULE_PARM_DESC(spdif, "Support SPDIF I/O");
 
 /* just for backward compatibility */
-static int enable;
+static bool enable;
 module_param(enable, bool, 0444);
 
 
@@ -239,7 +238,7 @@ struct snd_ali_image {
 
 
 struct snd_ali {
-	unsigned long	irq;
+	int		irq;
 	unsigned long	port;
 	unsigned char	revision;
 
@@ -271,12 +270,12 @@ struct snd_ali {
 	spinlock_t	reg_lock;
 	spinlock_t	voice_alloc;
 
-#ifdef CONFIG_PM
+#ifdef CONFIG_PM_SLEEP
 	struct snd_ali_image *image;
 #endif
 };
 
-static struct pci_device_id snd_ali_ids[] = {
+static DEFINE_PCI_DEVICE_TABLE(snd_ali_ids) = {
 	{PCI_DEVICE(PCI_VENDOR_ID_AL, PCI_DEVICE_ID_AL_M5451), 0, 0, 0},
 	{0, }
 };
@@ -311,12 +310,16 @@ static int snd_ali_codec_ready(struct snd_ali *codec,
 	unsigned int res;
 	
 	end_time = jiffies + msecs_to_jiffies(250);
-	do {
+
+	for (;;) {
 		res = snd_ali_5451_peek(codec,port);
 		if (!(res & 0x8000))
 			return 0;
+		if (!time_after_eq(end_time, jiffies))
+			break;
 		schedule_timeout_uninterruptible(1);
-	} while (time_after_eq(end_time, jiffies));
+	}
+
 	snd_ali_5451_poke(codec, port, res & ~0x8000);
 	snd_printdd("ali_codec_ready: codec is not ready.\n ");
 	return -EIO;
@@ -328,15 +331,17 @@ static int snd_ali_stimer_ready(struct snd_ali *codec)
 	unsigned long dwChk1,dwChk2;
 	
 	dwChk1 = snd_ali_5451_peek(codec, ALI_STIMER);
-	dwChk2 = snd_ali_5451_peek(codec, ALI_STIMER);
-
 	end_time = jiffies + msecs_to_jiffies(250);
-	do {
+
+	for (;;) {
 		dwChk2 = snd_ali_5451_peek(codec, ALI_STIMER);
 		if (dwChk2 != dwChk1)
 			return 0;
+		if (!time_after_eq(end_time, jiffies))
+			break;
 		schedule_timeout_uninterruptible(1);
-	} while (time_after_eq(end_time, jiffies));
+	}
+
 	snd_printk(KERN_ERR "ali_stimer_read: stimer is not ready.\n");
 	return -EIO;
 }
@@ -473,45 +478,6 @@ static int snd_ali_reset_5451(struct snd_ali *codec)
 	return 0;
 }
 
-#ifdef CODEC_RESET
-
-static int snd_ali_reset_codec(struct snd_ali *codec)
-{
-	struct pci_dev *pci_dev;
-	unsigned char bVal;
-	unsigned int   dwVal;
-	unsigned short wCount, wReg;
-
-	pci_dev = codec->pci_m1533;
-	
-	pci_read_config_dword(pci_dev, 0x7c, &dwVal);
-	pci_write_config_dword(pci_dev, 0x7c, dwVal | 0x08000000);
-	udelay(5000);
-	pci_read_config_dword(pci_dev, 0x7c, &dwVal);
-	pci_write_config_dword(pci_dev, 0x7c, dwVal & 0xf7ffffff);
-	udelay(5000);
-
-	bVal = inb(ALI_REG(codec,ALI_SCTRL));
-	bVal |= 0x02;
-	outb(ALI_REG(codec,ALI_SCTRL),bVal);
-	udelay(5000);
-	bVal = inb(ALI_REG(codec,ALI_SCTRL));
-	bVal &= 0xfd;
-	outb(ALI_REG(codec,ALI_SCTRL),bVal);
-	udelay(15000);
-
-	wCount = 200;
-	while (wCount--) {
-		wReg = snd_ali_codec_read(codec->ac97, AC97_POWERDOWN);
-		if ((wReg & 0x000f) == 0x000f)
-			return 0;
-		udelay(5000);
-	}
-	return -1;
-}
-
-#endif
-
 /*
  *  ALI 5451 Controller
  */
@@ -555,22 +521,6 @@ static void snd_ali_disable_address_interrupt(struct snd_ali *codec)
 	gc &= ~MIDLP_IE;
 	outl(gc, ALI_REG(codec, ALI_GC_CIR));
 }
-
-#if 0 /* not used */
-static void snd_ali_enable_voice_irq(struct snd_ali *codec,
-				     unsigned int channel)
-{
-	unsigned int mask;
-	struct snd_ali_channel_control *pchregs = &(codec->chregs);
-
-	snd_ali_printk("enable_voice_irq channel=%d\n",channel);
-	
-	mask = 1 << (channel & 0x1f);
-	pchregs->data.ainten  = inl(ALI_REG(codec, pchregs->regs.ainten));
-	pchregs->data.ainten |= mask;
-	outl(pchregs->data.ainten, ALI_REG(codec, pchregs->regs.ainten));
-}
-#endif
 
 static void snd_ali_disable_voice_irq(struct snd_ali *codec,
 				      unsigned int channel)
@@ -672,16 +622,6 @@ static void snd_ali_free_channel_pcm(struct snd_ali *codec, int channel)
 	}
 }
 
-#if 0 /* not used */
-static void snd_ali_start_voice(struct snd_ali *codec, unsigned int channel)
-{
-	unsigned int mask = 1 << (channel & 0x1f);
-	
-	snd_ali_printk("start_voice: channel=%d\n",channel);
-	outl(mask, ALI_REG(codec,codec->chregs.regs.start));
-}
-#endif
-
 static void snd_ali_stop_voice(struct snd_ali *codec, unsigned int channel)
 {
 	unsigned int mask = 1 << (channel & 0x1f);
@@ -731,8 +671,7 @@ static void snd_ali_detect_spdif_rate(struct snd_ali *codec)
 		return;
 	}
 
-	count = 0;
-	while (count++ <= 50000) {
+	for (count = 0; count <= 50000; count++) {
 		snd_ali_delay(codec, 6);
 		bval = inb(ALI_REG(codec,ALI_SPDIF_CTRL + 1));
 		R2 = bval & 0x1F;
@@ -1034,7 +973,7 @@ static void snd_ali_free_voice(struct snd_ali * codec,
 	void *private_data;
 
 	snd_ali_printk("free_voice: channel=%d\n",pvoice->number);
-	if (pvoice == NULL || !pvoice->use)
+	if (!pvoice->use)
 		return;
 	snd_ali_clear_voices(codec, pvoice->number, pvoice->number);
 	spin_lock_irq(&codec->voice_alloc);
@@ -1496,7 +1435,7 @@ static snd_pcm_uframes_t snd_ali_pointer(struct snd_pcm_substream *substream)
 
 	spin_lock(&codec->reg_lock);
 	if (!pvoice->running) {
-		spin_unlock_irq(&codec->reg_lock);
+		spin_unlock(&codec->reg_lock);
 		return 0;
 	}
 	outb(pvoice->number, ALI_REG(codec, ALI_GC_CIR));
@@ -1739,8 +1678,8 @@ static void snd_ali_pcm_free(struct snd_pcm *pcm)
 }
 
 
-static int __devinit snd_ali_pcm(struct snd_ali * codec, int device,
-				 struct ali_pcm_description *desc)
+static int snd_ali_pcm(struct snd_ali *codec, int device,
+		       struct ali_pcm_description *desc)
 {
 	struct snd_pcm *pcm;
 	int err;
@@ -1788,7 +1727,7 @@ static struct ali_pcm_description ali_pcms[] = {
 	}
 };
 
-static int __devinit snd_ali_build_pcms(struct snd_ali *codec)
+static int snd_ali_build_pcms(struct snd_ali *codec)
 {
 	int i, err;
 	for (i = 0; i < codec->num_of_codecs && i < ARRAY_SIZE(ali_pcms); i++) {
@@ -1805,40 +1744,32 @@ static int __devinit snd_ali_build_pcms(struct snd_ali *codec)
 .info = snd_ali5451_spdif_info, .get = snd_ali5451_spdif_get, \
 .put = snd_ali5451_spdif_put, .private_value = value}
 
-static int snd_ali5451_spdif_info(struct snd_kcontrol *kcontrol,
-				  struct snd_ctl_elem_info *uinfo)
-{
-        uinfo->type = SNDRV_CTL_ELEM_TYPE_BOOLEAN;
-        uinfo->count = 1;
-        uinfo->value.integer.min = 0;
-        uinfo->value.integer.max = 1;
-        return 0;
-}
+#define snd_ali5451_spdif_info		snd_ctl_boolean_mono_info
 
 static int snd_ali5451_spdif_get(struct snd_kcontrol *kcontrol,
 				 struct snd_ctl_elem_value *ucontrol)
 {
 	struct snd_ali *codec = kcontrol->private_data;
-	unsigned int enable;
+	unsigned int spdif_enable;
 
-	enable = ucontrol->value.integer.value[0] ? 1 : 0;
+	spdif_enable = ucontrol->value.integer.value[0] ? 1 : 0;
 
 	spin_lock_irq(&codec->reg_lock);
 	switch (kcontrol->private_value) {
 	case 0:
-		enable = (codec->spdif_mask & 0x02) ? 1 : 0;
+		spdif_enable = (codec->spdif_mask & 0x02) ? 1 : 0;
 		break;
 	case 1:
-		enable = ((codec->spdif_mask & 0x02) &&
+		spdif_enable = ((codec->spdif_mask & 0x02) &&
 			  (codec->spdif_mask & 0x04)) ? 1 : 0;
 		break;
 	case 2:
-		enable = (codec->spdif_mask & 0x01) ? 1 : 0;
+		spdif_enable = (codec->spdif_mask & 0x01) ? 1 : 0;
 		break;
 	default:
 		break;
 	}
-	ucontrol->value.integer.value[0] = enable;
+	ucontrol->value.integer.value[0] = spdif_enable;
 	spin_unlock_irq(&codec->reg_lock);
 	return 0;
 }
@@ -1847,17 +1778,17 @@ static int snd_ali5451_spdif_put(struct snd_kcontrol *kcontrol,
 				 struct snd_ctl_elem_value *ucontrol)
 {
 	struct snd_ali *codec = kcontrol->private_data;
-	unsigned int change = 0, enable = 0;
+	unsigned int change = 0, spdif_enable = 0;
 
-	enable = ucontrol->value.integer.value[0] ? 1 : 0;
+	spdif_enable = ucontrol->value.integer.value[0] ? 1 : 0;
 
 	spin_lock_irq(&codec->reg_lock);
 	switch (kcontrol->private_value) {
 	case 0:
 		change = (codec->spdif_mask & 0x02) ? 1 : 0;
-		change = change ^ enable;
+		change = change ^ spdif_enable;
 		if (change) {
-			if (enable) {
+			if (spdif_enable) {
 				codec->spdif_mask |= 0x02;
 				snd_ali_enable_spdif_out(codec);
 			} else {
@@ -1869,9 +1800,9 @@ static int snd_ali5451_spdif_put(struct snd_kcontrol *kcontrol,
 		break;
 	case 1: 
 		change = (codec->spdif_mask & 0x04) ? 1 : 0;
-		change = change ^ enable;
+		change = change ^ spdif_enable;
 		if (change && (codec->spdif_mask & 0x02)) {
-			if (enable) {
+			if (spdif_enable) {
 				codec->spdif_mask |= 0x04;
 				snd_ali_enable_spdif_chnout(codec);
 			} else {
@@ -1882,9 +1813,9 @@ static int snd_ali5451_spdif_put(struct snd_kcontrol *kcontrol,
 		break;
 	case 2:
 		change = (codec->spdif_mask & 0x01) ? 1 : 0;
-		change = change ^ enable;
+		change = change ^ spdif_enable;
 		if (change) {
-			if (enable) {
+			if (spdif_enable) {
 				codec->spdif_mask |= 0x01;
 				snd_ali_enable_spdif_in(codec);
 			} else {
@@ -1901,7 +1832,7 @@ static int snd_ali5451_spdif_put(struct snd_kcontrol *kcontrol,
 	return change;
 }
 
-static struct snd_kcontrol_new snd_ali5451_mixer_spdif[] __devinitdata = {
+static struct snd_kcontrol_new snd_ali5451_mixer_spdif[] = {
 	/* spdif aplayback switch */
 	/* FIXME: "IEC958 Playback Switch" may conflict with one on ac97_codec */
 	ALI5451_SPDIF(SNDRV_CTL_NAME_IEC958("Output ",NONE,SWITCH), 0, 0),
@@ -1911,7 +1842,7 @@ static struct snd_kcontrol_new snd_ali5451_mixer_spdif[] __devinitdata = {
 	ALI5451_SPDIF(SNDRV_CTL_NAME_IEC958("",CAPTURE,SWITCH), 0, 2)
 };
 
-static int __devinit snd_ali_mixer(struct snd_ali * codec)
+static int snd_ali_mixer(struct snd_ali *codec)
 {
 	struct snd_ac97_template ac97;
 	unsigned int idx;
@@ -1952,10 +1883,11 @@ static int __devinit snd_ali_mixer(struct snd_ali * codec)
 	return 0;
 }
 
-#ifdef CONFIG_PM
-static int ali_suspend(struct pci_dev *pci, pm_message_t state)
+#ifdef CONFIG_PM_SLEEP
+static int ali_suspend(struct device *dev)
 {
-	struct snd_card *card = pci_get_drvdata(pci);
+	struct pci_dev *pci = to_pci_dev(dev);
+	struct snd_card *card = dev_get_drvdata(dev);
 	struct snd_ali *chip = card->private_data;
 	struct snd_ali_image *im;
 	int i, j;
@@ -1998,13 +1930,14 @@ static int ali_suspend(struct pci_dev *pci, pm_message_t state)
 
 	pci_disable_device(pci);
 	pci_save_state(pci);
-	pci_set_power_state(pci, pci_choose_state(pci, state));
+	pci_set_power_state(pci, PCI_D3hot);
 	return 0;
 }
 
-static int ali_resume(struct pci_dev *pci)
+static int ali_resume(struct device *dev)
 {
-	struct snd_card *card = pci_get_drvdata(pci);
+	struct pci_dev *pci = to_pci_dev(dev);
+	struct snd_card *card = dev_get_drvdata(dev);
 	struct snd_ali *chip = card->private_data;
 	struct snd_ali_image *im;
 	int i, j;
@@ -2051,20 +1984,23 @@ static int ali_resume(struct pci_dev *pci)
 	snd_power_change_state(card, SNDRV_CTL_POWER_D0);
 	return 0;
 }
-#endif /* CONFIG_PM */
+
+static SIMPLE_DEV_PM_OPS(ali_pm, ali_suspend, ali_resume);
+#define ALI_PM_OPS	&ali_pm
+#else
+#define ALI_PM_OPS	NULL
+#endif /* CONFIG_PM_SLEEP */
 
 static int snd_ali_free(struct snd_ali * codec)
 {
 	if (codec->hw_initialized)
 		snd_ali_disable_address_interrupt(codec);
-	if (codec->irq >= 0) {
-		synchronize_irq(codec->irq);
+	if (codec->irq >= 0)
 		free_irq(codec->irq, codec);
-	}
 	if (codec->port)
 		pci_release_regions(codec->pci);
 	pci_disable_device(codec->pci);
-#ifdef CONFIG_PM
+#ifdef CONFIG_PM_SLEEP
 	kfree(codec->image);
 #endif
 	pci_dev_put(codec->pci_m1533);
@@ -2143,30 +2079,30 @@ static void snd_ali_proc_read(struct snd_info_entry *entry,
 		snd_iprintf(buf, "%02x: %08x\n", i, inl(ALI_REG(codec, i)));
 }
 
-static void __devinit snd_ali_proc_init(struct snd_ali *codec)
+static void snd_ali_proc_init(struct snd_ali *codec)
 {
 	struct snd_info_entry *entry;
 	if (!snd_card_proc_new(codec->card, "ali5451", &entry))
 		snd_info_set_text_ops(entry, codec, snd_ali_proc_read);
 }
 
-static int __devinit snd_ali_resources(struct snd_ali *codec)
+static int snd_ali_resources(struct snd_ali *codec)
 {
 	int err;
 
-	snd_ali_printk("resouces allocation ...\n");
+	snd_ali_printk("resources allocation ...\n");
 	err = pci_request_regions(codec->pci, "ALI 5451");
 	if (err < 0)
 		return err;
 	codec->port = pci_resource_start(codec->pci, 0);
 
 	if (request_irq(codec->pci->irq, snd_ali_card_interrupt,
-			IRQF_SHARED, "ALI 5451", codec)) {
+			IRQF_SHARED, KBUILD_MODNAME, codec)) {
 		snd_printk(KERN_ERR "Unable to request irq.\n");
 		return -EBUSY;
 	}
 	codec->irq = codec->pci->irq;
-	snd_ali_printk("resouces allocated.\n");
+	snd_ali_printk("resources allocated.\n");
 	return 0;
 }
 static int snd_ali_dev_free(struct snd_device *device)
@@ -2176,11 +2112,11 @@ static int snd_ali_dev_free(struct snd_device *device)
 	return 0;
 }
 
-static int __devinit snd_ali_create(struct snd_card *card,
-				    struct pci_dev *pci,
-				    int pcm_streams,
-				    int spdif_support,
-				    struct snd_ali ** r_ali)
+static int snd_ali_create(struct snd_card *card,
+			  struct pci_dev *pci,
+			  int pcm_streams,
+			  int spdif_support,
+			  struct snd_ali **r_ali)
 {
 	struct snd_ali *codec;
 	int i, err;
@@ -2198,8 +2134,8 @@ static int __devinit snd_ali_create(struct snd_card *card,
 	if (err < 0)
 		return err;
 	/* check, if we can restrict PCI DMA transfers to 31 bits */
-	if (pci_set_dma_mask(pci, DMA_31BIT_MASK) < 0 ||
-	    pci_set_consistent_dma_mask(pci, DMA_31BIT_MASK) < 0) {
+	if (pci_set_dma_mask(pci, DMA_BIT_MASK(31)) < 0 ||
+	    pci_set_consistent_dma_mask(pci, DMA_BIT_MASK(31)) < 0) {
 		snd_printk(KERN_ERR "architecture does not support "
 			   "31bit PCI busmaster DMA\n");
 		pci_disable_device(pci);
@@ -2218,7 +2154,7 @@ static int __devinit snd_ali_create(struct snd_card *card,
 	codec->card = card;
 	codec->pci = pci;
 	codec->irq = -1;
-	pci_read_config_byte(pci, PCI_REVISION_ID, &codec->revision);
+	codec->revision = pci->revision;
 	codec->spdif_support = spdif_support;
 
 	if (pcm_streams < 1)
@@ -2296,7 +2232,7 @@ static int __devinit snd_ali_create(struct snd_card *card,
 		return err;
 	}
 
-#ifdef CONFIG_PM
+#ifdef CONFIG_PM_SLEEP
 	codec->image = kmalloc(sizeof(*codec->image), GFP_KERNEL);
 	if (!codec->image)
 		snd_printk(KERN_WARNING "can't allocate apm buffer\n");
@@ -2310,8 +2246,8 @@ static int __devinit snd_ali_create(struct snd_card *card,
 	return 0;
 }
 
-static int __devinit snd_ali_probe(struct pci_dev *pci,
-				   const struct pci_device_id *pci_id)
+static int snd_ali_probe(struct pci_dev *pci,
+			 const struct pci_device_id *pci_id)
 {
 	struct snd_card *card;
 	struct snd_ali *codec;
@@ -2319,9 +2255,9 @@ static int __devinit snd_ali_probe(struct pci_dev *pci,
 
 	snd_ali_printk("probe ...\n");
 
-	card = snd_card_new(index, id, THIS_MODULE, 0);
-	if (!card)
-		return -ENOMEM;
+	err = snd_card_create(index, id, THIS_MODULE, 0, &card);
+	if (err < 0)
+		return err;
 
 	err = snd_ali_create(card, pci, pcm_channels, spdif, &codec);
 	if (err < 0)
@@ -2343,7 +2279,7 @@ static int __devinit snd_ali_probe(struct pci_dev *pci,
 	strcpy(card->driver, "ALI5451");
 	strcpy(card->shortname, "ALI 5451");
 	
-	sprintf(card->longname, "%s at 0x%lx, irq %li",
+	sprintf(card->longname, "%s at 0x%lx, irq %i",
 		card->shortname, codec->port, codec->irq);
 
 	snd_ali_printk("register card.\n");
@@ -2359,32 +2295,20 @@ static int __devinit snd_ali_probe(struct pci_dev *pci,
 	return err;
 }
 
-static void __devexit snd_ali_remove(struct pci_dev *pci)
+static void snd_ali_remove(struct pci_dev *pci)
 {
 	snd_card_free(pci_get_drvdata(pci));
 	pci_set_drvdata(pci, NULL);
 }
 
-static struct pci_driver driver = {
-	.name = "ALI 5451",
+static struct pci_driver ali5451_driver = {
+	.name = KBUILD_MODNAME,
 	.id_table = snd_ali_ids,
 	.probe = snd_ali_probe,
-	.remove = __devexit_p(snd_ali_remove),
-#ifdef CONFIG_PM
-	.suspend = ali_suspend,
-	.resume = ali_resume,
-#endif
+	.remove = snd_ali_remove,
+	.driver = {
+		.pm = ALI_PM_OPS,
+	},
 };                                
 
-static int __init alsa_card_ali_init(void)
-{
-	return pci_register_driver(&driver);
-}
-
-static void __exit alsa_card_ali_exit(void)
-{
-	pci_unregister_driver(&driver);
-}
-
-module_init(alsa_card_ali_init)
-module_exit(alsa_card_ali_exit)
+module_pci_driver(ali5451_driver);

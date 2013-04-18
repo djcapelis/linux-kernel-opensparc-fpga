@@ -5,33 +5,51 @@ Supported adapters:
     '810' and '810E' chipsets)
   * Intel 82801BA (ICH2 - part of the '815E' chipset)
   * Intel 82801CA/CAM (ICH3)
-  * Intel 82801DB (ICH4) (HW PEC supported, 32 byte buffer not supported)
-  * Intel 82801EB/ER (ICH5) (HW PEC supported, 32 byte buffer not supported)
+  * Intel 82801DB (ICH4) (HW PEC supported)
+  * Intel 82801EB/ER (ICH5) (HW PEC supported)
   * Intel 6300ESB
   * Intel 82801FB/FR/FW/FRW (ICH6)
   * Intel 82801G (ICH7)
   * Intel 631xESB/632xESB (ESB2)
   * Intel 82801H (ICH8)
-  * Intel ICH9
-    Datasheets: Publicly available at the Intel website
+  * Intel 82801I (ICH9)
+  * Intel EP80579 (Tolapai)
+  * Intel 82801JI (ICH10)
+  * Intel 5/3400 Series (PCH)
+  * Intel 6 Series (PCH)
+  * Intel Patsburg (PCH)
+  * Intel DH89xxCC (PCH)
+  * Intel Panther Point (PCH)
+  * Intel Lynx Point (PCH)
+  * Intel Lynx Point-LP (PCH)
+   Datasheets: Publicly available at the Intel website
+
+On Intel Patsburg and later chipsets, both the normal host SMBus controller
+and the additional 'Integrated Device Function' controllers are supported.
 
 Authors: 
-	Frodo Looijaard <frodol@dds.nl>, 
-	Philip Edelbrock <phil@netroedge.com>, 
 	Mark Studebaker <mdsxyz123@yahoo.com>
+	Jean Delvare <khali@linux-fr.org>
 
 
 Module Parameters
 -----------------
 
-None.
+* disable_features (bit vector)
+Disable selected features normally supported by the device. This makes it
+possible to work around possible driver or hardware bugs if the feature in
+question doesn't work as intended for whatever reason. Bit values:
+ 0x01  disable SMBus PEC
+ 0x02  disable the block buffer
+ 0x08  disable the I2C block read functionality
+ 0x10  don't use interrupts
 
 
 Description
 -----------
 
 The ICH (properly known as the 82801AA), ICH0 (82801AB), ICH2 (82801BA),
-ICH3 (82801CA/CAM) and later devices are Intel chips that are a part of
+ICH3 (82801CA/CAM) and later devices (PCH) are Intel chips that are a part of
 Intel's '810' chipset for Celeron-based PCs, '810E' chipset for
 Pentium-based PCs, '815E' chipset, and others.
 
@@ -61,13 +79,19 @@ Not supported.
 I2C Block Read Support
 ----------------------
 
-Not supported at the moment.
+I2C block read is supported on the 82801EB (ICH5) and later chips.
 
 
 SMBus 2.0 Support
 -----------------
 
 The 82801DB (ICH4) and later chips support several SMBus 2.0 features.
+
+
+Interrupt Support
+-----------------
+
+PCI interrupt support is supported on the 82801EB (ICH5) and later chips.
 
 
 Hidden ICH SMBus

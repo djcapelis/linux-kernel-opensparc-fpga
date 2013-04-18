@@ -9,14 +9,14 @@
  */
 
 #include <linux/fs.h>
-#include <linux/module.h>
+#include <linux/export.h>
 #include <linux/stat.h>
 #include <linux/time.h>
 #include <linux/namei.h>
 #include <linux/poll.h>
 
 
-static loff_t bad_file_llseek(struct file *file, loff_t offset, int origin)
+static loff_t bad_file_llseek(struct file *file, loff_t offset, int whence)
 {
 	return -EIO;
 }
@@ -55,12 +55,6 @@ static unsigned int bad_file_poll(struct file *filp, poll_table *wait)
 	return POLLERR;
 }
 
-static int bad_file_ioctl (struct inode *inode, struct file *filp,
-			unsigned int cmd, unsigned long arg)
-{
-	return -EIO;
-}
-
 static long bad_file_unlocked_ioctl(struct file *file, unsigned cmd,
 			unsigned long arg)
 {
@@ -93,8 +87,8 @@ static int bad_file_release(struct inode *inode, struct file *filp)
 	return -EIO;
 }
 
-static int bad_file_fsync(struct file *file, struct dentry *dentry,
-			int datasync)
+static int bad_file_fsync(struct file *file, loff_t start, loff_t end,
+			  int datasync)
 {
 	return -EIO;
 }
@@ -114,12 +108,6 @@ static int bad_file_lock(struct file *file, int cmd, struct file_lock *fl)
 	return -EIO;
 }
 
-static ssize_t bad_file_sendfile(struct file *in_file, loff_t *ppos,
-			size_t count, read_actor_t actor, void *target)
-{
-	return -EIO;
-}
-
 static ssize_t bad_file_sendpage(struct file *file, struct page *page,
 			int off, size_t len, loff_t *pos, int more)
 {
@@ -134,11 +122,6 @@ static unsigned long bad_file_get_unmapped_area(struct file *file,
 }
 
 static int bad_file_check_flags(int flags)
-{
-	return -EIO;
-}
-
-static int bad_file_dir_notify(struct file *file, unsigned long arg)
 {
 	return -EIO;
 }
@@ -171,7 +154,6 @@ static const struct file_operations bad_file_ops =
 	.aio_write	= bad_file_aio_write,
 	.readdir	= bad_file_readdir,
 	.poll		= bad_file_poll,
-	.ioctl		= bad_file_ioctl,
 	.unlocked_ioctl	= bad_file_unlocked_ioctl,
 	.compat_ioctl	= bad_file_compat_ioctl,
 	.mmap		= bad_file_mmap,
@@ -182,24 +164,22 @@ static const struct file_operations bad_file_ops =
 	.aio_fsync	= bad_file_aio_fsync,
 	.fasync		= bad_file_fasync,
 	.lock		= bad_file_lock,
-	.sendfile	= bad_file_sendfile,
 	.sendpage	= bad_file_sendpage,
 	.get_unmapped_area = bad_file_get_unmapped_area,
 	.check_flags	= bad_file_check_flags,
-	.dir_notify	= bad_file_dir_notify,
 	.flock		= bad_file_flock,
 	.splice_write	= bad_file_splice_write,
 	.splice_read	= bad_file_splice_read,
 };
 
 static int bad_inode_create (struct inode *dir, struct dentry *dentry,
-		int mode, struct nameidata *nd)
+		umode_t mode, bool excl)
 {
 	return -EIO;
 }
 
 static struct dentry *bad_inode_lookup(struct inode *dir,
-			struct dentry *dentry, struct nameidata *nd)
+			struct dentry *dentry, unsigned int flags)
 {
 	return ERR_PTR(-EIO);
 }
@@ -222,7 +202,7 @@ static int bad_inode_symlink (struct inode *dir, struct dentry *dentry,
 }
 
 static int bad_inode_mkdir(struct inode *dir, struct dentry *dentry,
-			int mode)
+			umode_t mode)
 {
 	return -EIO;
 }
@@ -233,7 +213,7 @@ static int bad_inode_rmdir (struct inode *dir, struct dentry *dentry)
 }
 
 static int bad_inode_mknod (struct inode *dir, struct dentry *dentry,
-			int mode, dev_t rdev)
+			umode_t mode, dev_t rdev)
 {
 	return -EIO;
 }
@@ -250,8 +230,7 @@ static int bad_inode_readlink(struct dentry *dentry, char __user *buffer,
 	return -EIO;
 }
 
-static int bad_inode_permission(struct inode *inode, int mask,
-			struct nameidata *nd)
+static int bad_inode_permission(struct inode *inode, int mask)
 {
 	return -EIO;
 }
@@ -313,7 +292,6 @@ static const struct inode_operations bad_inode_ops =
 	.getxattr	= bad_inode_getxattr,
 	.listxattr	= bad_inode_listxattr,
 	.removexattr	= bad_inode_removexattr,
-	/* truncate_range returns void */
 };
 
 
@@ -366,3 +344,17 @@ int is_bad_inode(struct inode *inode)
 }
 
 EXPORT_SYMBOL(is_bad_inode);
+
+/**
+ * iget_failed - Mark an under-construction inode as dead and release it
+ * @inode: The inode to discard
+ *
+ * Mark an under-construction inode as dead and release it.
+ */
+void iget_failed(struct inode *inode)
+{
+	make_bad_inode(inode);
+	unlock_new_inode(inode);
+	iput(inode);
+}
+EXPORT_SYMBOL(iget_failed);

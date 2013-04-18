@@ -3,8 +3,6 @@
  * Copyright (C) 2001 Mark Langsdorf (mark.langsdorf@amd.com)
  *	based on sc520cdp.c by Sysgo Real-Time Solutions GmbH
  *
- * $Id: netsc520.c,v 1.14 2005/11/07 11:14:27 gleixner Exp $
- *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation; either version 2 of the License, or
@@ -118,14 +116,14 @@ static int __init init_netsc520(void)
 	}
 
 	mymtd->owner = THIS_MODULE;
-	add_mtd_partitions( mymtd, partition_info, NUM_PARTITIONS );
+	mtd_device_register(mymtd, partition_info, NUM_PARTITIONS);
 	return 0;
 }
 
 static void __exit cleanup_netsc520(void)
 {
 	if (mymtd) {
-		del_mtd_partitions(mymtd);
+		mtd_device_unregister(mymtd);
 		map_destroy(mymtd);
 	}
 	if (netsc520_map.virt) {

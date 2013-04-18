@@ -7,6 +7,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <sys/ioctl.h>
 #include <linux/types.h>
 #include <linux/watchdog.h>
@@ -18,7 +19,7 @@ int fd;
  * the PC Watchdog card to reset its internal timer so it doesn't trigger
  * a computer reset.
  */
-void keep_alive(void)
+static void keep_alive(void)
 {
     int dummy;
 
@@ -29,8 +30,18 @@ void keep_alive(void)
  * The main program.  Run the program with "-d" to disable the card,
  * or "-e" to enable the card.
  */
+
+static void term(int sig)
+{
+    close(fd);
+    fprintf(stderr, "Stopping watchdog ticks...\n");
+    exit(0);
+}
+
 int main(int argc, char *argv[])
 {
+    int flags;
+
     fd = open("/dev/watchdog", O_WRONLY);
 
     if (fd == -1) {
@@ -41,28 +52,35 @@ int main(int argc, char *argv[])
 
     if (argc > 1) {
 	if (!strncasecmp(argv[1], "-d", 2)) {
-	    ioctl(fd, WDIOC_SETOPTIONS, WDIOS_DISABLECARD);
+	    flags = WDIOS_DISABLECARD;
+	    ioctl(fd, WDIOC_SETOPTIONS, &flags);
 	    fprintf(stderr, "Watchdog card disabled.\n");
 	    fflush(stderr);
-	    exit(0);
+	    goto end;
 	} else if (!strncasecmp(argv[1], "-e", 2)) {
-	    ioctl(fd, WDIOC_SETOPTIONS, WDIOS_ENABLECARD);
+	    flags = WDIOS_ENABLECARD;
+	    ioctl(fd, WDIOC_SETOPTIONS, &flags);
 	    fprintf(stderr, "Watchdog card enabled.\n");
 	    fflush(stderr);
-	    exit(0);
+	    goto end;
 	} else {
 	    fprintf(stderr, "-d to disable, -e to enable.\n");
 	    fprintf(stderr, "run by itself to tick the card.\n");
 	    fflush(stderr);
-	    exit(0);
+	    goto end;
 	}
     } else {
 	fprintf(stderr, "Watchdog Ticking Away!\n");
 	fflush(stderr);
     }
 
+    signal(SIGINT, term);
+
     while(1) {
 	keep_alive();
 	sleep(1);
     }
+end:
+    close(fd);
+    return 0;
 }

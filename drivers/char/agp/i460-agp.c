@@ -1,7 +1,7 @@
 /*
  * For documentation on the i460 AGP interface, see Chapter 7 (AGP Subsystem) of
  * the "Intel 460GTX Chipset Software Developer's Manual":
- * http://developer.intel.com/design/itanium/downloads/24870401s.htm
+ * http://www.intel.com/design/archives/itanium/downloads/248704.htm 
  */
 /*
  * 460GX support by Chris Ahna <christopher.j.ahna@intel.com>
@@ -13,6 +13,7 @@
 #include <linux/string.h>
 #include <linux/slab.h>
 #include <linux/agp_backend.h>
+#include <linux/log2.h>
 
 #include "agp.h"
 
@@ -59,7 +60,8 @@
  */
 #define WR_FLUSH_GATT(index)	RD_GATT(index)
 
-#define log2(x)			ffz(~(x))
+static unsigned long i460_mask_memory (struct agp_bridge_data *bridge,
+				       dma_addr_t addr, int type);
 
 static struct {
 	void *gatt;				/* ioremap'd GATT area */
@@ -75,6 +77,7 @@ static struct {
 		unsigned long *alloced_map;	/* bitmap of kernel-pages in use */
 		int refcount;			/* number of kernel pages using the large page */
 		u64 paddr;			/* physical address of large page */
+		struct page *page; 		/* page pointer */
 	} *lp_desc;
 } i460;
 
@@ -148,7 +151,7 @@ static int i460_fetch_size (void)
 		 * values[i].size.
 		 */
 		values[i].num_entries = (values[i].size << 8) >> (I460_IO_PAGE_SHIFT - 12);
-		values[i].page_order = log2((sizeof(u32)*values[i].num_entries) >> PAGE_SHIFT);
+		values[i].page_order = ilog2((sizeof(u32)*values[i].num_entries) >> PAGE_SHIFT);
 	}
 
 	for (i = 0; i < agp_bridge->driver->num_aperture_sizes; i++) {
@@ -249,6 +252,10 @@ static int i460_create_gatt_table (struct agp_bridge_data *bridge)
 	num_entries = A_SIZE_8(temp)->num_entries;
 
 	i460.gatt = ioremap(INTEL_I460_ATTBASE, PAGE_SIZE << page_order);
+	if (!i460.gatt) {
+		printk(KERN_ERR PFX "ioremap failed\n");
+		return -ENOMEM;
+	}
 
 	/* These are no good, the should be removed from the agp_bridge strucure... */
 	agp_bridge->gatt_table_real = NULL;
@@ -291,7 +298,7 @@ static int i460_insert_memory_small_io_page (struct agp_memory *mem,
 	void *temp;
 
 	pr_debug("i460_insert_memory_small_io_page(mem=%p, pg_start=%ld, type=%d, paddr0=0x%lx)\n",
-		 mem, pg_start, type, mem->memory[0]);
+		 mem, pg_start, type, page_to_phys(mem->pages[0]));
 
 	if (type >= AGP_USER_TYPES || mem->type >= AGP_USER_TYPES)
 		return -EINVAL;
@@ -318,10 +325,9 @@ static int i460_insert_memory_small_io_page (struct agp_memory *mem,
 
 	io_page_size = 1UL << I460_IO_PAGE_SHIFT;
 	for (i = 0, j = io_pg_start; i < mem->page_count; i++) {
-		paddr = mem->memory[i];
+		paddr = page_to_phys(mem->pages[i]);
 		for (k = 0; k < I460_IOPAGES_PER_KPAGE; k++, j++, paddr += io_page_size)
-			WR_GATT(j, agp_bridge->driver->mask_memory(agp_bridge,
-				paddr, mem->type));
+			WR_GATT(j, i460_mask_memory(agp_bridge, paddr, mem->type));
 	}
 	WR_FLUSH_GATT(j - 1);
 	return 0;
@@ -361,10 +367,9 @@ static int i460_alloc_large_page (struct lp_desc *lp)
 {
 	unsigned long order = I460_IO_PAGE_SHIFT - PAGE_SHIFT;
 	size_t map_size;
-	void *lpage;
 
-	lpage = (void *) __get_free_pages(GFP_KERNEL, order);
-	if (!lpage) {
+	lp->page = alloc_pages(GFP_KERNEL, order);
+	if (!lp->page) {
 		printk(KERN_ERR PFX "Couldn't alloc 4M GART page...\n");
 		return -ENOMEM;
 	}
@@ -372,12 +377,12 @@ static int i460_alloc_large_page (struct lp_desc *lp)
 	map_size = ((I460_KPAGES_PER_IOPAGE + BITS_PER_LONG - 1) & -BITS_PER_LONG)/8;
 	lp->alloced_map = kzalloc(map_size, GFP_KERNEL);
 	if (!lp->alloced_map) {
-		free_pages((unsigned long) lpage, order);
+		__free_pages(lp->page, order);
 		printk(KERN_ERR PFX "Out of memory, we're in trouble...\n");
 		return -ENOMEM;
 	}
 
-	lp->paddr = virt_to_gart(lpage);
+	lp->paddr = page_to_phys(lp->page);
 	lp->refcount = 0;
 	atomic_add(I460_KPAGES_PER_IOPAGE, &agp_bridge->current_memory_agp);
 	return 0;
@@ -388,7 +393,7 @@ static void i460_free_large_page (struct lp_desc *lp)
 	kfree(lp->alloced_map);
 	lp->alloced_map = NULL;
 
-	free_pages((unsigned long) gart_to_virt(lp->paddr), I460_IO_PAGE_SHIFT - PAGE_SHIFT);
+	__free_pages(lp->page, I460_IO_PAGE_SHIFT - PAGE_SHIFT);
 	atomic_sub(I460_KPAGES_PER_IOPAGE, &agp_bridge->current_memory_agp);
 }
 
@@ -436,8 +441,8 @@ static int i460_insert_memory_large_io_page (struct agp_memory *mem,
 			if (i460_alloc_large_page(lp) < 0)
 				return -ENOMEM;
 			pg = lp - i460.lp_desc;
-			WR_GATT(pg, agp_bridge->driver->mask_memory(agp_bridge,
-				lp->paddr, 0));
+			WR_GATT(pg, i460_mask_memory(agp_bridge,
+						     lp->paddr, 0));
 			WR_FLUSH_GATT(pg);
 		}
 
@@ -445,7 +450,7 @@ static int i460_insert_memory_large_io_page (struct agp_memory *mem,
 		     idx < ((lp == end) ? (end_offset + 1) : I460_KPAGES_PER_IOPAGE);
 		     idx++, i++)
 		{
-			mem->memory[i] = lp->paddr + idx*PAGE_SIZE;
+			mem->pages[i] = lp->page;
 			__set_bit(idx, lp->alloced_map);
 			++lp->refcount;
 		}
@@ -460,7 +465,7 @@ static int i460_remove_memory_large_io_page (struct agp_memory *mem,
 	struct lp_desc *start, *end, *lp;
 	void *temp;
 
-	temp = agp_bridge->driver->current_size;
+	temp = agp_bridge->current_size;
 	num_entries = A_SIZE_8(temp)->num_entries;
 
 	/* Figure out what pg_start means in terms of our large GART pages */
@@ -474,7 +479,7 @@ static int i460_remove_memory_large_io_page (struct agp_memory *mem,
 		     idx < ((lp == end) ? (end_offset + 1) : I460_KPAGES_PER_IOPAGE);
 		     idx++, i++)
 		{
-			mem->memory[i] = 0;
+			mem->pages[i] = NULL;
 			__clear_bit(idx, lp->alloced_map);
 			--lp->refcount;
 		}
@@ -518,13 +523,12 @@ static int i460_remove_memory (struct agp_memory *mem,
  * Let's just hope nobody counts on the allocated AGP memory being there before bind time
  * (I don't think current drivers do)...
  */
-static void *i460_alloc_page (struct agp_bridge_data *bridge)
+static struct page *i460_alloc_page (struct agp_bridge_data *bridge)
 {
 	void *page;
 
 	if (I460_IO_PAGE_SHIFT <= PAGE_SHIFT) {
 		page = agp_generic_alloc_page(agp_bridge);
-		global_flush_tlb();
 	} else
 		/* Returning NULL would cause problems */
 		/* AK: really dubious code. */
@@ -532,18 +536,17 @@ static void *i460_alloc_page (struct agp_bridge_data *bridge)
 	return page;
 }
 
-static void i460_destroy_page (void *page)
+static void i460_destroy_page (struct page *page, int flags)
 {
 	if (I460_IO_PAGE_SHIFT <= PAGE_SHIFT) {
-		agp_generic_destroy_page(page);
-		global_flush_tlb();
+		agp_generic_destroy_page(page, flags);
 	}
 }
 
 #endif /* I460_LARGE_IO_PAGES */
 
 static unsigned long i460_mask_memory (struct agp_bridge_data *bridge,
-	unsigned long addr, int type)
+				       dma_addr_t addr, int type)
 {
 	/* Make sure the returned address is a valid GATT entry */
 	return bridge->driver->masks[0].mask
@@ -574,16 +577,18 @@ const struct agp_bridge_driver intel_i460_driver = {
 	.insert_memory		= i460_insert_memory_small_io_page,
 	.remove_memory		= i460_remove_memory_small_io_page,
 	.agp_alloc_page		= agp_generic_alloc_page,
+	.agp_alloc_pages	= agp_generic_alloc_pages,
 	.agp_destroy_page	= agp_generic_destroy_page,
+	.agp_destroy_pages	= agp_generic_destroy_pages,
 #endif
 	.alloc_by_type		= agp_generic_alloc_by_type,
 	.free_by_type		= agp_generic_free_by_type,
 	.agp_type_to_mask_type  = agp_generic_type_to_mask_type,
-	.cant_use_aperture	= 1,
+	.cant_use_aperture	= true,
 };
 
-static int __devinit agp_intel_i460_probe(struct pci_dev *pdev,
-					  const struct pci_device_id *ent)
+static int agp_intel_i460_probe(struct pci_dev *pdev,
+				const struct pci_device_id *ent)
 {
 	struct agp_bridge_data *bridge;
 	u8 cap_ptr;
@@ -606,7 +611,7 @@ static int __devinit agp_intel_i460_probe(struct pci_dev *pdev,
 	return agp_add_bridge(bridge);
 }
 
-static void __devexit agp_intel_i460_remove(struct pci_dev *pdev)
+static void agp_intel_i460_remove(struct pci_dev *pdev)
 {
 	struct agp_bridge_data *bridge = pci_get_drvdata(pdev);
 
@@ -632,7 +637,7 @@ static struct pci_driver agp_intel_i460_pci_driver = {
 	.name		= "agpgart-intel-i460",
 	.id_table	= agp_intel_i460_pci_table,
 	.probe		= agp_intel_i460_probe,
-	.remove		= __devexit_p(agp_intel_i460_remove),
+	.remove		= agp_intel_i460_remove,
 };
 
 static int __init agp_intel_i460_init(void)

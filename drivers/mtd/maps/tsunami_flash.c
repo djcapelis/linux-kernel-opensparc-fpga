@@ -2,7 +2,6 @@
  * tsunami_flash.c
  *
  * flash chip on alpha ds10...
- * $Id: tsunami_flash.c,v 1.10 2005/11/07 11:14:29 gleixner Exp $
  */
 #include <asm/io.h>
 #include <asm/core_tsunami.h>
@@ -77,7 +76,7 @@ static void __exit  cleanup_tsunami_flash(void)
 	struct mtd_info *mtd;
 	mtd = tsunami_flash_mtd;
 	if (mtd) {
-		del_mtd_device(mtd);
+		mtd_device_unregister(mtd);
 		map_destroy(mtd);
 	}
 	tsunami_flash_mtd = 0;
@@ -98,7 +97,7 @@ static int __init init_tsunami_flash(void)
 	}
 	if (tsunami_flash_mtd) {
 		tsunami_flash_mtd->owner = THIS_MODULE;
-		add_mtd_device(tsunami_flash_mtd);
+		mtd_device_register(tsunami_flash_mtd, NULL, 0);
 		return 0;
 	}
 	return -ENXIO;

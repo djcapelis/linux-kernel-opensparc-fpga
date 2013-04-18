@@ -5,7 +5,7 @@
  *  MIDI byte <-> sequencer event coder
  *
  *  Copyright (C) 1998,99 Takashi Iwai <tiwai@suse.de>,
- *                        Jaroslav Kysela <perex@suse.cz>
+ *                        Jaroslav Kysela <perex@perex.cz>
  *
  *   This program is free software; you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -22,7 +22,7 @@
  *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
-#include "asequencer.h"
+#include <sound/asequencer.h>
 
 #define MAX_MIDI_EVENT_BUF	256
 

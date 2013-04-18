@@ -23,13 +23,11 @@
  *
  */      
 
-#include <sound/driver.h>
 #include <linux/delay.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/pci.h>
-#include <linux/slab.h>
-#include <linux/moduleparam.h>
+#include <linux/module.h>
 
 #include <sound/core.h>
 #include <sound/info.h>
@@ -55,7 +53,7 @@ MODULE_SUPPORTED_DEVICE("{{RME,Digi96},"
 
 static int index[SNDRV_CARDS] = SNDRV_DEFAULT_IDX;	/* Index 0-MAX */
 static char *id[SNDRV_CARDS] = SNDRV_DEFAULT_STR;	/* ID for this card */
-static int enable[SNDRV_CARDS] = SNDRV_DEFAULT_ENABLE_PNP;	/* Enable this card */
+static bool enable[SNDRV_CARDS] = SNDRV_DEFAULT_ENABLE_PNP;	/* Enable this card */
 
 module_param_array(index, int, NULL, 0444);
 MODULE_PARM_DESC(index, "Index value for RME Digi96 soundcard.");
@@ -152,7 +150,7 @@ MODULE_PARM_DESC(enable, "Enable RME Digi96 soundcard.");
 #define RME96_RCR_BITPOS_F1 28
 #define RME96_RCR_BITPOS_F2 29
 
-/* Additonal register bits */
+/* Additional register bits */
 #define RME96_AR_WSEL       (1 << 0)
 #define RME96_AR_ANALOG     (1 << 1)
 #define RME96_AR_FREQPAD_0  (1 << 2)
@@ -232,15 +230,11 @@ struct rme96 {
 	struct snd_kcontrol   *spdif_ctl;
 };
 
-static struct pci_device_id snd_rme96_ids[] = {
-	{ PCI_VENDOR_ID_XILINX, PCI_DEVICE_ID_RME_DIGI96,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0, },
-	{ PCI_VENDOR_ID_XILINX, PCI_DEVICE_ID_RME_DIGI96_8,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0, },
-	{ PCI_VENDOR_ID_XILINX, PCI_DEVICE_ID_RME_DIGI96_8_PRO,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0, },
-	{ PCI_VENDOR_ID_XILINX, PCI_DEVICE_ID_RME_DIGI96_8_PAD_OR_PST,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0, }, 
+static DEFINE_PCI_DEVICE_TABLE(snd_rme96_ids) = {
+	{ PCI_VDEVICE(XILINX, PCI_DEVICE_ID_RME_DIGI96), 0, },
+	{ PCI_VDEVICE(XILINX, PCI_DEVICE_ID_RME_DIGI96_8), 0, },
+	{ PCI_VDEVICE(XILINX, PCI_DEVICE_ID_RME_DIGI96_8_PRO), 0, },
+	{ PCI_VDEVICE(XILINX, PCI_DEVICE_ID_RME_DIGI96_8_PAD_OR_PST), 0, },
 	{ 0, }
 };
 
@@ -276,8 +270,7 @@ snd_rme96_playback_pointer(struct snd_pcm_substream *substream);
 static snd_pcm_uframes_t
 snd_rme96_capture_pointer(struct snd_pcm_substream *substream);
 
-static void __devinit 
-snd_rme96_proc_init(struct rme96 *rme96);
+static void snd_rme96_proc_init(struct rme96 *rme96);
 
 static int
 snd_rme96_create_switches(struct snd_card *card,
@@ -298,20 +291,6 @@ snd_rme96_capture_ptr(struct rme96 *rme96)
 {
 	return (readl(rme96->iobase + RME96_IO_GET_REC_POS)
 		& RME96_RCR_AUDIO_ADDR_MASK) >> rme96->capture_frlog;
-}
-
-static int
-snd_rme96_ratecode(int rate)
-{
-    switch (rate) {
-    case 32000: return SNDRV_PCM_RATE_32000;
-    case 44100: return SNDRV_PCM_RATE_44100;
-    case 48000: return SNDRV_PCM_RATE_48000;
-    case 64000: return SNDRV_PCM_RATE_64000;
-    case 88200: return SNDRV_PCM_RATE_88200;
-    case 96000: return SNDRV_PCM_RATE_96000;
-    }
-    return 0;
 }
 
 static int
@@ -1176,8 +1155,6 @@ snd_rme96_playback_spdif_open(struct snd_pcm_substream *substream)
 	struct rme96 *rme96 = snd_pcm_substream_chip(substream);
 	struct snd_pcm_runtime *runtime = substream->runtime;
 
-	snd_pcm_set_sync(substream);
-
 	spin_lock_irq(&rme96->lock);	
         if (rme96->playback_substream != NULL) {
 		spin_unlock_irq(&rme96->lock);
@@ -1194,7 +1171,7 @@ snd_rme96_playback_spdif_open(struct snd_pcm_substream *substream)
 	    (rate = snd_rme96_capture_getrate(rme96, &dummy)) > 0)
 	{
                 /* slave clock */
-                runtime->hw.rates = snd_rme96_ratecode(rate);
+                runtime->hw.rates = snd_pcm_rate_to_rate_bit(rate);
                 runtime->hw.rate_min = rate;
                 runtime->hw.rate_max = rate;
 	}        
@@ -1214,8 +1191,6 @@ snd_rme96_capture_spdif_open(struct snd_pcm_substream *substream)
 	struct rme96 *rme96 = snd_pcm_substream_chip(substream);
 	struct snd_pcm_runtime *runtime = substream->runtime;
 
-	snd_pcm_set_sync(substream);
-
 	runtime->hw = snd_rme96_capture_spdif_info;
         if (snd_rme96_getinputtype(rme96) != RME96_INPUT_ANALOG &&
             (rate = snd_rme96_capture_getrate(rme96, &isadat)) > 0)
@@ -1223,7 +1198,7 @@ snd_rme96_capture_spdif_open(struct snd_pcm_substream *substream)
                 if (isadat) {
                         return -EIO;
                 }
-                runtime->hw.rates = snd_rme96_ratecode(rate);
+                runtime->hw.rates = snd_pcm_rate_to_rate_bit(rate);
                 runtime->hw.rate_min = rate;
                 runtime->hw.rate_max = rate;
         }
@@ -1247,8 +1222,6 @@ snd_rme96_playback_adat_open(struct snd_pcm_substream *substream)
 	struct rme96 *rme96 = snd_pcm_substream_chip(substream);
 	struct snd_pcm_runtime *runtime = substream->runtime;        
 	
-	snd_pcm_set_sync(substream);
-
 	spin_lock_irq(&rme96->lock);	
         if (rme96->playback_substream != NULL) {
 		spin_unlock_irq(&rme96->lock);
@@ -1265,7 +1238,7 @@ snd_rme96_playback_adat_open(struct snd_pcm_substream *substream)
 	    (rate = snd_rme96_capture_getrate(rme96, &dummy)) > 0)
 	{
                 /* slave clock */
-                runtime->hw.rates = snd_rme96_ratecode(rate);
+                runtime->hw.rates = snd_pcm_rate_to_rate_bit(rate);
                 runtime->hw.rate_min = rate;
                 runtime->hw.rate_max = rate;
 	}        
@@ -1280,8 +1253,6 @@ snd_rme96_capture_adat_open(struct snd_pcm_substream *substream)
 	struct rme96 *rme96 = snd_pcm_substream_chip(substream);
 	struct snd_pcm_runtime *runtime = substream->runtime;
 
-	snd_pcm_set_sync(substream);
-
 	runtime->hw = snd_rme96_capture_adat_info;
         if (snd_rme96_getinputtype(rme96) == RME96_INPUT_ANALOG) {
                 /* makes no sense to use analog input. Note that analog
@@ -1292,7 +1263,7 @@ snd_rme96_capture_adat_open(struct snd_pcm_substream *substream)
                 if (!isadat) {
                         return -EIO;
                 }
-                runtime->hw.rates = snd_rme96_ratecode(rate);
+                runtime->hw.rates = snd_pcm_rate_to_rate_bit(rate);
                 runtime->hw.rate_min = rate;
                 runtime->hw.rate_max = rate;
         }
@@ -1555,18 +1526,18 @@ snd_rme96_free(void *private_data)
 static void
 snd_rme96_free_spdif_pcm(struct snd_pcm *pcm)
 {
-	struct rme96 *rme96 = (struct rme96 *) pcm->private_data;
+	struct rme96 *rme96 = pcm->private_data;
 	rme96->spdif_pcm = NULL;
 }
 
 static void
 snd_rme96_free_adat_pcm(struct snd_pcm *pcm)
 {
-	struct rme96 *rme96 = (struct rme96 *) pcm->private_data;
+	struct rme96 *rme96 = pcm->private_data;
 	rme96->adat_pcm = NULL;
 }
 
-static int __devinit
+static int
 snd_rme96_create(struct rme96 *rme96)
 {
 	struct pci_dev *pci = rme96->pci;
@@ -1582,13 +1553,14 @@ snd_rme96_create(struct rme96 *rme96)
 		return err;
 	rme96->port = pci_resource_start(rme96->pci, 0);
 
-	if ((rme96->iobase = ioremap_nocache(rme96->port, RME96_IO_SIZE)) == 0) {
+	rme96->iobase = ioremap_nocache(rme96->port, RME96_IO_SIZE);
+	if (!rme96->iobase) {
 		snd_printk(KERN_ERR "unable to remap memory region 0x%lx-0x%lx\n", rme96->port, rme96->port + RME96_IO_SIZE - 1);
 		return -ENOMEM;
 	}
 
 	if (request_irq(pci->irq, snd_rme96_interrupt, IRQF_SHARED,
-			"RME96", rme96)) {
+			KBUILD_MODNAME, rme96)) {
 		snd_printk(KERN_ERR "unable to grab IRQ %d\n", pci->irq);
 		return -EBUSY;
 	}
@@ -1688,7 +1660,7 @@ static void
 snd_rme96_proc_read(struct snd_info_entry *entry, struct snd_info_buffer *buffer)
 {
 	int n;
-	struct rme96 *rme96 = (struct rme96 *)entry->private_data;
+	struct rme96 *rme96 = entry->private_data;
 	
 	rme96->rcreg = readl(rme96->iobase + RME96_IO_CONTROL_REGISTER);
 
@@ -1813,8 +1785,7 @@ snd_rme96_proc_read(struct snd_info_entry *entry, struct snd_info_buffer *buffer
 	}
 }
 
-static void __devinit 
-snd_rme96_proc_init(struct rme96 *rme96)
+static void snd_rme96_proc_init(struct rme96 *rme96)
 {
 	struct snd_info_entry *entry;
 
@@ -1826,15 +1797,8 @@ snd_rme96_proc_init(struct rme96 *rme96)
  * control interface
  */
 
-static int
-snd_rme96_info_loopback_control(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_info *uinfo)
-{
-	uinfo->type = SNDRV_CTL_ELEM_TYPE_BOOLEAN;
-	uinfo->count = 1;
-	uinfo->value.integer.min = 0;
-	uinfo->value.integer.max = 1;
-	return 0;
-}
+#define snd_rme96_info_loopback_control		snd_ctl_boolean_mono_info
+
 static int
 snd_rme96_get_loopback_control(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
 {
@@ -2224,22 +2188,25 @@ snd_rme96_dac_volume_put(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_valu
 {
 	struct rme96 *rme96 = snd_kcontrol_chip(kcontrol);
         int change = 0;
+	unsigned int vol, maxvol;
 
-	if (!RME96_HAS_ANALOG_OUT(rme96)) {
+
+	if (!RME96_HAS_ANALOG_OUT(rme96))
 		return -EINVAL;
-	}
+	maxvol = RME96_185X_MAX_OUT(rme96);
 	spin_lock_irq(&rme96->lock);
-        if (u->value.integer.value[0] != rme96->vol[0]) {
-		rme96->vol[0] = u->value.integer.value[0];
-                change = 1;
-        }
-        if (u->value.integer.value[1] != rme96->vol[1]) {
-		rme96->vol[1] = u->value.integer.value[1];
-                change = 1;
-        }
-	if (change) {
-		snd_rme96_apply_dac_volume(rme96);
+	vol = u->value.integer.value[0];
+	if (vol != rme96->vol[0] && vol <= maxvol) {
+		rme96->vol[0] = vol;
+		change = 1;
 	}
+	vol = u->value.integer.value[1];
+	if (vol != rme96->vol[1] && vol <= maxvol) {
+		rme96->vol[1] = vol;
+		change = 1;
+	}
+	if (change)
+		snd_rme96_apply_dac_volume(rme96);
 	spin_unlock_irq(&rme96->lock);
 
         return change;
@@ -2357,7 +2324,7 @@ static void snd_rme96_card_free(struct snd_card *card)
 	snd_rme96_free(card->private_data);
 }
 
-static int __devinit
+static int
 snd_rme96_probe(struct pci_dev *pci,
 		const struct pci_device_id *pci_id)
 {
@@ -2374,11 +2341,12 @@ snd_rme96_probe(struct pci_dev *pci,
 		dev++;
 		return -ENOENT;
 	}
-	if ((card = snd_card_new(index[dev], id[dev], THIS_MODULE,
-				 sizeof(struct rme96))) == NULL)
-		return -ENOMEM;
+	err = snd_card_create(index[dev], id[dev], THIS_MODULE,
+			      sizeof(struct rme96), &card);
+	if (err < 0)
+		return err;
 	card->private_free = snd_rme96_card_free;
-	rme96 = (struct rme96 *)card->private_data;	
+	rme96 = card->private_data;
 	rme96->card = card;
 	rme96->pci = pci;
 	snd_card_set_dev(card, &pci->dev);
@@ -2419,28 +2387,17 @@ snd_rme96_probe(struct pci_dev *pci,
 	return 0;
 }
 
-static void __devexit snd_rme96_remove(struct pci_dev *pci)
+static void snd_rme96_remove(struct pci_dev *pci)
 {
 	snd_card_free(pci_get_drvdata(pci));
 	pci_set_drvdata(pci, NULL);
 }
 
-static struct pci_driver driver = {
-	.name = "RME Digi96",
+static struct pci_driver rme96_driver = {
+	.name = KBUILD_MODNAME,
 	.id_table = snd_rme96_ids,
 	.probe = snd_rme96_probe,
-	.remove = __devexit_p(snd_rme96_remove),
+	.remove = snd_rme96_remove,
 };
 
-static int __init alsa_card_rme96_init(void)
-{
-	return pci_register_driver(&driver);
-}
-
-static void __exit alsa_card_rme96_exit(void)
-{
-	pci_unregister_driver(&driver);
-}
-
-module_init(alsa_card_rme96_init)
-module_exit(alsa_card_rme96_exit)
+module_pci_driver(rme96_driver);

@@ -2,8 +2,8 @@
 # Makefile for alpha-specific library files..
 #
 
-EXTRA_AFLAGS := $(CFLAGS)
-EXTRA_CFLAGS := -Werror
+asflags-y := $(KBUILD_CFLAGS)
+ccflags-y := -Werror
 
 # Many of these routines have implementations tuned for ev6.
 # Choose them iff we're targeting ev6 specifically.
@@ -31,8 +31,6 @@ lib-y =	__divqu.o __remqu.o __divlu.o __remlu.o \
 	$(ev6-y)memchr.o \
 	$(ev6-y)copy_user.o \
 	$(ev6-y)clear_user.o \
-	$(ev6-y)strncpy_from_user.o \
-	$(ev67-y)strlen_user.o \
 	$(ev6-y)csum_ipv6_magic.o \
 	$(ev6-y)clear_page.o \
 	$(ev6-y)copy_page.o \

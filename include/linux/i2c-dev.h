@@ -16,32 +16,13 @@
 
     You should have received a copy of the GNU General Public License
     along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+    Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
+    MA 02110-1301 USA.
 */
-
 #ifndef _LINUX_I2C_DEV_H
 #define _LINUX_I2C_DEV_H
 
-#include <linux/types.h>
-#include <linux/compiler.h>
+#include <uapi/linux/i2c-dev.h>
 
-/* Some IOCTL commands are defined in <linux/i2c.h> */
-/* Note: 10-bit addresses are NOT supported! */
-
-/* This is the structure as used in the I2C_SMBUS ioctl call */
-struct i2c_smbus_ioctl_data {
-	__u8 read_write;
-	__u8 command;
-	__u32 size;
-	union i2c_smbus_data __user *data;
-};
-
-/* This is the structure as used in the I2C_RDWR ioctl call */
-struct i2c_rdwr_ioctl_data {
-	struct i2c_msg __user *msgs;	/* pointers to i2c_msgs */
-	__u32 nmsgs;			/* number of i2c_msgs */
-};
-
-#define  I2C_RDRW_IOCTL_MAX_MSGS	42
-
+#define I2C_MAJOR	89		/* Device major number		*/
 #endif /* _LINUX_I2C_DEV_H */

@@ -1,6 +1,4 @@
 /*
- * $Id: sermouse.c,v 1.17 2002/03/13 10:03:43 vojtech Exp $
- *
  *  Copyright (c) 1999-2001 Vojtech Pavlik
  */
 
@@ -268,9 +266,10 @@ static int sermouse_connect(struct serio *serio, struct serio_driver *drv)
 	input_dev->id.version = 0x0100;
 	input_dev->dev.parent = &serio->dev;
 
-	input_dev->evbit[0] = BIT(EV_KEY) | BIT(EV_REL);
-	input_dev->keybit[LONG(BTN_MOUSE)] = BIT(BTN_LEFT) | BIT(BTN_RIGHT);
-	input_dev->relbit[0] = BIT(REL_X) | BIT(REL_Y);
+	input_dev->evbit[0] = BIT_MASK(EV_KEY) | BIT_MASK(EV_REL);
+	input_dev->keybit[BIT_WORD(BTN_MOUSE)] = BIT_MASK(BTN_LEFT) |
+		BIT_MASK(BTN_RIGHT);
+	input_dev->relbit[0] = BIT_MASK(REL_X) | BIT_MASK(REL_Y);
 
 	if (c & 0x01) set_bit(BTN_MIDDLE, input_dev->keybit);
 	if (c & 0x02) set_bit(BTN_SIDE, input_dev->keybit);
@@ -356,15 +355,4 @@ static struct serio_driver sermouse_drv = {
 	.disconnect	= sermouse_disconnect,
 };
 
-static int __init sermouse_init(void)
-{
-	return serio_register_driver(&sermouse_drv);
-}
-
-static void __exit sermouse_exit(void)
-{
-	serio_unregister_driver(&sermouse_drv);
-}
-
-module_init(sermouse_init);
-module_exit(sermouse_exit);
+module_serio_driver(sermouse_drv);

@@ -22,13 +22,18 @@
 #include <linux/parser.h>
 #include <linux/completion.h>
 #include <linux/vfs.h>
+#include <linux/quotaops.h>
 #include <linux/mount.h>
 #include <linux/moduleparam.h>
 #include <linux/kthread.h>
 #include <linux/posix_acl.h>
 #include <linux/buffer_head.h>
+#include <linux/exportfs.h>
+#include <linux/crc32.h>
+#include <linux/slab.h>
 #include <asm/uaccess.h>
 #include <linux/seq_file.h>
+#include <linux/blkdev.h>
 
 #include "jfs_incore.h"
 #include "jfs_filsys.h"
@@ -47,7 +52,7 @@ MODULE_LICENSE("GPL");
 static struct kmem_cache * jfs_inode_cachep;
 
 static const struct super_operations jfs_super_operations;
-static struct export_operations jfs_export_operations;
+static const struct export_operations jfs_export_operations;
 static struct file_system_type jfs_fs_type;
 
 #define MAX_COMMIT_THREADS 64
@@ -96,7 +101,7 @@ void jfs_error(struct super_block *sb, const char * function, ...)
 	vsnprintf(error_buf, sizeof(error_buf), function, args);
 	va_end(args);
 
-	printk(KERN_ERR "ERROR: (device %s): %s\n", sb->s_id, error_buf);
+	pr_err("ERROR: (device %s): %s\n", sb->s_id, error_buf);
 
 	jfs_handle_error(sb);
 }
@@ -109,6 +114,13 @@ static struct inode *jfs_alloc_inode(struct super_block *sb)
 	if (!jfs_inode)
 		return NULL;
 	return &jfs_inode->vfs_inode;
+}
+
+static void jfs_i_callback(struct rcu_head *head)
+{
+	struct inode *inode = container_of(head, struct inode, i_rcu);
+	struct jfs_inode_info *ji = JFS_IP(inode);
+	kmem_cache_free(jfs_inode_cachep, ji);
 }
 
 static void jfs_destroy_inode(struct inode *inode)
@@ -124,19 +136,7 @@ static void jfs_destroy_inode(struct inode *inode)
 		ji->active_ag = -1;
 	}
 	spin_unlock_irq(&ji->ag_lock);
-
-#ifdef CONFIG_JFS_POSIX_ACL
-	if (ji->i_acl != JFS_ACL_NOT_CACHED) {
-		posix_acl_release(ji->i_acl);
-		ji->i_acl = JFS_ACL_NOT_CACHED;
-	}
-	if (ji->i_default_acl != JFS_ACL_NOT_CACHED) {
-		posix_acl_release(ji->i_default_acl);
-		ji->i_default_acl = JFS_ACL_NOT_CACHED;
-	}
-#endif
-
-	kmem_cache_free(jfs_inode_cachep, ji);
+	call_rcu(&inode->i_rcu, jfs_i_callback);
 }
 
 static int jfs_statfs(struct dentry *dentry, struct kstatfs *buf)
@@ -166,6 +166,9 @@ static int jfs_statfs(struct dentry *dentry, struct kstatfs *buf)
 	buf->f_files = maxinodes;
 	buf->f_ffree = maxinodes - (atomic_read(&imap->im_numinos) -
 				    atomic_read(&imap->im_numfree));
+	buf->f_fsid.val[0] = (u32)crc32_le(0, sbi->uuid, sizeof(sbi->uuid)/2);
+	buf->f_fsid.val[1] = (u32)crc32_le(0, sbi->uuid + sizeof(sbi->uuid)/2,
+					sizeof(sbi->uuid)/2);
 
 	buf->f_namelen = JFS_NAME_MAX;
 	return 0;
@@ -177,16 +180,17 @@ static void jfs_put_super(struct super_block *sb)
 	int rc;
 
 	jfs_info("In jfs_put_super");
+
+	dquot_disable(sb, -1, DQUOT_USAGE_ENABLED | DQUOT_LIMITS_ENABLED);
+
 	rc = jfs_umount(sb);
 	if (rc)
 		jfs_err("jfs_umount failed with return code %d", rc);
-	if (sbi->nls_tab)
-		unload_nls(sbi->nls_tab);
-	sbi->nls_tab = NULL;
+
+	unload_nls(sbi->nls_tab);
 
 	truncate_inode_pages(sbi->direct_inode->i_mapping, 0);
 	iput(sbi->direct_inode);
-	sbi->direct_inode = NULL;
 
 	kfree(sbi);
 }
@@ -194,10 +198,11 @@ static void jfs_put_super(struct super_block *sb)
 enum {
 	Opt_integrity, Opt_nointegrity, Opt_iocharset, Opt_resize,
 	Opt_resize_nosize, Opt_errors, Opt_ignore, Opt_err, Opt_quota,
-	Opt_usrquota, Opt_grpquota, Opt_uid, Opt_gid, Opt_umask
+	Opt_usrquota, Opt_grpquota, Opt_uid, Opt_gid, Opt_umask,
+	Opt_discard, Opt_nodiscard, Opt_discard_minblk
 };
 
-static match_table_t tokens = {
+static const match_table_t tokens = {
 	{Opt_integrity, "integrity"},
 	{Opt_nointegrity, "nointegrity"},
 	{Opt_iocharset, "iocharset=%s"},
@@ -211,6 +216,9 @@ static match_table_t tokens = {
 	{Opt_uid, "uid=%u"},
 	{Opt_gid, "gid=%u"},
 	{Opt_umask, "umask=%u"},
+	{Opt_discard, "discard"},
+	{Opt_nodiscard, "nodiscard"},
+	{Opt_discard_minblk, "discard=%u"},
 	{Opt_err, NULL}
 };
 
@@ -252,8 +260,7 @@ static int parse_options(char *options, struct super_block *sb, s64 *newLVSize,
 			else {
 				nls_map = load_nls(args[0].from);
 				if (!nls_map) {
-					printk(KERN_ERR
-					       "JFS: charset not found\n");
+					pr_err("JFS: charset not found\n");
 					goto cleanup;
 				}
 			}
@@ -269,8 +276,7 @@ static int parse_options(char *options, struct super_block *sb, s64 *newLVSize,
 			*newLVSize = sb->s_bdev->bd_inode->i_size >>
 				sb->s_blocksize_bits;
 			if (*newLVSize == 0)
-				printk(KERN_ERR
-				       "JFS: Cannot determine volume size\n");
+				pr_err("JFS: Cannot determine volume size\n");
 			break;
 		}
 		case Opt_errors:
@@ -291,8 +297,7 @@ static int parse_options(char *options, struct super_block *sb, s64 *newLVSize,
 				*flag &= ~JFS_ERR_REMOUNT_RO;
 				*flag |= JFS_ERR_PANIC;
 			} else {
-				printk(KERN_ERR
-				       "JFS: %s is an invalid error handler\n",
+				pr_err("JFS: %s is an invalid error handler\n",
 				       errors);
 				goto cleanup;
 			}
@@ -311,33 +316,76 @@ static int parse_options(char *options, struct super_block *sb, s64 *newLVSize,
 		case Opt_usrquota:
 		case Opt_grpquota:
 		case Opt_quota:
-			printk(KERN_ERR
-			       "JFS: quota operations not supported\n");
+			pr_err("JFS: quota operations not supported\n");
 			break;
 #endif
 		case Opt_uid:
 		{
 			char *uid = args[0].from;
-			sbi->uid = simple_strtoul(uid, &uid, 0);
+			uid_t val = simple_strtoul(uid, &uid, 0);
+			sbi->uid = make_kuid(current_user_ns(), val);
+			if (!uid_valid(sbi->uid))
+				goto cleanup;
 			break;
 		}
+
 		case Opt_gid:
 		{
 			char *gid = args[0].from;
-			sbi->gid = simple_strtoul(gid, &gid, 0);
+			gid_t val = simple_strtoul(gid, &gid, 0);
+			sbi->gid = make_kgid(current_user_ns(), val);
+			if (!gid_valid(sbi->gid))
+				goto cleanup;
 			break;
 		}
+
 		case Opt_umask:
 		{
 			char *umask = args[0].from;
 			sbi->umask = simple_strtoul(umask, &umask, 8);
 			if (sbi->umask & ~0777) {
-				printk(KERN_ERR
-				       "JFS: Invalid value of umask\n");
+				pr_err("JFS: Invalid value of umask\n");
 				goto cleanup;
 			}
 			break;
 		}
+
+		case Opt_discard:
+		{
+			struct request_queue *q = bdev_get_queue(sb->s_bdev);
+			/* if set to 1, even copying files will cause
+			 * trimming :O
+			 * -> user has more control over the online trimming
+			 */
+			sbi->minblks_trim = 64;
+			if (blk_queue_discard(q)) {
+				*flag |= JFS_DISCARD;
+			} else {
+				pr_err("JFS: discard option " \
+					"not supported on device\n");
+			}
+			break;
+		}
+
+		case Opt_nodiscard:
+			*flag &= ~JFS_DISCARD;
+			break;
+
+		case Opt_discard_minblk:
+		{
+			struct request_queue *q = bdev_get_queue(sb->s_bdev);
+			char *minblks_trim = args[0].from;
+			if (blk_queue_discard(q)) {
+				*flag |= JFS_DISCARD;
+				sbi->minblks_trim = simple_strtoull(
+					minblks_trim, &minblks_trim, 0);
+			} else {
+				pr_err("JFS: discard option " \
+					"not supported on device\n");
+			}
+			break;
+		}
+
 		default:
 			printk("jfs: Unrecognized mount option \"%s\" "
 					" or missing value\n", p);
@@ -347,8 +395,7 @@ static int parse_options(char *options, struct super_block *sb, s64 *newLVSize,
 
 	if (nls_map != (void *) -1) {
 		/* Discard old (if remount) */
-		if (sbi->nls_tab)
-			unload_nls(sbi->nls_tab);
+		unload_nls(sbi->nls_tab);
 		sbi->nls_tab = nls_map;
 	}
 	return 1;
@@ -364,14 +411,16 @@ static int jfs_remount(struct super_block *sb, int *flags, char *data)
 	s64 newLVSize = 0;
 	int rc = 0;
 	int flag = JFS_SBI(sb)->flag;
+	int ret;
 
 	if (!parse_options(data, sb, &newLVSize, &flag)) {
 		return -EINVAL;
 	}
+
 	if (newLVSize) {
 		if (sb->s_flags & MS_RDONLY) {
-			printk(KERN_ERR
-		  "JFS: resize requires volume to be mounted read-write\n");
+			pr_err("JFS: resize requires volume" \
+				" to be mounted read-write\n");
 			return -EROFS;
 		}
 		rc = jfs_extendfs(sb, newLVSize, 0);
@@ -387,9 +436,19 @@ static int jfs_remount(struct super_block *sb, int *flags, char *data)
 		truncate_inode_pages(JFS_SBI(sb)->direct_inode->i_mapping, 0);
 
 		JFS_SBI(sb)->flag = flag;
-		return jfs_mount_rw(sb, 1);
+		ret = jfs_mount_rw(sb, 1);
+
+		/* mark the fs r/w for quota activity */
+		sb->s_flags &= ~MS_RDONLY;
+
+		dquot_resume(sb, -1);
+		return ret;
 	}
 	if ((!(sb->s_flags & MS_RDONLY)) && (*flags & MS_RDONLY)) {
+		rc = dquot_suspend(sb, -1);
+		if (rc < 0) {
+			return rc;
+		}
 		rc = jfs_umount_rw(sb);
 		JFS_SBI(sb)->flag = flag;
 		return rc;
@@ -399,8 +458,10 @@ static int jfs_remount(struct super_block *sb, int *flags, char *data)
 			rc = jfs_umount_rw(sb);
 			if (rc)
 				return rc;
+
 			JFS_SBI(sb)->flag = flag;
-			return jfs_mount_rw(sb, 1);
+			ret = jfs_mount_rw(sb, 1);
+			return ret;
 		}
 	JFS_SBI(sb)->flag = flag;
 
@@ -413,7 +474,7 @@ static int jfs_fill_super(struct super_block *sb, void *data, int silent)
 	struct inode *inode;
 	int rc;
 	s64 newLVSize = 0;
-	int flag;
+	int flag, ret = -EINVAL;
 
 	jfs_info("In jfs_read_super: s_flags=0x%lx", sb->s_flags);
 
@@ -423,17 +484,19 @@ static int jfs_fill_super(struct super_block *sb, void *data, int silent)
 	sbi = kzalloc(sizeof (struct jfs_sb_info), GFP_KERNEL);
 	if (!sbi)
 		return -ENOMEM;
+
 	sb->s_fs_info = sbi;
+	sb->s_max_links = JFS_LINK_MAX;
 	sbi->sb = sb;
-	sbi->uid = sbi->gid = sbi->umask = -1;
+	sbi->uid = INVALID_UID;
+	sbi->gid = INVALID_GID;
+	sbi->umask = -1;
 
 	/* initialize the mount flag and determine the default error handler */
 	flag = JFS_ERR_REMOUNT_RO;
 
-	if (!parse_options((char *) data, sb, &newLVSize, &flag)) {
-		kfree(sbi);
-		return -EINVAL;
-	}
+	if (!parse_options((char *) data, sb, &newLVSize, &flag))
+		goto out_kfree;
 	sbi->flag = flag;
 
 #ifdef CONFIG_JFS_POSIX_ACL
@@ -441,8 +504,8 @@ static int jfs_fill_super(struct super_block *sb, void *data, int silent)
 #endif
 
 	if (newLVSize) {
-		printk(KERN_ERR "resize option for remount only\n");
-		return -EINVAL;
+		pr_err("resize option for remount only\n");
+		goto out_kfree;
 	}
 
 	/*
@@ -455,15 +518,20 @@ static int jfs_fill_super(struct super_block *sb, void *data, int silent)
 	 */
 	sb->s_op = &jfs_super_operations;
 	sb->s_export_op = &jfs_export_operations;
+#ifdef CONFIG_QUOTA
+	sb->dq_op = &dquot_operations;
+	sb->s_qcop = &dquot_quotactl_ops;
+#endif
 
 	/*
 	 * Initialize direct-mapping inode/address-space
 	 */
 	inode = new_inode(sb);
-	if (inode == NULL)
-		goto out_kfree;
+	if (inode == NULL) {
+		ret = -ENOMEM;
+		goto out_unload;
+	}
 	inode->i_ino = 0;
-	inode->i_nlink = 1;
 	inode->i_size = sb->s_bdev->bd_inode->i_size;
 	inode->i_mapping->a_ops = &jfs_metapage_aops;
 	insert_inode_hash(inode);
@@ -493,15 +561,17 @@ static int jfs_fill_super(struct super_block *sb, void *data, int silent)
 
 	sb->s_magic = JFS_SUPER_MAGIC;
 
-	inode = iget(sb, ROOT_I);
-	if (!inode || is_bad_inode(inode))
-		goto out_no_root;
-	sb->s_root = d_alloc_root(inode);
+	if (sbi->mntflag & JFS_OS2)
+		sb->s_d_op = &jfs_ci_dentry_operations;
+
+	inode = jfs_iget(sb, ROOT_I);
+	if (IS_ERR(inode)) {
+		ret = PTR_ERR(inode);
+		goto out_no_rw;
+	}
+	sb->s_root = d_make_root(inode);
 	if (!sb->s_root)
 		goto out_no_root;
-
-	if (sbi->mntflag & JFS_OS2)
-		sb->s_root->d_op = &jfs_ci_dentry_operations;
 
 	/* logical blocks are represented by 40 bits in pxd_t, etc. */
 	sb->s_maxbytes = ((u64) sb->s_blocksize) << 40;
@@ -510,15 +580,13 @@ static int jfs_fill_super(struct super_block *sb, void *data, int silent)
 	 * Page cache is indexed by long.
 	 * I would use MAX_LFS_FILESIZE, but it's only half as big
 	 */
-	sb->s_maxbytes = min(((u64) PAGE_CACHE_SIZE << 32) - 1, sb->s_maxbytes);
+	sb->s_maxbytes = min(((u64) PAGE_CACHE_SIZE << 32) - 1, (u64)sb->s_maxbytes);
 #endif
 	sb->s_time_gran = 1;
 	return 0;
 
 out_no_root:
-	jfs_err("jfs_read_super: get root inode failed");
-	if (inode)
-		iput(inode);
+	jfs_err("jfs_read_super: get root dentry failed");
 
 out_no_rw:
 	rc = jfs_umount(sb);
@@ -531,14 +599,15 @@ out_mount_failed:
 	make_bad_inode(sbi->direct_inode);
 	iput(sbi->direct_inode);
 	sbi->direct_inode = NULL;
-out_kfree:
+out_unload:
 	if (sbi->nls_tab)
 		unload_nls(sbi->nls_tab);
+out_kfree:
 	kfree(sbi);
-	return -EINVAL;
+	return ret;
 }
 
-static void jfs_write_super_lockfs(struct super_block *sb)
+static int jfs_freeze(struct super_block *sb)
 {
 	struct jfs_sb_info *sbi = JFS_SBI(sb);
 	struct jfs_log *log = sbi->log;
@@ -548,9 +617,10 @@ static void jfs_write_super_lockfs(struct super_block *sb)
 		lmLogShutdown(log);
 		updateSuper(sb, FM_CLEAN);
 	}
+	return 0;
 }
 
-static void jfs_unlockfs(struct super_block *sb)
+static int jfs_unfreeze(struct super_block *sb)
 {
 	struct jfs_sb_info *sbi = JFS_SBI(sb);
 	struct jfs_log *log = sbi->log;
@@ -563,13 +633,13 @@ static void jfs_unlockfs(struct super_block *sb)
 		else
 			txResume(sb);
 	}
+	return 0;
 }
 
-static int jfs_get_sb(struct file_system_type *fs_type,
-	int flags, const char *dev_name, void *data, struct vfsmount *mnt)
+static struct dentry *jfs_do_mount(struct file_system_type *fs_type,
+	int flags, const char *dev_name, void *data)
 {
-	return get_sb_bdev(fs_type, flags, dev_name, data, jfs_fill_super,
-			   mnt);
+	return mount_bdev(fs_type, flags, dev_name, data, jfs_fill_super);
 }
 
 static int jfs_sync_fs(struct super_block *sb, int wait)
@@ -578,6 +648,11 @@ static int jfs_sync_fs(struct super_block *sb, int wait)
 
 	/* log == NULL indicates read-only mount */
 	if (log) {
+		/*
+		 * Write quota structures to quota file, sync_blockdev() will
+		 * write them to disk later
+		 */
+		dquot_writeback_dquots(sb, -1);
 		jfs_flush_journal(log, wait);
 		jfs_syncpt(log, 0);
 	}
@@ -585,18 +660,26 @@ static int jfs_sync_fs(struct super_block *sb, int wait)
 	return 0;
 }
 
-static int jfs_show_options(struct seq_file *seq, struct vfsmount *vfs)
+static int jfs_show_options(struct seq_file *seq, struct dentry *root)
 {
-	struct jfs_sb_info *sbi = JFS_SBI(vfs->mnt_sb);
+	struct jfs_sb_info *sbi = JFS_SBI(root->d_sb);
 
-	if (sbi->uid != -1)
-		seq_printf(seq, ",uid=%d", sbi->uid);
-	if (sbi->gid != -1)
-		seq_printf(seq, ",gid=%d", sbi->gid);
+	if (uid_valid(sbi->uid))
+		seq_printf(seq, ",uid=%d", from_kuid(&init_user_ns, sbi->uid));
+	if (gid_valid(sbi->gid))
+		seq_printf(seq, ",gid=%d", from_kgid(&init_user_ns, sbi->gid));
 	if (sbi->umask != -1)
 		seq_printf(seq, ",umask=%03o", sbi->umask);
 	if (sbi->flag & JFS_NOINTEGRITY)
 		seq_puts(seq, ",nointegrity");
+	if (sbi->flag & JFS_DISCARD)
+		seq_printf(seq, ",discard=%u", sbi->minblks_trim);
+	if (sbi->nls_tab)
+		seq_printf(seq, ",iocharset=%s", sbi->nls_tab->charset);
+	if (sbi->flag & JFS_ERR_CONTINUE)
+		seq_printf(seq, ",errors=continue");
+	if (sbi->flag & JFS_ERR_PANIC)
+		seq_printf(seq, ",errors=panic");
 
 #ifdef CONFIG_QUOTA
 	if (sbi->flag & JFS_USRQUOTA)
@@ -613,7 +696,7 @@ static int jfs_show_options(struct seq_file *seq, struct vfsmount *vfs)
 
 /* Read data from quotafile - avoid pagecache and such because we cannot afford
  * acquiring the locks... As quota files are never truncated and quota code
- * itself serializes the operations (and noone else should touch the files)
+ * itself serializes the operations (and no one else should touch the files)
  * we don't have to be afraid of races */
 static ssize_t jfs_quota_read(struct super_block *sb, int type, char *data,
 			      size_t len, loff_t off)
@@ -703,8 +786,10 @@ static ssize_t jfs_quota_write(struct super_block *sb, int type,
 		blk++;
 	}
 out:
-	if (len == towrite)
+	if (len == towrite) {
+		mutex_unlock(&inode->i_mutex);
 		return err;
+	}
 	if (inode->i_size < off+len-towrite)
 		i_size_write(inode, off+len-towrite);
 	inode->i_version++;
@@ -719,14 +804,13 @@ out:
 static const struct super_operations jfs_super_operations = {
 	.alloc_inode	= jfs_alloc_inode,
 	.destroy_inode	= jfs_destroy_inode,
-	.read_inode	= jfs_read_inode,
 	.dirty_inode	= jfs_dirty_inode,
 	.write_inode	= jfs_write_inode,
-	.delete_inode	= jfs_delete_inode,
+	.evict_inode	= jfs_evict_inode,
 	.put_super	= jfs_put_super,
 	.sync_fs	= jfs_sync_fs,
-	.write_super_lockfs = jfs_write_super_lockfs,
-	.unlockfs       = jfs_unlockfs,
+	.freeze_fs	= jfs_freeze,
+	.unfreeze_fs	= jfs_unfreeze,
 	.statfs		= jfs_statfs,
 	.remount_fs	= jfs_remount,
 	.show_options	= jfs_show_options,
@@ -736,19 +820,21 @@ static const struct super_operations jfs_super_operations = {
 #endif
 };
 
-static struct export_operations jfs_export_operations = {
+static const struct export_operations jfs_export_operations = {
+	.fh_to_dentry	= jfs_fh_to_dentry,
+	.fh_to_parent	= jfs_fh_to_parent,
 	.get_parent	= jfs_get_parent,
 };
 
 static struct file_system_type jfs_fs_type = {
 	.owner		= THIS_MODULE,
 	.name		= "jfs",
-	.get_sb		= jfs_get_sb,
+	.mount		= jfs_do_mount,
 	.kill_sb	= kill_block_super,
 	.fs_flags	= FS_REQUIRES_DEV,
 };
 
-static void init_once(void *foo, struct kmem_cache * cachep, unsigned long flags)
+static void init_once(void *foo)
 {
 	struct jfs_inode_info *jfs_ip = (struct jfs_inode_info *) foo;
 
@@ -759,10 +845,6 @@ static void init_once(void *foo, struct kmem_cache * cachep, unsigned long flags
 	init_rwsem(&jfs_ip->xattr_sem);
 	spin_lock_init(&jfs_ip->ag_lock);
 	jfs_ip->active_ag = -1;
-#ifdef CONFIG_JFS_POSIX_ACL
-	jfs_ip->i_acl = JFS_ACL_NOT_CACHED;
-	jfs_ip->i_default_acl = JFS_ACL_NOT_CACHED;
-#endif
 	inode_init_once(&jfs_ip->vfs_inode);
 }
 
@@ -774,7 +856,7 @@ static int __init init_jfs_fs(void)
 	jfs_inode_cachep =
 	    kmem_cache_create("jfs_ip", sizeof(struct jfs_inode_info), 0,
 			    SLAB_RECLAIM_ACCOUNT|SLAB_MEM_SPREAD,
-			    init_once, NULL);
+			    init_once);
 	if (jfs_inode_cachep == NULL)
 		return -ENOMEM;
 
@@ -832,8 +914,14 @@ static int __init init_jfs_fs(void)
 	jfs_proc_init();
 #endif
 
-	return register_filesystem(&jfs_fs_type);
+	rc = register_filesystem(&jfs_fs_type);
+	if (!rc)
+		return 0;
 
+#ifdef PROC_FS_JFS
+	jfs_proc_clean();
+#endif
+	kthread_stop(jfsSyncThread);
 kill_committask:
 	for (i = 0; i < commit_threads; i++)
 		kthread_stop(jfsCommitThread[i]);
@@ -864,6 +952,12 @@ static void __exit exit_jfs_fs(void)
 	jfs_proc_clean();
 #endif
 	unregister_filesystem(&jfs_fs_type);
+
+	/*
+	 * Make sure all delayed rcu free inodes are flushed before we
+	 * destroy cache.
+	 */
+	rcu_barrier();
 	kmem_cache_destroy(jfs_inode_cachep);
 }
 

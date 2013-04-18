@@ -1,8 +1,8 @@
-/* 
+/*
  * Copyright 2000 by Hans Reiser, licensing governed by reiserfs/README
  */
 
-/* 
+/*
  * Written by Alexander Zarochentcev.
  *
  * The kernel part of the (on-line) reiserfs resizer.
@@ -13,8 +13,7 @@
 #include <linux/vmalloc.h>
 #include <linux/string.h>
 #include <linux/errno.h>
-#include <linux/reiserfs_fs.h>
-#include <linux/reiserfs_fs_sb.h>
+#include "reiserfs.h"
 #include <linux/buffer_head.h>
 
 int reiserfs_resize(struct super_block *s, unsigned long block_count_new)
@@ -61,7 +60,8 @@ int reiserfs_resize(struct super_block *s, unsigned long block_count_new)
 	}
 
 	/* count used bits in last bitmap block */
-	block_r = SB_BLOCK_COUNT(s) - (SB_BMAP_NR(s) - 1) * s->s_blocksize * 8;
+	block_r = SB_BLOCK_COUNT(s) -
+			(reiserfs_bmap_count(s) - 1) * s->s_blocksize * 8;
 
 	/* count bitmap blocks in new fs */
 	bmap_nr_new = block_count_new / (s->s_blocksize * 8);
@@ -73,7 +73,7 @@ int reiserfs_resize(struct super_block *s, unsigned long block_count_new)
 
 	/* save old values */
 	block_count = SB_BLOCK_COUNT(s);
-	bmap_nr = SB_BMAP_NR(s);
+	bmap_nr = reiserfs_bmap_count(s);
 
 	/* resizing of reiserfs bitmaps (journal and real), if needed */
 	if (bmap_nr_new > bmap_nr) {
@@ -81,7 +81,6 @@ int reiserfs_resize(struct super_block *s, unsigned long block_count_new)
 		if (reiserfs_allocate_list_bitmaps(s, jbitmap, bmap_nr_new) < 0) {
 			printk
 			    ("reiserfs_resize: unable to allocate memory for journal bitmaps\n");
-			unlock_super(s);
 			return -ENOMEM;
 		}
 		/* the new journal bitmaps are zero filled, now we copy in the bitmap
@@ -100,7 +99,7 @@ int reiserfs_resize(struct super_block *s, unsigned long block_count_new)
 			memcpy(jbitmap[i].bitmaps, jb->bitmaps, copy_size);
 
 			/* just in case vfree schedules on us, copy the new
-			 ** pointer into the journal struct before freeing the 
+			 ** pointer into the journal struct before freeing the
 			 ** old one
 			 */
 			node_tmp = jb->bitmaps;
@@ -111,15 +110,13 @@ int reiserfs_resize(struct super_block *s, unsigned long block_count_new)
 		/* allocate additional bitmap blocks, reallocate array of bitmap
 		 * block pointers */
 		bitmap =
-		    vmalloc(sizeof(struct reiserfs_bitmap_info) * bmap_nr_new);
+		    vzalloc(sizeof(struct reiserfs_bitmap_info) * bmap_nr_new);
 		if (!bitmap) {
 			/* Journal bitmaps are still supersized, but the memory isn't
 			 * leaked, so I guess it's ok */
 			printk("reiserfs_resize: unable to allocate memory.\n");
 			return -ENOMEM;
 		}
-		memset(bitmap, 0,
-		       sizeof(struct reiserfs_bitmap_info) * SB_BMAP_NR(s));
 		for (i = 0; i < bmap_nr; i++)
 			bitmap[i] = old_bitmap[i];
 
@@ -136,14 +133,15 @@ int reiserfs_resize(struct super_block *s, unsigned long block_count_new)
 				return -EIO;
 			}
 			memset(bh->b_data, 0, sb_blocksize(sb));
-			reiserfs_test_and_set_le_bit(0, bh->b_data);
+			reiserfs_set_le_bit(0, bh->b_data);
 			reiserfs_cache_bitmap_metadata(s, bh, bitmap + i);
 
 			set_buffer_uptodate(bh);
 			mark_buffer_dirty(bh);
+			reiserfs_write_unlock(s);
 			sync_dirty_buffer(bh);
+			reiserfs_write_lock(s);
 			// update bitmap_info stuff
-			bitmap[i].first_zero_hint = 1;
 			bitmap[i].free_count = sb_blocksize(sb) * 8 - 1;
 			brelse(bh);
 		}
@@ -171,10 +169,8 @@ int reiserfs_resize(struct super_block *s, unsigned long block_count_new)
 
 	reiserfs_prepare_for_journal(s, bh, 1);
 	for (i = block_r; i < s->s_blocksize * 8; i++)
-		reiserfs_test_and_clear_le_bit(i, bh->b_data);
+		reiserfs_clear_le_bit(i, bh->b_data);
 	info->free_count += s->s_blocksize * 8 - block_r;
-	if (!info->first_zero_hint)
-		info->first_zero_hint = block_r;
 
 	journal_mark_dirty(&th, s, bh);
 	brelse(bh);
@@ -191,14 +187,11 @@ int reiserfs_resize(struct super_block *s, unsigned long block_count_new)
 
 	reiserfs_prepare_for_journal(s, bh, 1);
 	for (i = block_r_new; i < s->s_blocksize * 8; i++)
-		reiserfs_test_and_set_le_bit(i, bh->b_data);
+		reiserfs_set_le_bit(i, bh->b_data);
 	journal_mark_dirty(&th, s, bh);
 	brelse(bh);
 
 	info->free_count -= s->s_blocksize * 8 - block_r_new;
-	/* Extreme case where last bitmap is the only valid block in itself. */
-	if (!info->free_count)
-		info->first_zero_hint = 0;
 	/* update super */
 	reiserfs_prepare_for_journal(s, SB_BUFFER_WITH_SB(s), 1);
 	free_blocks = SB_FREE_BLOCKS(s);
@@ -206,8 +199,7 @@ int reiserfs_resize(struct super_block *s, unsigned long block_count_new)
 			   free_blocks + (block_count_new - block_count -
 					  (bmap_nr_new - bmap_nr)));
 	PUT_SB_BLOCK_COUNT(s, block_count_new);
-	PUT_SB_BMAP_NR(s, bmap_nr_new);
-	s->s_dirt = 1;
+	PUT_SB_BMAP_NR(s, bmap_would_wrap(bmap_nr_new) ? : bmap_nr_new);
 
 	journal_mark_dirty(&th, s, SB_BUFFER_WITH_SB(s));
 

@@ -1,7 +1,7 @@
 /*
  * max1619.c - Part of lm_sensors, Linux kernel modules for hardware
  *             monitoring
- * Copyright (C) 2003-2004 Alexey Fisher <fishor@mail.ru>
+ * Copyright (C) 2003-2004 Oleksij Rempel <bug-track@fisher-privat.net>
  *                         Jean Delvare <khali@linux-fr.org>
  *
  * Based on the lm90 driver. The MAX1619 is a sensor chip made by Maxim.
@@ -32,20 +32,13 @@
 #include <linux/jiffies.h>
 #include <linux/i2c.h>
 #include <linux/hwmon.h>
+#include <linux/hwmon-sysfs.h>
 #include <linux/err.h>
 #include <linux/mutex.h>
 #include <linux/sysfs.h>
 
-static unsigned short normal_i2c[] = { 0x18, 0x19, 0x1a,
-					0x29, 0x2a, 0x2b,
-					0x4c, 0x4d, 0x4e,
-					I2C_CLIENT_END };
-
-/*
- * Insmod parameters
- */
-
-I2C_CLIENT_INSMOD_1(max1619);
+static const unsigned short normal_i2c[] = {
+	0x18, 0x19, 0x1a, 0x29, 0x2a, 0x2b, 0x4c, 0x4d, 0x4e, I2C_CLIENT_END };
 
 /*
  * The MAX1619 registers
@@ -70,33 +63,51 @@ I2C_CLIENT_INSMOD_1(max1619);
 #define MAX1619_REG_W_TCRIT_HYST	0x13
 
 /*
- * Conversions and various macros
+ * Conversions
  */
 
-#define TEMP_FROM_REG(val)	((val & 0x80 ? val-0x100 : val) * 1000)
-#define TEMP_TO_REG(val)	((val < 0 ? val+0x100*1000 : val) / 1000)
+static int temp_from_reg(int val)
+{
+	return (val & 0x80 ? val-0x100 : val) * 1000;
+}
+
+static int temp_to_reg(int val)
+{
+	return (val < 0 ? val+0x100*1000 : val) / 1000;
+}
 
 /*
  * Functions declaration
  */
 
-static int max1619_attach_adapter(struct i2c_adapter *adapter);
-static int max1619_detect(struct i2c_adapter *adapter, int address,
-	int kind);
+static int max1619_probe(struct i2c_client *client,
+			 const struct i2c_device_id *id);
+static int max1619_detect(struct i2c_client *client,
+			  struct i2c_board_info *info);
 static void max1619_init_client(struct i2c_client *client);
-static int max1619_detach_client(struct i2c_client *client);
+static int max1619_remove(struct i2c_client *client);
 static struct max1619_data *max1619_update_device(struct device *dev);
 
 /*
  * Driver data (common to all clients)
  */
 
+static const struct i2c_device_id max1619_id[] = {
+	{ "max1619", 0 },
+	{ }
+};
+MODULE_DEVICE_TABLE(i2c, max1619_id);
+
 static struct i2c_driver max1619_driver = {
+	.class		= I2C_CLASS_HWMON,
 	.driver = {
 		.name	= "max1619",
 	},
-	.attach_adapter	= max1619_attach_adapter,
-	.detach_client	= max1619_detach_client,
+	.probe		= max1619_probe,
+	.remove		= max1619_remove,
+	.id_table	= max1619_id,
+	.detect		= max1619_detect,
+	.address_list	= normal_i2c,
 };
 
 /*
@@ -104,8 +115,7 @@ static struct i2c_driver max1619_driver = {
  */
 
 struct max1619_data {
-	struct i2c_client client;
-	struct class_device *class_dev;
+	struct device *hwmon_dev;
 	struct mutex update_lock;
 	char valid; /* zero until following fields are valid */
 	unsigned long last_updated; /* in jiffies */
@@ -115,7 +125,7 @@ struct max1619_data {
 	u8 temp_input2, temp_low2, temp_high2; /* remote */
 	u8 temp_crit2;
 	u8 temp_hyst2;
-	u8 alarms; 
+	u8 alarms;
 };
 
 /*
@@ -123,10 +133,11 @@ struct max1619_data {
  */
 
 #define show_temp(value) \
-static ssize_t show_##value(struct device *dev, struct device_attribute *attr, char *buf) \
+static ssize_t show_##value(struct device *dev, struct device_attribute *attr, \
+			    char *buf) \
 { \
 	struct max1619_data *data = max1619_update_device(dev); \
-	return sprintf(buf, "%d\n", TEMP_FROM_REG(data->value)); \
+	return sprintf(buf, "%d\n", temp_from_reg(data->value)); \
 }
 show_temp(temp_input1);
 show_temp(temp_input2);
@@ -136,15 +147,19 @@ show_temp(temp_crit2);
 show_temp(temp_hyst2);
 
 #define set_temp2(value, reg) \
-static ssize_t set_##value(struct device *dev, struct device_attribute *attr, const char *buf, \
+static ssize_t set_##value(struct device *dev, struct device_attribute *attr, \
+			   const char *buf, \
 	size_t count) \
 { \
 	struct i2c_client *client = to_i2c_client(dev); \
 	struct max1619_data *data = i2c_get_clientdata(client); \
-	long val = simple_strtol(buf, NULL, 10); \
- \
+	long val; \
+	int err = kstrtol(buf, 10, &val); \
+	if (err) \
+		return err; \
+\
 	mutex_lock(&data->update_lock); \
-	data->value = TEMP_TO_REG(val); \
+	data->value = temp_to_reg(val); \
 	i2c_smbus_write_byte_data(client, reg, data->value); \
 	mutex_unlock(&data->update_lock); \
 	return count; \
@@ -155,10 +170,19 @@ set_temp2(temp_high2, MAX1619_REG_W_REMOTE_HIGH);
 set_temp2(temp_crit2, MAX1619_REG_W_REMOTE_CRIT);
 set_temp2(temp_hyst2, MAX1619_REG_W_TCRIT_HYST);
 
-static ssize_t show_alarms(struct device *dev, struct device_attribute *attr, char *buf)
+static ssize_t show_alarms(struct device *dev, struct device_attribute *attr,
+			   char *buf)
 {
 	struct max1619_data *data = max1619_update_device(dev);
 	return sprintf(buf, "%d\n", data->alarms);
+}
+
+static ssize_t show_alarm(struct device *dev, struct device_attribute *attr,
+			  char *buf)
+{
+	int bitnr = to_sensor_dev_attr(attr)->index;
+	struct max1619_data *data = max1619_update_device(dev);
+	return sprintf(buf, "%d\n", (data->alarms >> bitnr) & 1);
 }
 
 static DEVICE_ATTR(temp1_input, S_IRUGO, show_temp_input1, NULL);
@@ -172,6 +196,10 @@ static DEVICE_ATTR(temp2_crit, S_IWUSR | S_IRUGO, show_temp_crit2,
 static DEVICE_ATTR(temp2_crit_hyst, S_IWUSR | S_IRUGO, show_temp_hyst2,
 	set_temp_hyst2);
 static DEVICE_ATTR(alarms, S_IRUGO, show_alarms, NULL);
+static SENSOR_DEVICE_ATTR(temp2_crit_alarm, S_IRUGO, show_alarm, NULL, 1);
+static SENSOR_DEVICE_ATTR(temp2_fault, S_IRUGO, show_alarm, NULL, 2);
+static SENSOR_DEVICE_ATTR(temp2_min_alarm, S_IRUGO, show_alarm, NULL, 3);
+static SENSOR_DEVICE_ATTR(temp2_max_alarm, S_IRUGO, show_alarm, NULL, 4);
 
 static struct attribute *max1619_attributes[] = {
 	&dev_attr_temp1_input.attr,
@@ -182,6 +210,10 @@ static struct attribute *max1619_attributes[] = {
 	&dev_attr_temp2_crit_hyst.attr,
 
 	&dev_attr_alarms.attr,
+	&sensor_dev_attr_temp2_crit_alarm.dev_attr.attr,
+	&sensor_dev_attr_temp2_fault.dev_attr.attr,
+	&sensor_dev_attr_temp2_min_alarm.dev_attr.attr,
+	&sensor_dev_attr_temp2_max_alarm.dev_attr.attr,
 	NULL
 };
 
@@ -193,109 +225,68 @@ static const struct attribute_group max1619_group = {
  * Real code
  */
 
-static int max1619_attach_adapter(struct i2c_adapter *adapter)
+/* Return 0 if detection is successful, -ENODEV otherwise */
+static int max1619_detect(struct i2c_client *client,
+			  struct i2c_board_info *info)
 {
-	if (!(adapter->class & I2C_CLASS_HWMON))
-		return 0;
-	return i2c_probe(adapter, &addr_data, max1619_detect);
-}
-
-/*
- * The following function does more than just detection. If detection
- * succeeds, it also registers the new chip.
- */
-static int max1619_detect(struct i2c_adapter *adapter, int address, int kind)
-{
-	struct i2c_client *new_client;
-	struct max1619_data *data;
-	int err = 0;
-	const char *name = "";	
-	u8 reg_config=0, reg_convrate=0, reg_status=0;
+	struct i2c_adapter *adapter = client->adapter;
+	u8 reg_config, reg_convrate, reg_status, man_id, chip_id;
 
 	if (!i2c_check_functionality(adapter, I2C_FUNC_SMBUS_BYTE_DATA))
-		goto exit;
+		return -ENODEV;
 
-	if (!(data = kzalloc(sizeof(struct max1619_data), GFP_KERNEL))) {
-		err = -ENOMEM;
-		goto exit;
+	/* detection */
+	reg_config = i2c_smbus_read_byte_data(client, MAX1619_REG_R_CONFIG);
+	reg_convrate = i2c_smbus_read_byte_data(client, MAX1619_REG_R_CONVRATE);
+	reg_status = i2c_smbus_read_byte_data(client, MAX1619_REG_R_STATUS);
+	if ((reg_config & 0x03) != 0x00
+	 || reg_convrate > 0x07 || (reg_status & 0x61) != 0x00) {
+		dev_dbg(&adapter->dev, "MAX1619 detection failed at 0x%02x\n",
+			client->addr);
+		return -ENODEV;
 	}
 
-	/* The common I2C client data is placed right before the
-	   MAX1619-specific data. */
-	new_client = &data->client;
+	/* identification */
+	man_id = i2c_smbus_read_byte_data(client, MAX1619_REG_R_MAN_ID);
+	chip_id = i2c_smbus_read_byte_data(client, MAX1619_REG_R_CHIP_ID);
+	if (man_id != 0x4D || chip_id != 0x04) {
+		dev_info(&adapter->dev,
+			 "Unsupported chip (man_id=0x%02X, chip_id=0x%02X).\n",
+			 man_id, chip_id);
+		return -ENODEV;
+	}
+
+	strlcpy(info->type, "max1619", I2C_NAME_SIZE);
+
+	return 0;
+}
+
+static int max1619_probe(struct i2c_client *new_client,
+			 const struct i2c_device_id *id)
+{
+	struct max1619_data *data;
+	int err;
+
+	data = devm_kzalloc(&new_client->dev, sizeof(struct max1619_data),
+			    GFP_KERNEL);
+	if (!data)
+		return -ENOMEM;
+
 	i2c_set_clientdata(new_client, data);
-	new_client->addr = address;
-	new_client->adapter = adapter;
-	new_client->driver = &max1619_driver;
-	new_client->flags = 0;
-
-	/*
-	 * Now we do the remaining detection. A negative kind means that
-	 * the driver was loaded with no force parameter (default), so we
-	 * must both detect and identify the chip. A zero kind means that
-	 * the driver was loaded with the force parameter, the detection
-	 * step shall be skipped. A positive kind means that the driver
-	 * was loaded with the force parameter and a given kind of chip is
-	 * requested, so both the detection and the identification steps
-	 * are skipped.
-	 */
-	if (kind < 0) { /* detection */
-		reg_config = i2c_smbus_read_byte_data(new_client,
-			      MAX1619_REG_R_CONFIG);
-		reg_convrate = i2c_smbus_read_byte_data(new_client,
-			       MAX1619_REG_R_CONVRATE);
-		reg_status = i2c_smbus_read_byte_data(new_client,
-				MAX1619_REG_R_STATUS);
-		if ((reg_config & 0x03) != 0x00
-		 || reg_convrate > 0x07 || (reg_status & 0x61 ) !=0x00) {
-			dev_dbg(&adapter->dev,
-				"MAX1619 detection failed at 0x%02x.\n",
-				address);
-			goto exit_free;
-		}
-	}
-
-	if (kind <= 0) { /* identification */
-		u8 man_id, chip_id;
-	
-		man_id = i2c_smbus_read_byte_data(new_client,
-			 MAX1619_REG_R_MAN_ID);
-		chip_id = i2c_smbus_read_byte_data(new_client,
-			  MAX1619_REG_R_CHIP_ID);
-		
-		if ((man_id == 0x4D) && (chip_id == 0x04))
-			kind = max1619;
-
-		if (kind <= 0) { /* identification failed */
-			dev_info(&adapter->dev,
-			    "Unsupported chip (man_id=0x%02X, "
-			    "chip_id=0x%02X).\n", man_id, chip_id);
-			goto exit_free;
-		}
-	}
-
-	if (kind == max1619)
-		name = "max1619";
-
-	/* We can fill in the remaining client fields */
-	strlcpy(new_client->name, name, I2C_NAME_SIZE);
 	data->valid = 0;
 	mutex_init(&data->update_lock);
-
-	/* Tell the I2C layer a new client has arrived */
-	if ((err = i2c_attach_client(new_client)))
-		goto exit_free;
 
 	/* Initialize the MAX1619 chip */
 	max1619_init_client(new_client);
 
 	/* Register sysfs hooks */
-	if ((err = sysfs_create_group(&new_client->dev.kobj, &max1619_group)))
-		goto exit_detach;
+	err = sysfs_create_group(&new_client->dev.kobj, &max1619_group);
+	if (err)
+		return err;
 
-	data->class_dev = hwmon_device_register(&new_client->dev);
-	if (IS_ERR(data->class_dev)) {
-		err = PTR_ERR(data->class_dev);
+	data->hwmon_dev = hwmon_device_register(&new_client->dev);
+	if (IS_ERR(data->hwmon_dev)) {
+		err = PTR_ERR(data->hwmon_dev);
 		goto exit_remove_files;
 	}
 
@@ -303,11 +294,6 @@ static int max1619_detect(struct i2c_adapter *adapter, int address, int kind)
 
 exit_remove_files:
 	sysfs_remove_group(&new_client->dev.kobj, &max1619_group);
-exit_detach:
-	i2c_detach_client(new_client);
-exit_free:
-	kfree(data);
-exit:
 	return err;
 }
 
@@ -326,18 +312,13 @@ static void max1619_init_client(struct i2c_client *client)
 					  config & 0xBF); /* run */
 }
 
-static int max1619_detach_client(struct i2c_client *client)
+static int max1619_remove(struct i2c_client *client)
 {
 	struct max1619_data *data = i2c_get_clientdata(client);
-	int err;
 
-	hwmon_device_unregister(data->class_dev);
+	hwmon_device_unregister(data->hwmon_dev);
 	sysfs_remove_group(&client->dev.kobj, &max1619_group);
 
-	if ((err = i2c_detach_client(client)))
-		return err;
-
-	kfree(data);
 	return 0;
 }
 
@@ -374,20 +355,9 @@ static struct max1619_data *max1619_update_device(struct device *dev)
 	return data;
 }
 
-static int __init sensors_max1619_init(void)
-{
-	return i2c_add_driver(&max1619_driver);
-}
+module_i2c_driver(max1619_driver);
 
-static void __exit sensors_max1619_exit(void)
-{
-	i2c_del_driver(&max1619_driver);
-}
-
-MODULE_AUTHOR("Alexey Fisher <fishor@mail.ru> and "
+MODULE_AUTHOR("Oleksij Rempel <bug-track@fisher-privat.net> and "
 	"Jean Delvare <khali@linux-fr.org>");
 MODULE_DESCRIPTION("MAX1619 sensor driver");
 MODULE_LICENSE("GPL");
-
-module_init(sensors_max1619_init);
-module_exit(sensors_max1619_exit);

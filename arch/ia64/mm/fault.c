@@ -10,13 +10,13 @@
 #include <linux/interrupt.h>
 #include <linux/kprobes.h>
 #include <linux/kdebug.h>
+#include <linux/prefetch.h>
 
 #include <asm/pgtable.h>
 #include <asm/processor.h>
-#include <asm/system.h>
 #include <asm/uaccess.h>
 
-extern void die (char *, struct pt_regs *, long);
+extern int die(char *, struct pt_regs *, long);
 
 #ifdef CONFIG_KPROBES
 static inline int notify_page_fault(struct pt_regs *regs, int trap)
@@ -26,7 +26,7 @@ static inline int notify_page_fault(struct pt_regs *regs, int trap)
 	if (!user_mode(regs)) {
 		/* kprobe_running() needs smp_processor_id() */
 		preempt_disable();
-		if (kprobe_running() && kprobes_fault_handler(regs, trap))
+		if (kprobe_running() && kprobe_fault_handler(regs, trap))
 			ret = 1;
 		preempt_enable();
 	}
@@ -72,6 +72,10 @@ mapped_kernel_page_is_present (unsigned long address)
 	return pte_present(pte);
 }
 
+#	define VM_READ_BIT	0
+#	define VM_WRITE_BIT	1
+#	define VM_EXEC_BIT	2
+
 void __kprobes
 ia64_do_page_fault (unsigned long address, unsigned long isr, struct pt_regs *regs)
 {
@@ -80,6 +84,13 @@ ia64_do_page_fault (unsigned long address, unsigned long isr, struct pt_regs *re
 	struct mm_struct *mm = current->mm;
 	struct siginfo si;
 	unsigned long mask;
+	int fault;
+	unsigned int flags = FAULT_FLAG_ALLOW_RETRY | FAULT_FLAG_KILLABLE;
+
+	mask = ((((isr >> IA64_ISR_X_BIT) & 1UL) << VM_EXEC_BIT)
+		| (((isr >> IA64_ISR_W_BIT) & 1UL) << VM_WRITE_BIT));
+
+	flags |= ((mask & VM_WRITE) ? FAULT_FLAG_WRITE : 0);
 
 	/* mmap_sem is performance critical.... */
 	prefetchw(&mm->mmap_sem);
@@ -108,24 +119,27 @@ ia64_do_page_fault (unsigned long address, unsigned long isr, struct pt_regs *re
 	if (notify_page_fault(regs, TRAP_BRKPT))
 		return;
 
+retry:
 	down_read(&mm->mmap_sem);
 
 	vma = find_vma_prev(mm, address, &prev_vma);
-	if (!vma)
+	if (!vma && !prev_vma )
 		goto bad_area;
 
-	/* find_vma_prev() returns vma such that address < vma->vm_end or NULL */
-	if (address < vma->vm_start)
+        /*
+         * find_vma_prev() returns vma such that address < vma->vm_end or NULL
+         *
+         * May find no vma, but could be that the last vm area is the
+         * register backing store that needs to expand upwards, in
+         * this case vma will be null, but prev_vma will ne non-null
+         */
+        if (( !vma && prev_vma ) || (address < vma->vm_start) )
 		goto check_expansion;
 
   good_area:
 	code = SEGV_ACCERR;
 
 	/* OK, we've got a good vm_area for this memory area.  Check the access permissions: */
-
-#	define VM_READ_BIT	0
-#	define VM_WRITE_BIT	1
-#	define VM_EXEC_BIT	2
 
 #	if (((1 << VM_READ_BIT) != VM_READ || (1 << VM_WRITE_BIT) != VM_WRITE) \
 	    || (1 << VM_EXEC_BIT) != VM_EXEC)
@@ -135,43 +149,59 @@ ia64_do_page_fault (unsigned long address, unsigned long isr, struct pt_regs *re
 	if (((isr >> IA64_ISR_R_BIT) & 1UL) && (!(vma->vm_flags & (VM_READ | VM_WRITE))))
 		goto bad_area;
 
-	mask = (  (((isr >> IA64_ISR_X_BIT) & 1UL) << VM_EXEC_BIT)
-		| (((isr >> IA64_ISR_W_BIT) & 1UL) << VM_WRITE_BIT));
-
 	if ((vma->vm_flags & mask) != mask)
 		goto bad_area;
 
-  survive:
 	/*
 	 * If for any reason at all we couldn't handle the fault, make
 	 * sure we exit gracefully rather than endlessly redo the
 	 * fault.
 	 */
-	switch (handle_mm_fault(mm, vma, address, (mask & VM_WRITE) != 0)) {
-	      case VM_FAULT_MINOR:
-		++current->min_flt;
-		break;
-	      case VM_FAULT_MAJOR:
-		++current->maj_flt;
-		break;
-	      case VM_FAULT_SIGBUS:
+	fault = handle_mm_fault(mm, vma, address, flags);
+
+	if ((fault & VM_FAULT_RETRY) && fatal_signal_pending(current))
+		return;
+
+	if (unlikely(fault & VM_FAULT_ERROR)) {
 		/*
 		 * We ran out of memory, or some other thing happened
 		 * to us that made us unable to handle the page fault
 		 * gracefully.
 		 */
-		signal = SIGBUS;
-		goto bad_area;
-	      case VM_FAULT_OOM:
-		goto out_of_memory;
-	      default:
+		if (fault & VM_FAULT_OOM) {
+			goto out_of_memory;
+		} else if (fault & VM_FAULT_SIGBUS) {
+			signal = SIGBUS;
+			goto bad_area;
+		}
 		BUG();
 	}
+
+	if (flags & FAULT_FLAG_ALLOW_RETRY) {
+		if (fault & VM_FAULT_MAJOR)
+			current->maj_flt++;
+		else
+			current->min_flt++;
+		if (fault & VM_FAULT_RETRY) {
+			flags &= ~FAULT_FLAG_ALLOW_RETRY;
+			flags |= FAULT_FLAG_TRIED;
+
+			 /* No need to up_read(&mm->mmap_sem) as we would
+			 * have already released it in __lock_page_or_retry
+			 * in mm/filemap.c.
+			 */
+
+			goto retry;
+		}
+	}
+
 	up_read(&mm->mmap_sem);
 	return;
 
   check_expansion:
 	if (!(prev_vma && (prev_vma->vm_flags & VM_GROWSUP) && (address == prev_vma->vm_end))) {
+		if (!vma)
+			goto bad_area;
 		if (!(vma->vm_flags & VM_GROWSDOWN))
 			goto bad_area;
 		if (REGION_NUMBER(address) != REGION_NUMBER(vma->vm_start)
@@ -259,20 +289,16 @@ ia64_do_page_fault (unsigned long address, unsigned long isr, struct pt_regs *re
 	else
 		printk(KERN_ALERT "Unable to handle kernel paging request at "
 		       "virtual address %016lx\n", address);
-	die("Oops", regs, isr);
+	if (die("Oops", regs, isr))
+		regs = NULL;
 	bust_spinlocks(0);
-	do_exit(SIGKILL);
+	if (regs)
+		do_exit(SIGKILL);
 	return;
 
   out_of_memory:
 	up_read(&mm->mmap_sem);
-	if (is_init(current)) {
-		yield();
-		down_read(&mm->mmap_sem);
-		goto survive;
-	}
-	printk(KERN_CRIT "VM: killing process %s\n", current->comm);
-	if (user_mode(regs))
-		do_exit(SIGKILL);
-	goto no_context;
+	if (!user_mode(regs))
+		goto no_context;
+	pagefault_out_of_memory();
 }

@@ -2,29 +2,33 @@
  * Copyright (c) 2005 Voltaire Inc.  All rights reserved.
  * Copyright (c) 2005 Intel Corporation.  All rights reserved.
  *
- * This Software is licensed under one of the following licenses:
+ * This software is available to you under a choice of one of two
+ * licenses.  You may choose to be licensed under the terms of the GNU
+ * General Public License (GPL) Version 2, available from the file
+ * COPYING in the main directory of this source tree, or the
+ * OpenIB.org BSD license below:
  *
- * 1) under the terms of the "Common Public License 1.0" a copy of which is
- *    available from the Open Source Initiative, see
- *    http://www.opensource.org/licenses/cpl.php.
+ *     Redistribution and use in source and binary forms, with or
+ *     without modification, are permitted provided that the following
+ *     conditions are met:
  *
- * 2) under the terms of the "The BSD License" a copy of which is
- *    available from the Open Source Initiative, see
- *    http://www.opensource.org/licenses/bsd-license.php.
+ *      - Redistributions of source code must retain the above
+ *        copyright notice, this list of conditions and the following
+ *        disclaimer.
  *
- * 3) under the terms of the "GNU General Public License (GPL) Version 2" a
- *    copy of which is available from the Open Source Initiative, see
- *    http://www.opensource.org/licenses/gpl-license.php.
+ *      - Redistributions in binary form must reproduce the above
+ *        copyright notice, this list of conditions and the following
+ *        disclaimer in the documentation and/or other materials
+ *        provided with the distribution.
  *
- * Licensee has the right to choose one of the above licenses.
- *
- * Redistributions of source code must retain the above copyright
- * notice and one of the license notices.
- *
- * Redistributions in binary form must reproduce both the above copyright
- * notice, one of the license notices in the documentation
- * and/or other materials provided with the distribution.
- *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+ * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+ * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+ * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  */
 
 #if !defined(RDMA_CM_H)
@@ -53,24 +57,22 @@ enum rdma_cm_event_type {
 	RDMA_CM_EVENT_DISCONNECTED,
 	RDMA_CM_EVENT_DEVICE_REMOVAL,
 	RDMA_CM_EVENT_MULTICAST_JOIN,
-	RDMA_CM_EVENT_MULTICAST_ERROR
+	RDMA_CM_EVENT_MULTICAST_ERROR,
+	RDMA_CM_EVENT_ADDR_CHANGE,
+	RDMA_CM_EVENT_TIMEWAIT_EXIT
 };
 
 enum rdma_port_space {
-	RDMA_PS_SDP  = 0x0001,
-	RDMA_PS_IPOIB= 0x0002,
-	RDMA_PS_TCP  = 0x0106,
-	RDMA_PS_UDP  = 0x0111,
-	RDMA_PS_SCTP = 0x0183
+	RDMA_PS_SDP   = 0x0001,
+	RDMA_PS_IPOIB = 0x0002,
+	RDMA_PS_IB    = 0x013F,
+	RDMA_PS_TCP   = 0x0106,
+	RDMA_PS_UDP   = 0x0111,
 };
 
 struct rdma_addr {
-	struct sockaddr src_addr;
-	u8		src_pad[sizeof(struct sockaddr_in6) -
-				sizeof(struct sockaddr)];
-	struct sockaddr dst_addr;
-	u8		dst_pad[sizeof(struct sockaddr_in6) -
-				sizeof(struct sockaddr)];
+	struct sockaddr_storage src_addr;
+	struct sockaddr_storage dst_addr;
 	struct rdma_dev_addr dev_addr;
 };
 
@@ -110,6 +112,20 @@ struct rdma_cm_event {
 	} param;
 };
 
+enum rdma_cm_state {
+	RDMA_CM_IDLE,
+	RDMA_CM_ADDR_QUERY,
+	RDMA_CM_ADDR_RESOLVED,
+	RDMA_CM_ROUTE_QUERY,
+	RDMA_CM_ROUTE_RESOLVED,
+	RDMA_CM_CONNECT,
+	RDMA_CM_DISCONNECT,
+	RDMA_CM_ADDR_BOUND,
+	RDMA_CM_LISTEN,
+	RDMA_CM_DEVICE_REMOVAL,
+	RDMA_CM_DESTROYING
+};
+
 struct rdma_cm_id;
 
 /**
@@ -129,6 +145,7 @@ struct rdma_cm_id {
 	rdma_cm_event_handler	 event_handler;
 	struct rdma_route	 route;
 	enum rdma_port_space	 ps;
+	enum ib_qp_type		 qp_type;
 	u8			 port_num;
 };
 
@@ -139,9 +156,11 @@ struct rdma_cm_id {
  *   returned rdma_id.
  * @context: User specified context associated with the id.
  * @ps: RDMA port space.
+ * @qp_type: type of queue pair associated with the id.
  */
 struct rdma_cm_id *rdma_create_id(rdma_cm_event_handler event_handler,
-				  void *context, enum rdma_port_space ps);
+				  void *context, enum rdma_port_space ps,
+				  enum ib_qp_type qp_type);
 
 /**
   * rdma_destroy_id - Destroys an RDMA identifier.
@@ -313,5 +332,39 @@ int rdma_join_multicast(struct rdma_cm_id *id, struct sockaddr *addr,
  *   address.
  */
 void rdma_leave_multicast(struct rdma_cm_id *id, struct sockaddr *addr);
+
+/**
+ * rdma_set_service_type - Set the type of service associated with a
+ *   connection identifier.
+ * @id: Communication identifier to associated with service type.
+ * @tos: Type of service.
+ *
+ * The type of service is interpretted as a differentiated service
+ * field (RFC 2474).  The service type should be specified before
+ * performing route resolution, as existing communication on the
+ * connection identifier may be unaffected.  The type of service
+ * requested may not be supported by the network to all destinations.
+ */
+void rdma_set_service_type(struct rdma_cm_id *id, int tos);
+
+/**
+ * rdma_set_reuseaddr - Allow the reuse of local addresses when binding
+ *    the rdma_cm_id.
+ * @id: Communication identifier to configure.
+ * @reuse: Value indicating if the bound address is reusable.
+ *
+ * Reuse must be set before an address is bound to the id.
+ */
+int rdma_set_reuseaddr(struct rdma_cm_id *id, int reuse);
+
+/**
+ * rdma_set_afonly - Specify that listens are restricted to the
+ *    bound address family only.
+ * @id: Communication identifer to configure.
+ * @afonly: Value indicating if listens are restricted.
+ *
+ * Must be set before identifier is in the listening state.
+ */
+int rdma_set_afonly(struct rdma_cm_id *id, int afonly);
 
 #endif /* RDMA_CM_H */

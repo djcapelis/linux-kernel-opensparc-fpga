@@ -26,7 +26,8 @@ typedef struct mempool_s {
 extern mempool_t *mempool_create(int min_nr, mempool_alloc_t *alloc_fn,
 			mempool_free_t *free_fn, void *pool_data);
 extern mempool_t *mempool_create_node(int min_nr, mempool_alloc_t *alloc_fn,
-			mempool_free_t *free_fn, void *pool_data, int nid);
+			mempool_free_t *free_fn, void *pool_data,
+			gfp_t gfp_mask, int nid);
 
 extern int mempool_resize(mempool_t *pool, int new_min_nr, gfp_t gfp_mask);
 extern void mempool_destroy(mempool_t *pool);
@@ -47,20 +48,14 @@ mempool_create_slab_pool(int min_nr, struct kmem_cache *kc)
 }
 
 /*
- * 2 mempool_alloc_t's and a mempool_free_t to kmalloc/kzalloc and kfree
- * the amount of memory specified by pool_data
+ * a mempool_alloc_t and a mempool_free_t to kmalloc and kfree the
+ * amount of memory specified by pool_data
  */
 void *mempool_kmalloc(gfp_t gfp_mask, void *pool_data);
-void *mempool_kzalloc(gfp_t gfp_mask, void *pool_data);
 void mempool_kfree(void *element, void *pool_data);
 static inline mempool_t *mempool_create_kmalloc_pool(int min_nr, size_t size)
 {
 	return mempool_create(min_nr, mempool_kmalloc, mempool_kfree,
-			      (void *) size);
-}
-static inline mempool_t *mempool_create_kzalloc_pool(int min_nr, size_t size)
-{
-	return mempool_create(min_nr, mempool_kzalloc, mempool_kfree,
 			      (void *) size);
 }
 

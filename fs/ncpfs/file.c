@@ -7,7 +7,6 @@
  */
 
 #include <asm/uaccess.h>
-#include <asm/system.h>
 
 #include <linux/time.h>
 #include <linux/kernel.h>
@@ -15,16 +14,14 @@
 #include <linux/fcntl.h>
 #include <linux/stat.h>
 #include <linux/mm.h>
-#include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/sched.h>
 
-#include <linux/ncp_fs.h>
-#include "ncplib_kernel.h"
+#include "ncp_fs.h"
 
-static int ncp_fsync(struct file *file, struct dentry *dentry, int datasync)
+static int ncp_fsync(struct file *file, loff_t start, loff_t end, int datasync)
 {
-	return 0;
+	return filemap_write_and_wait_range(file->f_mapping, start, end);
 }
 
 /*
@@ -113,9 +110,6 @@ ncp_file_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
 	DPRINTK("ncp_file_read: enter %s/%s\n",
 		dentry->d_parent->d_name.name, dentry->d_name.name);
 
-	if (!ncp_conn_valid(NCP_SERVER(inode)))
-		return -EIO;
-
 	pos = *ppos;
 
 	if ((ssize_t) count < 0) {
@@ -192,18 +186,15 @@ ncp_file_write(struct file *file, const char __user *buf, size_t count, loff_t *
 
 	DPRINTK("ncp_file_write: enter %s/%s\n",
 		dentry->d_parent->d_name.name, dentry->d_name.name);
-	if (!ncp_conn_valid(NCP_SERVER(inode)))
-		return -EIO;
 	if ((ssize_t) count < 0)
 		return -EINVAL;
 	pos = *ppos;
 	if (file->f_flags & O_APPEND) {
-		pos = inode->i_size;
+		pos = i_size_read(inode);
 	}
 
 	if (pos + count > MAX_NON_LFS && !(file->f_flags&O_LARGEFILE)) {
 		if (pos >= MAX_NON_LFS) {
-			send_sig(SIGXFSZ, current, 0);
 			return -EFBIG;
 		}
 		if (count > MAX_NON_LFS - (u32)pos) {
@@ -212,7 +203,6 @@ ncp_file_write(struct file *file, const char __user *buf, size_t count, loff_t *
 	}
 	if (pos >= inode->i_sb->s_maxbytes) {
 		if (count || pos > inode->i_sb->s_maxbytes) {
-			send_sig(SIGXFSZ, current, 0);
 			return -EFBIG;
 		}
 	}
@@ -230,6 +220,10 @@ ncp_file_write(struct file *file, const char __user *buf, size_t count, loff_t *
 	bufsize = NCP_SERVER(inode)->buffer_size;
 
 	already_written = 0;
+
+	errno = file_update_time(file);
+	if (errno)
+		goto outrel;
 
 	bouncebuffer = vmalloc(bufsize);
 	if (!bouncebuffer) {
@@ -262,12 +256,13 @@ ncp_file_write(struct file *file, const char __user *buf, size_t count, loff_t *
 	}
 	vfree(bouncebuffer);
 
-	file_update_time(file);
-
 	*ppos = pos;
 
-	if (pos > inode->i_size) {
-		inode->i_size = pos;
+	if (pos > i_size_read(inode)) {
+		mutex_lock(&inode->i_mutex);
+		if (pos > i_size_read(inode))
+			i_size_write(inode, pos);
+		mutex_unlock(&inode->i_mutex);
 	}
 	DPRINTK("ncp_file_write: exit %s/%s\n",
 		dentry->d_parent->d_name.name, dentry->d_name.name);
@@ -285,10 +280,10 @@ static int ncp_release(struct inode *inode, struct file *file) {
 
 const struct file_operations ncp_file_operations =
 {
-	.llseek		= remote_llseek,
+	.llseek		= generic_file_llseek,
 	.read		= ncp_file_read,
 	.write		= ncp_file_write,
-	.ioctl		= ncp_ioctl,
+	.unlocked_ioctl	= ncp_ioctl,
 #ifdef CONFIG_COMPAT
 	.compat_ioctl	= ncp_compat_ioctl,
 #endif

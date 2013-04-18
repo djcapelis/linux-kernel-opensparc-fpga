@@ -4,7 +4,7 @@
 * Version:       0.1.1
 * Description:   Irda KingSun/DonShine USB Dongle
 * Status:        Experimental
-* Author:        Alex Villac�s Lasso <a_villacis@palosanto.com>
+* Author:        Alex Villacís Lasso <a_villacis@palosanto.com>
 *
 *  	Based on stir4200 and mcs7780 drivers, with (strange?) differences
 *
@@ -66,8 +66,6 @@
 #include <linux/errno.h>
 #include <linux/init.h>
 #include <linux/slab.h>
-#include <linux/module.h>
-#include <linux/kref.h>
 #include <linux/usb.h>
 #include <linux/device.h>
 #include <linux/crc32.h>
@@ -106,7 +104,7 @@ struct kingsun_cb {
 	struct usb_device *usbdev;      /* init: probe_irda */
 	struct net_device *netdev;      /* network layer */
 	struct irlap_cb   *irlap;       /* The link layer we are binded to */
-	struct net_device_stats stats;	/* network statistics */
+
 	struct qos_info   qos;
 
 	__u8		  *in_buf;	/* receive buffer */
@@ -136,14 +134,16 @@ static void kingsun_send_irq(struct urb *urb)
 
 	/* in process of stopping, just drop data */
 	if (!netif_running(kingsun->netdev)) {
-		err("kingsun_send_irq: Network not running!");
+		dev_err(&kingsun->usbdev->dev,
+			"kingsun_send_irq: Network not running!\n");
 		return;
 	}
 
 	/* unlink, shutdown, unplug, other nasties */
 	if (urb->status != 0) {
-		err("kingsun_send_irq: urb asynchronously failed - %d",
-		    urb->status);
+		dev_err(&kingsun->usbdev->dev,
+			"kingsun_send_irq: urb asynchronously failed - %d\n",
+			urb->status);
 	}
 	netif_wake_queue(netdev);
 }
@@ -151,14 +151,12 @@ static void kingsun_send_irq(struct urb *urb)
 /*
  * Called from net/core when new frame is available.
  */
-static int kingsun_hard_xmit(struct sk_buff *skb, struct net_device *netdev)
+static netdev_tx_t kingsun_hard_xmit(struct sk_buff *skb,
+					   struct net_device *netdev)
 {
 	struct kingsun_cb *kingsun;
 	int wraplen;
 	int ret = 0;
-
-	if (skb == NULL || netdev == NULL)
-		return -EINVAL;
 
 	netif_stop_queue(netdev);
 
@@ -181,24 +179,25 @@ static int kingsun_hard_xmit(struct sk_buff *skb, struct net_device *netdev)
 		kingsun, 1);
 
 	if ((ret = usb_submit_urb(kingsun->tx_urb, GFP_ATOMIC))) {
-		err("kingsun_hard_xmit: failed tx_urb submit: %d", ret);
+		dev_err(&kingsun->usbdev->dev,
+			"kingsun_hard_xmit: failed tx_urb submit: %d\n", ret);
 		switch (ret) {
 		case -ENODEV:
 		case -EPIPE:
 			break;
 		default:
-			kingsun->stats.tx_errors++;
+			netdev->stats.tx_errors++;
 			netif_start_queue(netdev);
 		}
 	} else {
-		kingsun->stats.tx_packets++;
-		kingsun->stats.tx_bytes += skb->len;
+		netdev->stats.tx_packets++;
+		netdev->stats.tx_bytes += skb->len;
 	}
 
 	dev_kfree_skb(skb);
 	spin_unlock(&kingsun->lock);
 
-	return ret;
+	return NETDEV_TX_OK;
 }
 
 /* Receive callback function */
@@ -215,8 +214,9 @@ static void kingsun_rcv_irq(struct urb *urb)
 
 	/* unlink, shutdown, unplug, other nasties */
 	if (urb->status != 0) {
-		err("kingsun_rcv_irq: urb asynchronously failed - %d",
-		    urb->status);
+		dev_err(&kingsun->usbdev->dev,
+			"kingsun_rcv_irq: urb asynchronously failed - %d\n",
+			urb->status);
 		kingsun->receiving = 0;
 		return;
 	}
@@ -233,18 +233,18 @@ static void kingsun_rcv_irq(struct urb *urb)
 		if (bytes[0] >= 1 && bytes[0] < kingsun->max_rx) {
 			for (i = 1; i <= bytes[0]; i++) {
 				async_unwrap_char(kingsun->netdev,
-						  &kingsun->stats,
+						  &kingsun->netdev->stats,
 						  &kingsun->rx_buff, bytes[i]);
 			}
-			kingsun->netdev->last_rx = jiffies;
 			do_gettimeofday(&kingsun->rx_time);
 			kingsun->receiving =
 				(kingsun->rx_buff.state != OUTSIDE_FRAME)
 				? 1 : 0;
 		}
 	} else if (urb->actual_length > 0) {
-		err("%s(): Unexpected response length, expected %d got %d",
-		    __FUNCTION__, kingsun->max_rx, urb->actual_length);
+		dev_err(&kingsun->usbdev->dev,
+			"%s(): Unexpected response length, expected %d got %d\n",
+			__func__, kingsun->max_rx, urb->actual_length);
 	}
 	/* This urb has already been filled in kingsun_net_open */
 	ret = usb_submit_urb(urb, GFP_ATOMIC);
@@ -291,7 +291,7 @@ static int kingsun_net_open(struct net_device *netdev)
 	sprintf(hwname, "usb#%d", kingsun->usbdev->devnum);
 	kingsun->irlap = irlap_open(netdev, &kingsun->qos, hwname);
 	if (!kingsun->irlap) {
-		err("kingsun-sir: irlap_open failed");
+		dev_err(&kingsun->usbdev->dev, "irlap_open failed\n");
 		goto free_mem;
 	}
 
@@ -303,7 +303,8 @@ static int kingsun_net_open(struct net_device *netdev)
 	kingsun->rx_urb->status = 0;
 	err = usb_submit_urb(kingsun->rx_urb, GFP_KERNEL);
 	if (err) {
-		err("kingsun-sir: first urb-submit failed: %d", err);
+		dev_err(&kingsun->usbdev->dev,
+			"first urb-submit failed: %d\n", err);
 		goto close_irlap;
 	}
 
@@ -420,15 +421,12 @@ static int kingsun_net_ioctl(struct net_device *netdev, struct ifreq *rq,
 	return ret;
 }
 
-/*
- * Get device stats (for /proc/net/dev and ifconfig)
- */
-static struct net_device_stats *
-kingsun_net_get_stats(struct net_device *netdev)
-{
-	struct kingsun_cb *kingsun = netdev_priv(netdev);
-	return &kingsun->stats;
-}
+static const struct net_device_ops kingsun_ops = {
+	.ndo_start_xmit	     = kingsun_hard_xmit,
+	.ndo_open            = kingsun_net_open,
+	.ndo_stop            = kingsun_net_close,
+	.ndo_do_ioctl        = kingsun_net_ioctl,
+};
 
 /*
  * This routine is called by the USB subsystem for each new device
@@ -454,13 +452,15 @@ static int kingsun_probe(struct usb_interface *intf,
 	 */
 	interface = intf->cur_altsetting;
 	if (interface->desc.bNumEndpoints != 2) {
-		err("kingsun-sir: expected 2 endpoints, found %d",
-		    interface->desc.bNumEndpoints);
+		dev_err(&intf->dev,
+			"kingsun-sir: expected 2 endpoints, found %d\n",
+			interface->desc.bNumEndpoints);
 		return -ENODEV;
 	}
 	endpoint = &interface->endpoint[KINGSUN_EP_IN].desc;
 	if (!usb_endpoint_is_int_in(endpoint)) {
-		err("kingsun-sir: endpoint 0 is not interrupt IN");
+		dev_err(&intf->dev,
+			"kingsun-sir: endpoint 0 is not interrupt IN\n");
 		return -ENODEV;
 	}
 
@@ -468,14 +468,16 @@ static int kingsun_probe(struct usb_interface *intf,
 	pipe = usb_rcvintpipe(dev, ep_in);
 	maxp_in = usb_maxpacket(dev, pipe, usb_pipeout(pipe));
 	if (maxp_in > 255 || maxp_in <= 1) {
-		err("%s: endpoint 0 has max packet size %d not in range",
-		    __FILE__, maxp_in);
+		dev_err(&intf->dev,
+			"endpoint 0 has max packet size %d not in range\n",
+			maxp_in);
 		return -ENODEV;
 	}
 
 	endpoint = &interface->endpoint[KINGSUN_EP_OUT].desc;
 	if (!usb_endpoint_is_int_out(endpoint)) {
-		err("kingsun-sir: endpoint 1 is not interrupt OUT");
+		dev_err(&intf->dev,
+			"kingsun-sir: endpoint 1 is not interrupt OUT\n");
 		return -ENODEV;
 	}
 
@@ -488,7 +490,6 @@ static int kingsun_probe(struct usb_interface *intf,
 	if(!net)
 		goto err_out1;
 
-	SET_MODULE_OWNER(net);
 	SET_NETDEV_DEV(net, &intf->dev);
 	kingsun = netdev_priv(net);
 	kingsun->irlap = NULL;
@@ -509,12 +510,12 @@ static int kingsun_probe(struct usb_interface *intf,
 	spin_lock_init(&kingsun->lock);
 
 	/* Allocate input buffer */
-	kingsun->in_buf = (__u8 *)kmalloc(kingsun->max_rx, GFP_KERNEL);
+	kingsun->in_buf = kmalloc(kingsun->max_rx, GFP_KERNEL);
 	if (!kingsun->in_buf)
 		goto free_mem;
 
 	/* Allocate output buffer */
-	kingsun->out_buf = (__u8 *)kmalloc(KINGSUN_FIFO_SIZE, GFP_KERNEL);
+	kingsun->out_buf = kmalloc(KINGSUN_FIFO_SIZE, GFP_KERNEL);
 	if (!kingsun->out_buf)
 		goto free_mem;
 
@@ -532,17 +533,14 @@ static int kingsun_probe(struct usb_interface *intf,
 	irda_qos_bits_to_value(&kingsun->qos);
 
 	/* Override the network functions we need to use */
-	net->hard_start_xmit = kingsun_hard_xmit;
-	net->open            = kingsun_net_open;
-	net->stop            = kingsun_net_close;
-	net->get_stats	     = kingsun_net_get_stats;
-	net->do_ioctl        = kingsun_net_ioctl;
+	net->netdev_ops = &kingsun_ops;
 
 	ret = register_netdev(net);
 	if (ret != 0)
 		goto free_mem;
 
-	info("IrDA: Registered KingSun/DonShine device %s", net->name);
+	dev_info(&net->dev, "IrDA: Registered KingSun/DonShine device %s\n",
+		 net->name);
 
 	usb_set_intfdata(intf, kingsun);
 
@@ -633,25 +631,8 @@ static struct usb_driver irda_driver = {
 #endif
 };
 
-/*
- * Module insertion
- */
-static int __init kingsun_init(void)
-{
-	return usb_register(&irda_driver);
-}
-module_init(kingsun_init);
+module_usb_driver(irda_driver);
 
-/*
- * Module removal
- */
-static void __exit kingsun_cleanup(void)
-{
-	/* Deregister the driver and remove all pending instances */
-	usb_deregister(&irda_driver);
-}
-module_exit(kingsun_cleanup);
-
-MODULE_AUTHOR("Alex Villac�s Lasso <a_villacis@palosanto.com>");
+MODULE_AUTHOR("Alex Villacís Lasso <a_villacis@palosanto.com>");
 MODULE_DESCRIPTION("IrDA-USB Dongle Driver for KingSun/DonShine");
 MODULE_LICENSE("GPL");

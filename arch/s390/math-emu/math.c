@@ -1,8 +1,6 @@
 /*
- *  arch/s390/math-emu/math.c
- *
  *  S390 version
- *    Copyright (C) 1999-2001 IBM Deutschland Entwicklung GmbH, IBM Corporation
+ *    Copyright IBM Corp. 1999, 2001
  *    Author(s): Martin Schwidefsky (schwidefsky@de.ibm.com),
  *
  * 'math.c' emulates IEEE instructions on a S390 processor
@@ -2088,7 +2086,7 @@ int math_emu_ldr(__u8 *opcode) {
         __u16 opc = *((__u16 *) opcode);
 
         if ((opc & 0x90) == 0) {           /* test if rx in {0,2,4,6} */
-                /* we got an exception therfore ry can't be in {0,2,4,6} */
+                /* we got an exception therefore ry can't be in {0,2,4,6} */
 		asm volatile(		/* load rx from fp_regs.fprs[ry] */
 			"	bras	1,0f\n"
 			"	ld	0,0(%1)\n"
@@ -2118,7 +2116,7 @@ int math_emu_ler(__u8 *opcode) {
         __u16 opc = *((__u16 *) opcode);
 
         if ((opc & 0x90) == 0) {           /* test if rx in {0,2,4,6} */
-                /* we got an exception therfore ry can't be in {0,2,4,6} */
+                /* we got an exception therefore ry can't be in {0,2,4,6} */
 		asm volatile(		/* load rx from fp_regs.fprs[ry] */
 			"	bras	1,0f\n"
 			"	le	0,0(%1)\n"

@@ -3,7 +3,7 @@
 #
 
 ifeq "$(CONFIG_PCI)" "y"
-obj-y := pci-frv.o pci-irq.o pci-vdk.o pci-iomap.o
+obj-y := pci-frv.o pci-irq.o pci-vdk.o
 
 ifeq "$(CONFIG_MMU)" "y"
 obj-y += pci-dma.o
@@ -11,3 +11,5 @@ else
 obj-y += pci-dma-nommu.o
 endif
 endif
+
+obj-$(CONFIG_MTD) += flash.o

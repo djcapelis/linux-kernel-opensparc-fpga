@@ -97,7 +97,7 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/mca.h>
-#include <linux/interrupt.h>
+#include <linux/slab.h>
 #include <asm/io.h>
 #include <scsi/scsi_host.h>
 #include <scsi/scsi_device.h>
@@ -114,7 +114,7 @@ MODULE_DESCRIPTION("NCR Dual700 SCSI Driver");
 MODULE_LICENSE("GPL");
 module_param(NCR_D700, charp, 0);
 
-static __u8 __devinitdata id_array[2*(MCA_MAX_SLOT_NR + 1)] =
+static __u8 id_array[2*(MCA_MAX_SLOT_NR + 1)] =
 	{ [0 ... 2*(MCA_MAX_SLOT_NR + 1)-1] = 7 };
 
 #ifdef MODULE
@@ -173,7 +173,7 @@ struct NCR_D700_private {
 	char			pad;
 };
 
-static int __devinit
+static int
 NCR_D700_probe_one(struct NCR_D700_private *p, int siop, int irq,
 		   int slot, u32 region, int differential)
 {
@@ -181,13 +181,12 @@ NCR_D700_probe_one(struct NCR_D700_private *p, int siop, int irq,
 	struct Scsi_Host *host;
 	int ret;
 
-	hostdata = kmalloc(sizeof(*hostdata), GFP_KERNEL);
+	hostdata = kzalloc(sizeof(*hostdata), GFP_KERNEL);
 	if (!hostdata) {
 		printk(KERN_ERR "NCR D700: SIOP%d: Failed to allocate host"
 		       "data, detatching\n", siop);
 		return -ENOMEM;
 	}
-	memset(hostdata, 0, sizeof(*hostdata));
 
 	if (!request_region(region, 64, "NCR_D700")) {
 		printk(KERN_ERR "NCR D700: Failed to reserve IO region 0x%x\n",
@@ -226,7 +225,7 @@ NCR_D700_probe_one(struct NCR_D700_private *p, int siop, int irq,
 	return ret;
 }
 
-static int
+static irqreturn_t
 NCR_D700_intr(int irq, void *data)
 {
 	struct NCR_D700_private *p = (struct NCR_D700_private *)data;
@@ -244,7 +243,7 @@ NCR_D700_intr(int irq, void *data)
  * essentially connectecd to the MCA bus independently, it is easier
  * to set them up as two separate host adapters, rather than one
  * adapter with two channels */
-static int __devinit
+static int
 NCR_D700_probe(struct device *dev)
 {
 	struct NCR_D700_private *p;
@@ -315,12 +314,12 @@ NCR_D700_probe(struct device *dev)
 		break;
 	}
 
-	p = kmalloc(sizeof(*p), GFP_KERNEL);
+	p = kzalloc(sizeof(*p), GFP_KERNEL);
 	if (!p)
 		return -ENOMEM;
-	memset(p, '\0', sizeof(*p));
+
 	p->dev = dev;
-	snprintf(p->name, sizeof(p->name), "D700(%s)", dev->bus_id);
+	snprintf(p->name, sizeof(p->name), "D700(%s)", dev_name(dev));
 	if (request_irq(irq, NCR_D700_intr, IRQF_SHARED, p->name, p)) {
 		printk(KERN_ERR "D700: request_irq failed\n");
 		kfree(p);
@@ -350,7 +349,7 @@ NCR_D700_probe(struct device *dev)
 	return 0;
 }
 
-static void __devexit
+static void
 NCR_D700_remove_one(struct Scsi_Host *host)
 {
 	scsi_remove_host(host);
@@ -360,7 +359,7 @@ NCR_D700_remove_one(struct Scsi_Host *host)
 	release_region(host->base, 64);
 }
 
-static int __devexit
+static int
 NCR_D700_remove(struct device *dev)
 {
 	struct NCR_D700_private *p = dev_get_drvdata(dev);
@@ -381,7 +380,7 @@ static struct mca_driver NCR_D700_driver = {
 		.name		= "NCR_D700",
 		.bus		= &mca_bus_type,
 		.probe		= NCR_D700_probe,
-		.remove		= __devexit_p(NCR_D700_remove),
+		.remove		= NCR_D700_remove,
 	},
 };
 

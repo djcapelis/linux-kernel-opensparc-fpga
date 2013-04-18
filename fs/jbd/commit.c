@@ -17,9 +17,11 @@
 #include <linux/fs.h>
 #include <linux/jbd.h>
 #include <linux/errno.h>
-#include <linux/slab.h>
 #include <linux/mm.h>
 #include <linux/pagemap.h>
+#include <linux/bio.h>
+#include <linux/blkdev.h>
+#include <trace/events/jbd.h>
 
 /*
  * Default IO end handler for temporary BJ_IO buffer_heads.
@@ -36,7 +38,7 @@ static void journal_end_buffer_io_sync(struct buffer_head *bh, int uptodate)
 
 /*
  * When an ext3-ordered file is truncated, it is possible that many pages are
- * not sucessfully freed, because they are attached to a committing transaction.
+ * not successfully freed, because they are attached to a committing transaction.
  * After the transaction commits, these pages are left on the LRU, with no
  * ->mapping, and with attached buffers.  These pages are trivially reclaimable
  * by the VM, but their apparent absence upsets the VM accounting, and it makes
@@ -45,8 +47,8 @@ static void journal_end_buffer_io_sync(struct buffer_head *bh, int uptodate)
  * So here, we have a buffer which has just come off the forget list.  Look to
  * see if we can strip all buffers from the backing page.
  *
- * Called under lock_journal(), and possibly under journal_datalist_lock.  The
- * caller provided us with a ref against the buffer, and we drop that here.
+ * Called under journal->j_list_lock.  The caller provided us with a ref
+ * against the buffer, and we drop that here.
  */
 static void release_buffer_page(struct buffer_head *bh)
 {
@@ -63,7 +65,7 @@ static void release_buffer_page(struct buffer_head *bh)
 		goto nope;
 
 	/* OK, it's a truncated page */
-	if (TestSetPageLocked(page))
+	if (!trylock_page(page))
 		goto nope;
 
 	page_cache_get(page);
@@ -75,6 +77,24 @@ static void release_buffer_page(struct buffer_head *bh)
 
 nope:
 	__brelse(bh);
+}
+
+/*
+ * Decrement reference counter for data buffer. If it has been marked
+ * 'BH_Freed', release it and the page to which it belongs if possible.
+ */
+static void release_data_buffer(struct buffer_head *bh)
+{
+	if (buffer_freed(bh)) {
+		WARN_ON_ONCE(buffer_dirty(bh));
+		clear_buffer_freed(bh);
+		clear_buffer_mapped(bh);
+		clear_buffer_new(bh);
+		clear_buffer_req(bh);
+		bh->b_bdev = NULL;
+		release_buffer_page(bh);
+	} else
+		put_bh(bh);
 }
 
 /*
@@ -104,8 +124,8 @@ static int journal_write_commit_record(journal_t *journal,
 {
 	struct journal_head *descriptor;
 	struct buffer_head *bh;
-	int i, ret;
-	int barrier_done = 0;
+	journal_header_t *header;
+	int ret;
 
 	if (is_journal_aborted(journal))
 		return 0;
@@ -116,71 +136,50 @@ static int journal_write_commit_record(journal_t *journal,
 
 	bh = jh2bh(descriptor);
 
-	/* AKPM: buglet - add `i' to tmp! */
-	for (i = 0; i < bh->b_size; i += 512) {
-		journal_header_t *tmp = (journal_header_t*)bh->b_data;
-		tmp->h_magic = cpu_to_be32(JFS_MAGIC_NUMBER);
-		tmp->h_blocktype = cpu_to_be32(JFS_COMMIT_BLOCK);
-		tmp->h_sequence = cpu_to_be32(commit_transaction->t_tid);
-	}
+	header = (journal_header_t *)(bh->b_data);
+	header->h_magic = cpu_to_be32(JFS_MAGIC_NUMBER);
+	header->h_blocktype = cpu_to_be32(JFS_COMMIT_BLOCK);
+	header->h_sequence = cpu_to_be32(commit_transaction->t_tid);
 
 	JBUFFER_TRACE(descriptor, "write commit block");
 	set_buffer_dirty(bh);
-	if (journal->j_flags & JFS_BARRIER) {
-		set_buffer_ordered(bh);
-		barrier_done = 1;
-	}
-	ret = sync_dirty_buffer(bh);
-	/* is it possible for another commit to fail at roughly
-	 * the same time as this one?  If so, we don't want to
-	 * trust the barrier flag in the super, but instead want
-	 * to remember if we sent a barrier request
-	 */
-	if (ret == -EOPNOTSUPP && barrier_done) {
-		char b[BDEVNAME_SIZE];
 
-		printk(KERN_WARNING
-			"JBD: barrier-based sync failed on %s - "
-			"disabling barriers\n",
-			bdevname(journal->j_dev, b));
-		spin_lock(&journal->j_state_lock);
-		journal->j_flags &= ~JFS_BARRIER;
-		spin_unlock(&journal->j_state_lock);
-
-		/* And try again, without the barrier */
-		clear_buffer_ordered(bh);
-		set_buffer_uptodate(bh);
-		set_buffer_dirty(bh);
+	if (journal->j_flags & JFS_BARRIER)
+		ret = __sync_dirty_buffer(bh, WRITE_SYNC | WRITE_FLUSH_FUA);
+	else
 		ret = sync_dirty_buffer(bh);
-	}
+
 	put_bh(bh);		/* One for getblk() */
 	journal_put_journal_head(descriptor);
 
 	return (ret == -EIO);
 }
 
-static void journal_do_submit_data(struct buffer_head **wbuf, int bufs)
+static void journal_do_submit_data(struct buffer_head **wbuf, int bufs,
+				   int write_op)
 {
 	int i;
 
 	for (i = 0; i < bufs; i++) {
 		wbuf[i]->b_end_io = end_buffer_write_sync;
 		/* We use-up our safety reference in submit_bh() */
-		submit_bh(WRITE, wbuf[i]);
+		submit_bh(write_op, wbuf[i]);
 	}
 }
 
 /*
  *  Submit all the data buffers to disk
  */
-static void journal_submit_data_buffers(journal_t *journal,
-				transaction_t *commit_transaction)
+static int journal_submit_data_buffers(journal_t *journal,
+				       transaction_t *commit_transaction,
+				       int write_op)
 {
 	struct journal_head *jh;
 	struct buffer_head *bh;
 	int locked;
 	int bufs = 0;
 	struct buffer_head **wbuf = journal->j_wbuf;
+	int err = 0;
 
 	/*
 	 * Whenever we unlock the journal and sleep, things can get added
@@ -208,11 +207,13 @@ write_out_data:
 		 * blocking lock_buffer().
 		 */
 		if (buffer_dirty(bh)) {
-			if (test_set_buffer_locked(bh)) {
+			if (!trylock_buffer(bh)) {
 				BUFFER_TRACE(bh, "needs blocking lock");
 				spin_unlock(&journal->j_list_lock);
+				trace_jbd_do_submit_data(journal,
+						     commit_transaction);
 				/* Write out all data to prevent deadlocks */
-				journal_do_submit_data(wbuf, bufs);
+				journal_do_submit_data(wbuf, bufs, write_op);
 				bufs = 0;
 				lock_buffer(bh);
 				spin_lock(&journal->j_list_lock);
@@ -225,14 +226,14 @@ write_out_data:
 			spin_lock(&journal->j_list_lock);
 		}
 		/* Someone already cleaned up the buffer? */
-		if (!buffer_jbd(bh)
+		if (!buffer_jbd(bh) || bh2jh(bh) != jh
 			|| jh->b_transaction != commit_transaction
 			|| jh->b_jlist != BJ_SyncData) {
 			jbd_unlock_bh_state(bh);
 			if (locked)
 				unlock_buffer(bh);
 			BUFFER_TRACE(bh, "already cleaned up");
-			put_bh(bh);
+			release_data_buffer(bh);
 			continue;
 		}
 		if (locked && test_clear_buffer_dirty(bh)) {
@@ -243,7 +244,9 @@ write_out_data:
 			jbd_unlock_bh_state(bh);
 			if (bufs == journal->j_wbufsize) {
 				spin_unlock(&journal->j_list_lock);
-				journal_do_submit_data(wbuf, bufs);
+				trace_jbd_do_submit_data(journal,
+						     commit_transaction);
+				journal_do_submit_data(wbuf, bufs, write_op);
 				bufs = 0;
 				goto write_out_data;
 			}
@@ -254,24 +257,25 @@ write_out_data:
 			put_bh(bh);
 		} else {
 			BUFFER_TRACE(bh, "writeout complete: unfile");
+			if (unlikely(!buffer_uptodate(bh)))
+				err = -EIO;
 			__journal_unfile_buffer(jh);
 			jbd_unlock_bh_state(bh);
 			if (locked)
 				unlock_buffer(bh);
-			journal_remove_journal_head(bh);
-			/* Once for our safety reference, once for
-			 * journal_remove_journal_head() */
-			put_bh(bh);
-			put_bh(bh);
+			release_data_buffer(bh);
 		}
 
-		if (lock_need_resched(&journal->j_list_lock)) {
+		if (need_resched() || spin_needbreak(&journal->j_list_lock)) {
 			spin_unlock(&journal->j_list_lock);
 			goto write_out_data;
 		}
 	}
 	spin_unlock(&journal->j_list_lock);
-	journal_do_submit_data(wbuf, bufs);
+	trace_jbd_do_submit_data(journal, commit_transaction);
+	journal_do_submit_data(wbuf, bufs, write_op);
+
+	return err;
 }
 
 /*
@@ -288,7 +292,9 @@ void journal_commit_transaction(journal_t *journal)
 	int bufs;
 	int flags;
 	int err;
-	unsigned long blocknr;
+	unsigned int blocknr;
+	ktime_t start_time;
+	u64 commit_time;
 	char *tagp = NULL;
 	journal_header_t *header;
 	journal_block_tag_t *tag = NULL;
@@ -296,22 +302,27 @@ void journal_commit_transaction(journal_t *journal)
 	int first_tag = 0;
 	int tag_flag;
 	int i;
+	struct blk_plug plug;
+	int write_op = WRITE;
 
 	/*
 	 * First job: lock down the current transaction and wait for
 	 * all outstanding updates to complete.
 	 */
 
-#ifdef COMMIT_STATS
-	spin_lock(&journal->j_list_lock);
-	summarise_journal_usage(journal);
-	spin_unlock(&journal->j_list_lock);
-#endif
-
 	/* Do we need to erase the effects of a prior journal_flush? */
 	if (journal->j_flags & JFS_FLUSHED) {
 		jbd_debug(3, "super block updated\n");
-		journal_update_superblock(journal, 1);
+		mutex_lock(&journal->j_checkpoint_mutex);
+		/*
+		 * We hold j_checkpoint_mutex so tail cannot change under us.
+		 * We don't need any special data guarantees for writing sb
+		 * since journal is empty and it is ok for write to be
+		 * flushed only with transaction commit.
+		 */
+		journal_update_sb_log_tail(journal, journal->j_tail_sequence,
+					   journal->j_tail, WRITE_SYNC);
+		mutex_unlock(&journal->j_checkpoint_mutex);
 	} else {
 		jbd_debug(3, "superblock not updated\n");
 	}
@@ -322,12 +333,14 @@ void journal_commit_transaction(journal_t *journal)
 	commit_transaction = journal->j_running_transaction;
 	J_ASSERT(commit_transaction->t_state == T_RUNNING);
 
+	trace_jbd_start_commit(journal, commit_transaction);
 	jbd_debug(1, "JBD: starting commit of transaction %d\n",
 			commit_transaction->t_tid);
 
 	spin_lock(&journal->j_state_lock);
 	commit_transaction->t_state = T_LOCKED;
 
+	trace_jbd_commit_locking(journal, commit_transaction);
 	spin_lock(&commit_transaction->t_handle_lock);
 	while (commit_transaction->t_updates) {
 		DEFINE_WAIT(wait);
@@ -362,7 +375,7 @@ void journal_commit_transaction(journal_t *journal)
 	 * we do not require it to remember exactly which old buffers it
 	 * has reserved.  This is consistent with the existing behaviour
 	 * that multiple journal_get_write_access() calls to the same
-	 * buffer are perfectly permissable.
+	 * buffer are perfectly permissible.
 	 */
 	while (commit_transaction->t_reserved_list) {
 		jh = commit_transaction->t_reserved_list;
@@ -375,7 +388,7 @@ void journal_commit_transaction(journal_t *journal)
 			struct buffer_head *bh = jh2bh(jh);
 
 			jbd_lock_bh_state(bh);
-			jbd_slab_free(jh->b_committed_data, bh->b_size);
+			jbd_free(jh->b_committed_data, bh->b_size);
 			jh->b_committed_data = NULL;
 			jbd_unlock_bh_state(bh);
 		}
@@ -394,41 +407,38 @@ void journal_commit_transaction(journal_t *journal)
 	jbd_debug (3, "JBD: commit phase 1\n");
 
 	/*
+	 * Clear revoked flag to reflect there is no revoked buffers
+	 * in the next transaction which is going to be started.
+	 */
+	journal_clear_buffer_revoked_flags(journal);
+
+	/*
 	 * Switch to a new revoke table.
 	 */
 	journal_switch_revoke_table(journal);
 
+	trace_jbd_commit_flushing(journal, commit_transaction);
 	commit_transaction->t_state = T_FLUSH;
 	journal->j_committing_transaction = commit_transaction;
 	journal->j_running_transaction = NULL;
+	start_time = ktime_get();
 	commit_transaction->t_log_start = journal->j_head;
 	wake_up(&journal->j_wait_transaction_locked);
 	spin_unlock(&journal->j_state_lock);
 
 	jbd_debug (3, "JBD: commit phase 2\n");
 
-	/*
-	 * First, drop modified flag: all accesses to the buffers
-	 * will be tracked for a new trasaction only -bzzz
-	 */
-	spin_lock(&journal->j_list_lock);
-	if (commit_transaction->t_buffers) {
-		new_jh = jh = commit_transaction->t_buffers->b_tnext;
-		do {
-			J_ASSERT_JH(new_jh, new_jh->b_modified == 1 ||
-					new_jh->b_modified == 0);
-			new_jh->b_modified = 0;
-			new_jh = new_jh->b_tnext;
-		} while (new_jh != jh);
-	}
-	spin_unlock(&journal->j_list_lock);
+	if (tid_geq(journal->j_commit_waited, commit_transaction->t_tid))
+		write_op = WRITE_SYNC;
 
 	/*
 	 * Now start flushing things to disk, in the order they appear
 	 * on the transaction lists.  Data blocks go first.
 	 */
-	err = 0;
-	journal_submit_data_buffers(journal, commit_transaction);
+	blk_start_plug(&plug);
+	err = journal_submit_data_buffers(journal, commit_transaction,
+					  write_op);
+	blk_finish_plug(&plug);
 
 	/*
 	 * Wait for all previously submitted IO to complete.
@@ -443,34 +453,50 @@ void journal_commit_transaction(journal_t *journal)
 		if (buffer_locked(bh)) {
 			spin_unlock(&journal->j_list_lock);
 			wait_on_buffer(bh);
-			if (unlikely(!buffer_uptodate(bh)))
-				err = -EIO;
 			spin_lock(&journal->j_list_lock);
+		}
+		if (unlikely(!buffer_uptodate(bh))) {
+			if (!trylock_page(bh->b_page)) {
+				spin_unlock(&journal->j_list_lock);
+				lock_page(bh->b_page);
+				spin_lock(&journal->j_list_lock);
+			}
+			if (bh->b_page->mapping)
+				set_bit(AS_EIO, &bh->b_page->mapping->flags);
+
+			unlock_page(bh->b_page);
+			SetPageError(bh->b_page);
+			err = -EIO;
 		}
 		if (!inverted_lock(journal, bh)) {
 			put_bh(bh);
 			spin_lock(&journal->j_list_lock);
 			continue;
 		}
-		if (buffer_jbd(bh) && jh->b_jlist == BJ_Locked) {
+		if (buffer_jbd(bh) && bh2jh(bh) == jh &&
+		    jh->b_transaction == commit_transaction &&
+		    jh->b_jlist == BJ_Locked)
 			__journal_unfile_buffer(jh);
-			jbd_unlock_bh_state(bh);
-			journal_remove_journal_head(bh);
-			put_bh(bh);
-		} else {
-			jbd_unlock_bh_state(bh);
-		}
-		put_bh(bh);
+		jbd_unlock_bh_state(bh);
+		release_data_buffer(bh);
 		cond_resched_lock(&journal->j_list_lock);
 	}
 	spin_unlock(&journal->j_list_lock);
 
-	if (err)
-		__journal_abort_hard(journal);
+	if (err) {
+		char b[BDEVNAME_SIZE];
 
-	journal_write_revoke_records(journal, commit_transaction);
+		printk(KERN_WARNING
+			"JBD: Detected IO errors while flushing file data "
+			"on %s\n", bdevname(journal->j_fs_dev, b));
+		if (journal->j_flags & JFS_ABORT_ON_SYNCDATA_ERR)
+			journal_abort(journal, err);
+		err = 0;
+	}
 
-	jbd_debug(3, "JBD: commit phase 2\n");
+	blk_start_plug(&plug);
+
+	journal_write_revoke_records(journal, commit_transaction, write_op);
 
 	/*
 	 * If we found any dirty or locked buffers, then we should have
@@ -487,7 +513,13 @@ void journal_commit_transaction(journal_t *journal)
 	 * transaction!  Now comes the tricky part: we need to write out
 	 * metadata.  Loop over the transaction's entire buffer list:
 	 */
+	spin_lock(&journal->j_state_lock);
 	commit_transaction->t_state = T_COMMIT;
+	spin_unlock(&journal->j_state_lock);
+
+	trace_jbd_commit_logging(journal, commit_transaction);
+	J_ASSERT(commit_transaction->t_nr_buffers <=
+		 commit_transaction->t_outstanding_credits);
 
 	descriptor = NULL;
 	bufs = 0;
@@ -498,9 +530,10 @@ void journal_commit_transaction(journal_t *journal)
 		jh = commit_transaction->t_buffers;
 
 		/* If we're in abort mode, we just un-journal the buffer and
-		   release it for background writing. */
+		   release it. */
 
 		if (is_journal_aborted(journal)) {
+			clear_buffer_jbddirty(jh2bh(jh));
 			JBUFFER_TRACE(jh, "journal is aborting: refile");
 			journal_refile_buffer(journal, jh);
 			/* If that was the last one, we need to clean up
@@ -524,7 +557,7 @@ void journal_commit_transaction(journal_t *journal)
 
 			descriptor = journal_get_descriptor_buffer(journal);
 			if (!descriptor) {
-				__journal_abort_hard(journal);
+				journal_abort(journal, -EIO);
 				continue;
 			}
 
@@ -557,7 +590,7 @@ void journal_commit_transaction(journal_t *journal)
 		   and repeat this loop: we'll fall into the
 		   refile-on-abort condition above. */
 		if (err) {
-			__journal_abort_hard(journal);
+			journal_abort(journal, err);
 			continue;
 		}
 
@@ -571,13 +604,13 @@ void journal_commit_transaction(journal_t *journal)
 		/* Bump b_count to prevent truncate from stumbling over
                    the shadowed buffer!  @@@ This can go if we ever get
                    rid of the BJ_IO/BJ_Shadow pairing of buffers. */
-		atomic_inc(&jh2bh(jh)->b_count);
+		get_bh(jh2bh(jh));
 
 		/* Make a temporary IO buffer with which to write it out
                    (this will requeue both the metadata buffer and the
                    temporary IO buffer). new_bh goes on BJ_IO*/
 
-		set_bit(BH_JWrite, &jh2bh(jh)->b_state);
+		set_buffer_jwrite(jh2bh(jh));
 		/*
 		 * akpm: journal_write_metadata_buffer() sets
 		 * new_bh->b_transaction to commit_transaction.
@@ -587,7 +620,7 @@ void journal_commit_transaction(journal_t *journal)
 		JBUFFER_TRACE(jh, "ph3: write metadata");
 		flags = journal_write_metadata_buffer(commit_transaction,
 						      jh, &new_jh, blocknr);
-		set_bit(BH_JWrite, &jh2bh(new_jh)->b_state);
+		set_buffer_jwrite(jh2bh(new_jh));
 		wbuf[bufs++] = jh2bh(new_jh);
 
 		/* Record the new block's tag in the current descriptor
@@ -634,7 +667,7 @@ start_journal_io:
 				clear_buffer_dirty(bh);
 				set_buffer_uptodate(bh);
 				bh->b_end_io = journal_end_buffer_io_sync;
-				submit_bh(WRITE, bh);
+				submit_bh(write_op, bh);
 			}
 			cond_resched();
 
@@ -644,6 +677,8 @@ start_journal_io:
 			bufs = 0;
 		}
 	}
+
+	blk_finish_plug(&plug);
 
 	/* Lo and behold: we have just managed to send a transaction to
            the log.  Before we can commit it, wait for the IO so far to
@@ -697,7 +732,7 @@ wait_for_iobuf:
                    shadowed buffer */
 		jh = commit_transaction->t_shadow_list->b_tprev;
 		bh = jh2bh(jh);
-		clear_bit(BH_JWrite, &bh->b_state);
+		clear_buffer_jwrite(bh);
 		J_ASSERT_BH(bh, buffer_jbddirty(bh));
 
 		/* The metadata is now released for reuse, but we need
@@ -706,8 +741,13 @@ wait_for_iobuf:
                    required. */
 		JBUFFER_TRACE(jh, "file as BJ_Forget");
 		journal_file_buffer(jh, commit_transaction, BJ_Forget);
-		/* Wake up any transactions which were waiting for this
-		   IO to complete */
+		/*
+		 * Wake up any transactions which were waiting for this
+		 * IO to complete. The barrier must be here so that changes
+		 * by journal_file_buffer() take effect before wake_up_bit()
+		 * does the waitqueue check.
+		 */
+		smp_mb();
 		wake_up_bit(&bh->b_state, BH_Unshadow);
 		JBUFFER_TRACE(jh, "brelse shadowed buffer");
 		__brelse(bh);
@@ -742,13 +782,22 @@ wait_for_iobuf:
 		/* AKPM: bforget here */
 	}
 
+	if (err)
+		journal_abort(journal, err);
+
 	jbd_debug(3, "JBD: commit phase 6\n");
+
+	/* All metadata is written, now write commit record and do cleanup */
+	spin_lock(&journal->j_state_lock);
+	J_ASSERT(commit_transaction->t_state == T_COMMIT);
+	commit_transaction->t_state = T_COMMIT_RECORD;
+	spin_unlock(&journal->j_state_lock);
 
 	if (journal_write_commit_record(journal, commit_transaction))
 		err = -EIO;
 
 	if (err)
-		__journal_abort_hard(journal);
+		journal_abort(journal, err);
 
 	/* End of a transaction!  Finally, we can do checkpoint
            processing: any buffers committed as a result of this
@@ -773,10 +822,16 @@ restart_loop:
 	while (commit_transaction->t_forget) {
 		transaction_t *cp_transaction;
 		struct buffer_head *bh;
+		int try_to_free = 0;
 
 		jh = commit_transaction->t_forget;
 		spin_unlock(&journal->j_list_lock);
 		bh = jh2bh(jh);
+		/*
+		 * Get a reference so that bh cannot be freed before we are
+		 * done with it.
+		 */
+		get_bh(bh);
 		jbd_lock_bh_state(bh);
 		J_ASSERT_JH(jh,	jh->b_transaction == commit_transaction ||
 			jh->b_transaction == journal->j_running_transaction);
@@ -792,14 +847,14 @@ restart_loop:
 		 * Otherwise, we can just throw away the frozen data now.
 		 */
 		if (jh->b_committed_data) {
-			jbd_slab_free(jh->b_committed_data, bh->b_size);
+			jbd_free(jh->b_committed_data, bh->b_size);
 			jh->b_committed_data = NULL;
 			if (jh->b_frozen_data) {
 				jh->b_committed_data = jh->b_frozen_data;
 				jh->b_frozen_data = NULL;
 			}
 		} else if (jh->b_frozen_data) {
-			jbd_slab_free(jh->b_frozen_data, bh->b_size);
+			jbd_free(jh->b_frozen_data, bh->b_size);
 			jh->b_frozen_data = NULL;
 		}
 
@@ -816,52 +871,71 @@ restart_loop:
 		 * there's no point in keeping a checkpoint record for
 		 * it. */
 
-		/* A buffer which has been freed while still being
-		 * journaled by a previous transaction may end up still
-		 * being dirty here, but we want to avoid writing back
-		 * that buffer in the future now that the last use has
-		 * been committed.  That's not only a performance gain,
-		 * it also stops aliasing problems if the buffer is left
-		 * behind for writeback and gets reallocated for another
-		 * use in a different page. */
+		/*
+		 * A buffer which has been freed while still being journaled by
+		 * a previous transaction.
+		 */
 		if (buffer_freed(bh)) {
-			clear_buffer_freed(bh);
-			clear_buffer_jbddirty(bh);
+			/*
+			 * If the running transaction is the one containing
+			 * "add to orphan" operation (b_next_transaction !=
+			 * NULL), we have to wait for that transaction to
+			 * commit before we can really get rid of the buffer.
+			 * So just clear b_modified to not confuse transaction
+			 * credit accounting and refile the buffer to
+			 * BJ_Forget of the running transaction. If the just
+			 * committed transaction contains "add to orphan"
+			 * operation, we can completely invalidate the buffer
+			 * now. We are rather throughout in that since the
+			 * buffer may be still accessible when blocksize <
+			 * pagesize and it is attached to the last partial
+			 * page.
+			 */
+			jh->b_modified = 0;
+			if (!jh->b_next_transaction) {
+				clear_buffer_freed(bh);
+				clear_buffer_jbddirty(bh);
+				clear_buffer_mapped(bh);
+				clear_buffer_new(bh);
+				clear_buffer_req(bh);
+				bh->b_bdev = NULL;
+			}
 		}
 
 		if (buffer_jbddirty(bh)) {
 			JBUFFER_TRACE(jh, "add to new checkpointing trans");
 			__journal_insert_checkpoint(jh, commit_transaction);
-			JBUFFER_TRACE(jh, "refile for checkpoint writeback");
-			__journal_refile_buffer(jh);
-			jbd_unlock_bh_state(bh);
+			if (is_journal_aborted(journal))
+				clear_buffer_jbddirty(bh);
 		} else {
 			J_ASSERT_BH(bh, !buffer_dirty(bh));
-			/* The buffer on BJ_Forget list and not jbddirty means
+			/*
+			 * The buffer on BJ_Forget list and not jbddirty means
 			 * it has been freed by this transaction and hence it
 			 * could not have been reallocated until this
 			 * transaction has committed. *BUT* it could be
 			 * reallocated once we have written all the data to
 			 * disk and before we process the buffer on BJ_Forget
-			 * list. */
-			JBUFFER_TRACE(jh, "refile or unfile freed buffer");
-			__journal_refile_buffer(jh);
-			if (!jh->b_transaction) {
-				jbd_unlock_bh_state(bh);
-				 /* needs a brelse */
-				journal_remove_journal_head(bh);
-				release_buffer_page(bh);
-			} else
-				jbd_unlock_bh_state(bh);
+			 * list.
+			 */
+			if (!jh->b_next_transaction)
+				try_to_free = 1;
 		}
+		JBUFFER_TRACE(jh, "refile or unfile freed buffer");
+		__journal_refile_buffer(jh);
+		jbd_unlock_bh_state(bh);
+		if (try_to_free)
+			release_buffer_page(bh);
+		else
+			__brelse(bh);
 		cond_resched_lock(&journal->j_list_lock);
 	}
 	spin_unlock(&journal->j_list_lock);
 	/*
-	 * This is a bit sleazy.  We borrow j_list_lock to protect
-	 * journal->j_committing_transaction in __journal_remove_checkpoint.
-	 * Really, __journal_remove_checkpoint should be using j_state_lock but
-	 * it's a bit hassle to hold that across __journal_remove_checkpoint
+	 * This is a bit sleazy.  We use j_list_lock to protect transition
+	 * of a transaction into T_FINISHED state and calling
+	 * __journal_drop_transaction(). Otherwise we could race with
+	 * other checkpointing code processing the transaction...
 	 */
 	spin_lock(&journal->j_state_lock);
 	spin_lock(&journal->j_list_lock);
@@ -879,15 +953,28 @@ restart_loop:
 
 	jbd_debug(3, "JBD: commit phase 8\n");
 
-	J_ASSERT(commit_transaction->t_state == T_COMMIT);
+	J_ASSERT(commit_transaction->t_state == T_COMMIT_RECORD);
 
 	commit_transaction->t_state = T_FINISHED;
 	J_ASSERT(commit_transaction == journal->j_committing_transaction);
 	journal->j_commit_sequence = commit_transaction->t_tid;
 	journal->j_committing_transaction = NULL;
+	commit_time = ktime_to_ns(ktime_sub(ktime_get(), start_time));
+
+	/*
+	 * weight the commit time higher than the average time so we don't
+	 * react too strongly to vast changes in commit time
+	 */
+	if (likely(journal->j_average_commit_time))
+		journal->j_average_commit_time = (commit_time*3 +
+				journal->j_average_commit_time) / 4;
+	else
+		journal->j_average_commit_time = commit_time;
+
 	spin_unlock(&journal->j_state_lock);
 
-	if (commit_transaction->t_checkpoint_list == NULL) {
+	if (commit_transaction->t_checkpoint_list == NULL &&
+	    commit_transaction->t_checkpoint_io_list == NULL) {
 		__journal_drop_transaction(journal, commit_transaction);
 	} else {
 		if (journal->j_checkpoint_transactions == NULL) {
@@ -907,6 +994,7 @@ restart_loop:
 	}
 	spin_unlock(&journal->j_list_lock);
 
+	trace_jbd_end_commit(journal, commit_transaction);
 	jbd_debug(1, "JBD: commit %d complete, head %d\n",
 		  journal->j_commit_sequence, journal->j_tail_sequence);
 

@@ -1,22 +1,22 @@
 /*
-    atxp1.c - kernel module for setting CPU VID and general purpose
-                     I/Os using the Attansic ATXP1 chip.
-
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation; either version 2 of the License, or
-    (at your option) any later version.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
-
-*/
+ * atxp1.c - kernel module for setting CPU VID and general purpose
+ *	     I/Os using the Attansic ATXP1 chip.
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ *
+ */
 
 #include <linux/kernel.h>
 #include <linux/init.h>
@@ -28,10 +28,11 @@
 #include <linux/err.h>
 #include <linux/mutex.h>
 #include <linux/sysfs.h>
+#include <linux/slab.h>
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("System voltages control via Attansic ATXP1");
-MODULE_VERSION("0.6.2");
+MODULE_VERSION("0.6.3");
 MODULE_AUTHOR("Sebastian Witt <se.witt@gmx.net>");
 
 #define ATXP1_VID	0x00
@@ -42,26 +43,34 @@ MODULE_AUTHOR("Sebastian Witt <se.witt@gmx.net>");
 #define ATXP1_VIDMASK	0x1f
 #define ATXP1_GPIO1MASK	0x0f
 
-static unsigned short normal_i2c[] = { 0x37, 0x4e, I2C_CLIENT_END };
+static const unsigned short normal_i2c[] = { 0x37, 0x4e, I2C_CLIENT_END };
 
-I2C_CLIENT_INSMOD_1(atxp1);
+static int atxp1_probe(struct i2c_client *client,
+		       const struct i2c_device_id *id);
+static int atxp1_remove(struct i2c_client *client);
+static struct atxp1_data *atxp1_update_device(struct device *dev);
+static int atxp1_detect(struct i2c_client *client, struct i2c_board_info *info);
 
-static int atxp1_attach_adapter(struct i2c_adapter * adapter);
-static int atxp1_detach_client(struct i2c_client * client);
-static struct atxp1_data * atxp1_update_device(struct device *dev);
-static int atxp1_detect(struct i2c_adapter *adapter, int address, int kind);
+static const struct i2c_device_id atxp1_id[] = {
+	{ "atxp1", 0 },
+	{ }
+};
+MODULE_DEVICE_TABLE(i2c, atxp1_id);
 
 static struct i2c_driver atxp1_driver = {
+	.class		= I2C_CLASS_HWMON,
 	.driver = {
 		.name	= "atxp1",
 	},
-	.attach_adapter = atxp1_attach_adapter,
-	.detach_client	= atxp1_detach_client,
+	.probe		= atxp1_probe,
+	.remove		= atxp1_remove,
+	.id_table	= atxp1_id,
+	.detect		= atxp1_detect,
+	.address_list	= normal_i2c,
 };
 
 struct atxp1_data {
-	struct i2c_client client;
-	struct class_device *class_dev;
+	struct device *hwmon_dev;
 	struct mutex update_lock;
 	unsigned long last_updated;
 	u8 valid;
@@ -74,7 +83,7 @@ struct atxp1_data {
 	u8 vrm;			/* Detected CPU VRM */
 };
 
-static struct atxp1_data * atxp1_update_device(struct device *dev)
+static struct atxp1_data *atxp1_update_device(struct device *dev)
 {
 	struct i2c_client *client;
 	struct atxp1_data *data;
@@ -88,7 +97,8 @@ static struct atxp1_data * atxp1_update_device(struct device *dev)
 
 		/* Update local register data */
 		data->reg.vid = i2c_smbus_read_byte_data(client, ATXP1_VID);
-		data->reg.cpu_vid = i2c_smbus_read_byte_data(client, ATXP1_CVID);
+		data->reg.cpu_vid = i2c_smbus_read_byte_data(client,
+							     ATXP1_CVID);
 		data->reg.gpio1 = i2c_smbus_read_byte_data(client, ATXP1_GPIO1);
 		data->reg.gpio2 = i2c_smbus_read_byte_data(client, ATXP1_GPIO2);
 
@@ -97,33 +107,41 @@ static struct atxp1_data * atxp1_update_device(struct device *dev)
 
 	mutex_unlock(&data->update_lock);
 
-	return(data);
+	return data;
 }
 
 /* sys file functions for cpu0_vid */
-static ssize_t atxp1_showvcore(struct device *dev, struct device_attribute *attr, char *buf)
+static ssize_t atxp1_showvcore(struct device *dev,
+			       struct device_attribute *attr, char *buf)
 {
 	int size;
 	struct atxp1_data *data;
 
 	data = atxp1_update_device(dev);
 
-	size = sprintf(buf, "%d\n", vid_from_reg(data->reg.vid & ATXP1_VIDMASK, data->vrm));
+	size = sprintf(buf, "%d\n", vid_from_reg(data->reg.vid & ATXP1_VIDMASK,
+						 data->vrm));
 
 	return size;
 }
 
-static ssize_t atxp1_storevcore(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+static ssize_t atxp1_storevcore(struct device *dev,
+				struct device_attribute *attr,
+				const char *buf, size_t count)
 {
 	struct atxp1_data *data;
 	struct i2c_client *client;
 	int vid, cvid;
-	unsigned int vcore;
+	unsigned long vcore;
+	int err;
 
 	client = to_i2c_client(dev);
 	data = atxp1_update_device(dev);
 
-	vcore = simple_strtoul(buf, NULL, 10);
+	err = kstrtoul(buf, 10, &vcore);
+	if (err)
+		return err;
+
 	vcore /= 25;
 	vcore *= 25;
 
@@ -135,7 +153,10 @@ static ssize_t atxp1_storevcore(struct device *dev, struct device_attribute *att
 		return -1;
 	}
 
-	/* If output enabled, use control register value. Otherwise original CPU VID */
+	/*
+	 * If output enabled, use control register value.
+	 * Otherwise original CPU VID
+	 */
 	if (data->reg.vid & ATXP1_VIDENA)
 		cvid = data->reg.vid & ATXP1_VIDMASK;
 	else
@@ -145,18 +166,17 @@ static ssize_t atxp1_storevcore(struct device *dev, struct device_attribute *att
 	if (vid == cvid)
 		return count;
 
-	dev_dbg(dev, "Setting VCore to %d mV (0x%02x)\n", vcore, vid);
+	dev_dbg(dev, "Setting VCore to %d mV (0x%02x)\n", (int)vcore, vid);
 
 	/* Write every 25 mV step to increase stability */
 	if (cvid > vid) {
-		for (; cvid >= vid; cvid--) {
-        		i2c_smbus_write_byte_data(client, ATXP1_VID, cvid | ATXP1_VIDENA);
-		}
-	}
-	else {
-		for (; cvid <= vid; cvid++) {
-        		i2c_smbus_write_byte_data(client, ATXP1_VID, cvid | ATXP1_VIDENA);
-		}
+		for (; cvid >= vid; cvid--)
+			i2c_smbus_write_byte_data(client,
+						ATXP1_VID, cvid | ATXP1_VIDENA);
+	} else {
+		for (; cvid <= vid; cvid++)
+			i2c_smbus_write_byte_data(client,
+						ATXP1_VID, cvid | ATXP1_VIDENA);
 	}
 
 	data->valid = 0;
@@ -164,13 +184,16 @@ static ssize_t atxp1_storevcore(struct device *dev, struct device_attribute *att
 	return count;
 }
 
-/* CPU core reference voltage
-    unit: millivolt
-*/
-static DEVICE_ATTR(cpu0_vid, S_IRUGO | S_IWUSR, atxp1_showvcore, atxp1_storevcore);
+/*
+ * CPU core reference voltage
+ * unit: millivolt
+ */
+static DEVICE_ATTR(cpu0_vid, S_IRUGO | S_IWUSR, atxp1_showvcore,
+		   atxp1_storevcore);
 
 /* sys file functions for GPIO1 */
-static ssize_t atxp1_showgpio1(struct device *dev, struct device_attribute *attr, char *buf)
+static ssize_t atxp1_showgpio1(struct device *dev,
+			       struct device_attribute *attr, char *buf)
 {
 	int size;
 	struct atxp1_data *data;
@@ -182,21 +205,26 @@ static ssize_t atxp1_showgpio1(struct device *dev, struct device_attribute *attr
 	return size;
 }
 
-static ssize_t atxp1_storegpio1(struct device *dev, struct device_attribute *attr, const char*buf, size_t count)
+static ssize_t atxp1_storegpio1(struct device *dev,
+				struct device_attribute *attr, const char *buf,
+				size_t count)
 {
 	struct atxp1_data *data;
 	struct i2c_client *client;
-	unsigned int value;
+	unsigned long value;
+	int err;
 
 	client = to_i2c_client(dev);
 	data = atxp1_update_device(dev);
 
-	value = simple_strtoul(buf, NULL, 16);
+	err = kstrtoul(buf, 16, &value);
+	if (err)
+		return err;
 
 	value &= ATXP1_GPIO1MASK;
 
 	if (value != (data->reg.gpio1 & ATXP1_GPIO1MASK)) {
-		dev_info(dev, "Writing 0x%x to GPIO1.\n", value);
+		dev_info(dev, "Writing 0x%x to GPIO1.\n", (unsigned int)value);
 
 		i2c_smbus_write_byte_data(client, ATXP1_GPIO1, value);
 
@@ -206,13 +234,15 @@ static ssize_t atxp1_storegpio1(struct device *dev, struct device_attribute *att
 	return count;
 }
 
-/* GPIO1 data register
-    unit: Four bit as hex (e.g. 0x0f)
-*/
+/*
+ * GPIO1 data register
+ * unit: Four bit as hex (e.g. 0x0f)
+ */
 static DEVICE_ATTR(gpio1, S_IRUGO | S_IWUSR, atxp1_showgpio1, atxp1_storegpio1);
 
 /* sys file functions for GPIO2 */
-static ssize_t atxp1_showgpio2(struct device *dev, struct device_attribute *attr, char *buf)
+static ssize_t atxp1_showgpio2(struct device *dev,
+			       struct device_attribute *attr, char *buf)
 {
 	int size;
 	struct atxp1_data *data;
@@ -224,19 +254,22 @@ static ssize_t atxp1_showgpio2(struct device *dev, struct device_attribute *attr
 	return size;
 }
 
-static ssize_t atxp1_storegpio2(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+static ssize_t atxp1_storegpio2(struct device *dev,
+				struct device_attribute *attr,
+				const char *buf, size_t count)
 {
-	struct atxp1_data *data;
-	struct i2c_client *client;
-	unsigned int value;
+	struct atxp1_data *data = atxp1_update_device(dev);
+	struct i2c_client *client = to_i2c_client(dev);
+	unsigned long value;
+	int err;
 
-	client = to_i2c_client(dev);
-	data = atxp1_update_device(dev);
-
-	value = simple_strtoul(buf, NULL, 16) & 0xff;
+	err = kstrtoul(buf, 16, &value);
+	if (err)
+		return err;
+	value &= 0xff;
 
 	if (value != data->reg.gpio2) {
-		dev_info(dev, "Writing 0x%x to GPIO1.\n", value);
+		dev_info(dev, "Writing 0x%x to GPIO1.\n", (unsigned int)value);
 
 		i2c_smbus_write_byte_data(client, ATXP1_GPIO2, value);
 
@@ -246,9 +279,10 @@ static ssize_t atxp1_storegpio2(struct device *dev, struct device_attribute *att
 	return count;
 }
 
-/* GPIO2 data register
-    unit: Eight bit as hex (e.g. 0xff)
-*/
+/*
+ * GPIO2 data register
+ * unit: Eight bit as hex (e.g. 0xff)
+ */
 static DEVICE_ATTR(gpio2, S_IRUGO | S_IWUSR, atxp1_showgpio2, atxp1_storegpio2);
 
 static struct attribute *atxp1_attributes[] = {
@@ -263,81 +297,75 @@ static const struct attribute_group atxp1_group = {
 };
 
 
-static int atxp1_attach_adapter(struct i2c_adapter *adapter)
+/* Return 0 if detection is successful, -ENODEV otherwise */
+static int atxp1_detect(struct i2c_client *new_client,
+			struct i2c_board_info *info)
 {
-	if (!(adapter->class & I2C_CLASS_HWMON))
-		return 0;
-	return i2c_probe(adapter, &addr_data, &atxp1_detect);
-};
+	struct i2c_adapter *adapter = new_client->adapter;
 
-static int atxp1_detect(struct i2c_adapter *adapter, int address, int kind)
-{
-	struct i2c_client * new_client;
-	struct atxp1_data * data;
-	int err = 0;
 	u8 temp;
 
 	if (!i2c_check_functionality(adapter, I2C_FUNC_SMBUS_BYTE_DATA))
-		goto exit;
-
-	if (!(data = kzalloc(sizeof(struct atxp1_data), GFP_KERNEL))) {
-		err = -ENOMEM;
-		goto exit;
-	}
-
-	new_client = &data->client;
-	i2c_set_clientdata(new_client, data);
-
-	new_client->addr = address;
-	new_client->adapter = adapter;
-	new_client->driver = &atxp1_driver;
-	new_client->flags = 0;
+		return -ENODEV;
 
 	/* Detect ATXP1, checking if vendor ID registers are all zero */
 	if (!((i2c_smbus_read_byte_data(new_client, 0x3e) == 0) &&
 	     (i2c_smbus_read_byte_data(new_client, 0x3f) == 0) &&
 	     (i2c_smbus_read_byte_data(new_client, 0xfe) == 0) &&
-	     (i2c_smbus_read_byte_data(new_client, 0xff) == 0) )) {
+	     (i2c_smbus_read_byte_data(new_client, 0xff) == 0)))
+		return -ENODEV;
 
-		/* No vendor ID, now checking if registers 0x10,0x11 (non-existent)
-		 * showing the same as register 0x00 */
-		temp = i2c_smbus_read_byte_data(new_client, 0x00);
+	/*
+	 * No vendor ID, now checking if registers 0x10,0x11 (non-existent)
+	 * showing the same as register 0x00
+	 */
+	temp = i2c_smbus_read_byte_data(new_client, 0x00);
 
-		if (!((i2c_smbus_read_byte_data(new_client, 0x10) == temp) &&
-			 (i2c_smbus_read_byte_data(new_client, 0x11) == temp) ))
-			goto exit_free;
+	if (!((i2c_smbus_read_byte_data(new_client, 0x10) == temp) &&
+	      (i2c_smbus_read_byte_data(new_client, 0x11) == temp)))
+		return -ENODEV;
+
+	/* Get VRM */
+	temp = vid_which_vrm();
+
+	if ((temp != 90) && (temp != 91)) {
+		dev_err(&adapter->dev, "atxp1: Not supporting VRM %d.%d\n",
+				temp / 10, temp % 10);
+		return -ENODEV;
 	}
+
+	strlcpy(info->type, "atxp1", I2C_NAME_SIZE);
+
+	return 0;
+}
+
+static int atxp1_probe(struct i2c_client *new_client,
+		       const struct i2c_device_id *id)
+{
+	struct atxp1_data *data;
+	int err;
+
+	data = devm_kzalloc(&new_client->dev, sizeof(struct atxp1_data),
+			    GFP_KERNEL);
+	if (!data)
+		return -ENOMEM;
 
 	/* Get VRM */
 	data->vrm = vid_which_vrm();
 
-	if ((data->vrm != 90) && (data->vrm != 91)) {
-		dev_err(&new_client->dev, "Not supporting VRM %d.%d\n",
-				data->vrm / 10, data->vrm % 10);
-		goto exit_free;
-	}
-
-	strncpy(new_client->name, "atxp1", I2C_NAME_SIZE);
-
+	i2c_set_clientdata(new_client, data);
 	data->valid = 0;
 
 	mutex_init(&data->update_lock);
 
-	err = i2c_attach_client(new_client);
-
-	if (err)
-	{
-		dev_err(&new_client->dev, "Attach client error.\n");
-		goto exit_free;
-	}
-
 	/* Register sysfs hooks */
-	if ((err = sysfs_create_group(&new_client->dev.kobj, &atxp1_group)))
-		goto exit_detach;
+	err = sysfs_create_group(&new_client->dev.kobj, &atxp1_group);
+	if (err)
+		return err;
 
-	data->class_dev = hwmon_device_register(&new_client->dev);
-	if (IS_ERR(data->class_dev)) {
-		err = PTR_ERR(data->class_dev);
+	data->hwmon_dev = hwmon_device_register(&new_client->dev);
+	if (IS_ERR(data->hwmon_dev)) {
+		err = PTR_ERR(data->hwmon_dev);
 		goto exit_remove_files;
 	}
 
@@ -348,41 +376,17 @@ static int atxp1_detect(struct i2c_adapter *adapter, int address, int kind)
 
 exit_remove_files:
 	sysfs_remove_group(&new_client->dev.kobj, &atxp1_group);
-exit_detach:
-	i2c_detach_client(new_client);
-exit_free:
-	kfree(data);
-exit:
 	return err;
 };
 
-static int atxp1_detach_client(struct i2c_client * client)
+static int atxp1_remove(struct i2c_client *client)
 {
-	struct atxp1_data * data = i2c_get_clientdata(client);
-	int err;
+	struct atxp1_data *data = i2c_get_clientdata(client);
 
-	hwmon_device_unregister(data->class_dev);
+	hwmon_device_unregister(data->hwmon_dev);
 	sysfs_remove_group(&client->dev.kobj, &atxp1_group);
 
-	err = i2c_detach_client(client);
-
-	if (err)
-		dev_err(&client->dev, "Failed to detach client.\n");
-	else
-		kfree(data);
-
-	return err;
+	return 0;
 };
 
-static int __init atxp1_init(void)
-{
-	return i2c_add_driver(&atxp1_driver);
-};
-
-static void __exit atxp1_exit(void)
-{
-	i2c_del_driver(&atxp1_driver);
-};
-
-module_init(atxp1_init);
-module_exit(atxp1_exit);
+module_i2c_driver(atxp1_driver);

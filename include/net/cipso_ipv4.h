@@ -8,7 +8,7 @@
  * have chosen to adopt the protocol and over the years it has become a
  * de-facto standard for labeled networking.
  *
- * Author: Paul Moore <paul.moore@hp.com>
+ * Author: Paul Moore <paul@paul-moore.com>
  *
  */
 
@@ -40,11 +40,14 @@
 #include <linux/net.h>
 #include <linux/skbuff.h>
 #include <net/netlabel.h>
+#include <net/request_sock.h>
+#include <linux/atomic.h>
+#include <asm/unaligned.h>
 
 /* known doi values */
 #define CIPSO_V4_DOI_UNKNOWN          0x00000000
 
-/* tag types */
+/* standard tag types */
 #define CIPSO_V4_TAG_INVALID          0
 #define CIPSO_V4_TAG_RBITMAP          1
 #define CIPSO_V4_TAG_ENUM             2
@@ -52,10 +55,14 @@
 #define CIPSO_V4_TAG_PBITMAP          6
 #define CIPSO_V4_TAG_FREEFORM         7
 
+/* non-standard tag types (tags > 127) */
+#define CIPSO_V4_TAG_LOCAL            128
+
 /* doi mapping types */
 #define CIPSO_V4_MAP_UNKNOWN          0
-#define CIPSO_V4_MAP_STD              1
+#define CIPSO_V4_MAP_TRANS            1
 #define CIPSO_V4_MAP_PASS             2
+#define CIPSO_V4_MAP_LOCAL            3
 
 /* limits */
 #define CIPSO_V4_MAX_REM_LVLS         255
@@ -79,10 +86,9 @@ struct cipso_v4_doi {
 	} map;
 	u8 tags[CIPSO_V4_TAG_MAXCNT];
 
-	u32 valid;
+	atomic_t refcount;
 	struct list_head list;
 	struct rcu_head rcu;
-	struct list_head dom_list;
 };
 
 /* Standard CIPSO mapping table */
@@ -127,26 +133,29 @@ extern int cipso_v4_rbm_strictvalid;
  */
 
 #ifdef CONFIG_NETLABEL
-int cipso_v4_doi_add(struct cipso_v4_doi *doi_def);
-int cipso_v4_doi_remove(u32 doi,
-			struct netlbl_audit *audit_info,
-			void (*callback) (struct rcu_head * head));
+int cipso_v4_doi_add(struct cipso_v4_doi *doi_def,
+		     struct netlbl_audit *audit_info);
+void cipso_v4_doi_free(struct cipso_v4_doi *doi_def);
+int cipso_v4_doi_remove(u32 doi, struct netlbl_audit *audit_info);
 struct cipso_v4_doi *cipso_v4_doi_getdef(u32 doi);
+void cipso_v4_doi_putdef(struct cipso_v4_doi *doi_def);
 int cipso_v4_doi_walk(u32 *skip_cnt,
 		     int (*callback) (struct cipso_v4_doi *doi_def, void *arg),
 	             void *cb_arg);
-int cipso_v4_doi_domhsh_add(struct cipso_v4_doi *doi_def, const char *domain);
-int cipso_v4_doi_domhsh_remove(struct cipso_v4_doi *doi_def,
-			       const char *domain);
 #else
-static inline int cipso_v4_doi_add(struct cipso_v4_doi *doi_def)
+static inline int cipso_v4_doi_add(struct cipso_v4_doi *doi_def,
+				   struct netlbl_audit *audit_info)
 {
 	return -ENOSYS;
 }
 
+static inline void cipso_v4_doi_free(struct cipso_v4_doi *doi_def)
+{
+	return;
+}
+
 static inline int cipso_v4_doi_remove(u32 doi,
-				    struct netlbl_audit *audit_info,
-				    void (*callback) (struct rcu_head * head))
+				      struct netlbl_audit *audit_info)
 {
 	return 0;
 }
@@ -206,10 +215,19 @@ void cipso_v4_error(struct sk_buff *skb, int error, u32 gateway);
 int cipso_v4_sock_setattr(struct sock *sk,
 			  const struct cipso_v4_doi *doi_def,
 			  const struct netlbl_lsm_secattr *secattr);
+void cipso_v4_sock_delattr(struct sock *sk);
 int cipso_v4_sock_getattr(struct sock *sk, struct netlbl_lsm_secattr *secattr);
+int cipso_v4_req_setattr(struct request_sock *req,
+			 const struct cipso_v4_doi *doi_def,
+			 const struct netlbl_lsm_secattr *secattr);
+void cipso_v4_req_delattr(struct request_sock *req);
+int cipso_v4_skbuff_setattr(struct sk_buff *skb,
+			    const struct cipso_v4_doi *doi_def,
+			    const struct netlbl_lsm_secattr *secattr);
+int cipso_v4_skbuff_delattr(struct sk_buff *skb);
 int cipso_v4_skbuff_getattr(const struct sk_buff *skb,
 			    struct netlbl_lsm_secattr *secattr);
-int cipso_v4_validate(unsigned char **option);
+int cipso_v4_validate(const struct sk_buff *skb, unsigned char **option);
 #else
 static inline void cipso_v4_error(struct sk_buff *skb,
 				  int error,
@@ -225,8 +243,36 @@ static inline int cipso_v4_sock_setattr(struct sock *sk,
 	return -ENOSYS;
 }
 
+static inline void cipso_v4_sock_delattr(struct sock *sk)
+{
+}
+
 static inline int cipso_v4_sock_getattr(struct sock *sk,
 					struct netlbl_lsm_secattr *secattr)
+{
+	return -ENOSYS;
+}
+
+static inline int cipso_v4_req_setattr(struct request_sock *req,
+				       const struct cipso_v4_doi *doi_def,
+				       const struct netlbl_lsm_secattr *secattr)
+{
+	return -ENOSYS;
+}
+
+static inline void cipso_v4_req_delattr(struct request_sock *req)
+{
+	return;
+}
+
+static inline int cipso_v4_skbuff_setattr(struct sk_buff *skb,
+				      const struct cipso_v4_doi *doi_def,
+				      const struct netlbl_lsm_secattr *secattr)
+{
+	return -ENOSYS;
+}
+
+static inline int cipso_v4_skbuff_delattr(struct sk_buff *skb)
 {
 	return -ENOSYS;
 }
@@ -237,9 +283,36 @@ static inline int cipso_v4_skbuff_getattr(const struct sk_buff *skb,
 	return -ENOSYS;
 }
 
-static inline int cipso_v4_validate(unsigned char **option)
+static inline int cipso_v4_validate(const struct sk_buff *skb,
+				    unsigned char **option)
 {
-	return -ENOSYS;
+	unsigned char *opt = *option;
+	unsigned char err_offset = 0;
+	u8 opt_len = opt[1];
+	u8 opt_iter;
+
+	if (opt_len < 8) {
+		err_offset = 1;
+		goto out;
+	}
+
+	if (get_unaligned_be32(&opt[2]) == 0) {
+		err_offset = 2;
+		goto out;
+	}
+
+	for (opt_iter = 6; opt_iter < opt_len;) {
+		if (opt[opt_iter + 1] > (opt_len - opt_iter)) {
+			err_offset = opt_iter + 1;
+			goto out;
+		}
+		opt_iter += opt[opt_iter + 1];
+	}
+
+out:
+	*option = opt + err_offset;
+	return err_offset;
+
 }
 #endif /* CONFIG_NETLABEL */
 

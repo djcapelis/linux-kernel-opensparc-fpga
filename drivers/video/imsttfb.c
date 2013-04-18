@@ -21,7 +21,6 @@
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/mm.h>
-#include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
@@ -29,7 +28,7 @@
 #include <linux/init.h>
 #include <linux/pci.h>
 #include <asm/io.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
 #if defined(CONFIG_PPC)
 #include <linux/nvram.h>
@@ -226,7 +225,7 @@ struct initvalues {
 	__u8 addr, value;
 };
 
-static struct initvalues ibm_initregs[] __devinitdata = {
+static struct initvalues ibm_initregs[] = {
 	{ CLKCTL,	0x21 },
 	{ SYNCCTL,	0x00 },
 	{ HSYNCPOS,	0x00 },
@@ -273,7 +272,7 @@ static struct initvalues ibm_initregs[] __devinitdata = {
 	{ KEYCTL,	0x00 }
 };
 
-static struct initvalues tvp_initregs[] __devinitdata = {
+static struct initvalues tvp_initregs[] = {
 	{ TVPIRICC,	0x00 },
 	{ TVPIRBRC,	0xe4 },
 	{ TVPIRLAC,	0x06 },
@@ -337,7 +336,7 @@ enum {
 static int inverse = 0;
 static char fontname[40] __initdata = { 0 };
 #if defined(CONFIG_PPC)
-static signed char init_vmode __devinitdata = -1, init_cmode __devinitdata = -1;
+static signed char init_vmode = -1, init_cmode = -1;
 #endif
 
 static struct imstt_regvals tvp_reg_init_2 = {
@@ -750,7 +749,7 @@ set_offset (struct fb_var_screeninfo *var, struct fb_info *info)
 {
 	struct imstt_par *par = info->par;
 	__u32 off = var->yoffset * (info->fix.line_length >> 3)
-		    + ((var->xoffset * (var->bits_per_pixel >> 3)) >> 3);
+		    + ((var->xoffset * (info->var.bits_per_pixel >> 3)) >> 3);
 	write_reg_le32(par->dc_regs, SSR, off);
 }
 
@@ -1151,8 +1150,10 @@ imsttfb_load_cursor_image(struct imstt_par *par, int width, int height, __u8 fgc
 				par->cmap_regs[TVPCRDAT] = 0xff;		eieio();
 			}
 		par->cmap_regs[TVPCADRW] = 0x00;	eieio();
-		for (x = 0; x < 12; x++)
-			par->cmap_regs[TVPCDATA] = fgc;	eieio();
+		for (x = 0; x < 12; x++) {
+			par->cmap_regs[TVPCDATA] = fgc;
+			eieio();
+		}
 	}
 	return 1;
 }
@@ -1332,7 +1333,7 @@ static struct pci_driver imsttfb_pci_driver = {
 	.name =		"imsttfb",
 	.id_table =	imsttfb_pci_tbl,
 	.probe =	imsttfb_probe,
-	.remove =	__devexit_p(imsttfb_remove),
+	.remove =	imsttfb_remove,
 };
 
 static struct fb_ops imsttfb_ops = {
@@ -1348,8 +1349,7 @@ static struct fb_ops imsttfb_ops = {
 	.fb_ioctl 	= imsttfb_ioctl,
 };
 
-static void __devinit
-init_imstt(struct fb_info *info)
+static void init_imstt(struct fb_info *info)
 {
 	struct imstt_par *par = info->par;
 	__u32 i, tmp, *ip, *end;
@@ -1391,7 +1391,7 @@ init_imstt(struct fb_info *info)
 		}
 	}
 
-#if USE_NV_MODES && defined(CONFIG_PPC)
+#if USE_NV_MODES && defined(CONFIG_PPC32)
 	{
 		int vmode = init_vmode, cmode = init_cmode;
 
@@ -1465,8 +1465,7 @@ init_imstt(struct fb_info *info)
 		info->node, info->fix.id, info->fix.smem_len >> 20, tmp);
 }
 
-static int __devinit
-imsttfb_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
+static int imsttfb_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 {
 	unsigned long addr, size;
 	struct imstt_par *par;
@@ -1476,7 +1475,7 @@ imsttfb_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	
 	dp = pci_device_to_OF_node(pdev);
 	if(dp)
-		printk(KERN_INFO "%s: OF name %s\n",__FUNCTION__, dp->name);
+		printk(KERN_INFO "%s: OF name %s\n",__func__, dp->name);
 	else
 		printk(KERN_ERR "imsttfb: no OF node for pci device\n");
 #endif /* CONFIG_PPC_OF */
@@ -1533,8 +1532,7 @@ imsttfb_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	return 0;
 }
 
-static void __devexit
-imsttfb_remove(struct pci_dev *pdev)
+static void imsttfb_remove(struct pci_dev *pdev)
 {
 	struct fb_info *info = pci_get_drvdata(pdev);
 	struct imstt_par *par = info->par;

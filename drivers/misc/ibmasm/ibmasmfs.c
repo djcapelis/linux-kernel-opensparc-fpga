@@ -17,19 +17,19 @@
  *
  * Copyright (C) IBM Corporation, 2004
  *
- * Author: Max Asböck <amax@us.ibm.com> 
+ * Author: Max AsbÃ¶ck <amax@us.ibm.com>
  *
  */
 
 /*
- * Parts of this code are based on an article by Jonathan Corbet 
+ * Parts of this code are based on an article by Jonathan Corbet
  * that appeared in Linux Weekly News.
  */
 
 
 /*
  * The IBMASM file virtual filesystem. It creates the following hierarchy
- * dymamically when mounted from user space:
+ * dynamically when mounted from user space:
  *
  *    /ibmasm
  *    |-- 0
@@ -55,26 +55,27 @@
  * For each service processor the following files are created:
  *
  * command: execute dot commands
- * 	write: execute a dot command on the service processor
- * 	read: return the result of a previously executed dot command
+ *	write: execute a dot command on the service processor
+ *	read: return the result of a previously executed dot command
  *
  * events: listen for service processor events
- * 	read: sleep (interruptible) until an event occurs
+ *	read: sleep (interruptible) until an event occurs
  *      write: wakeup sleeping event listener
  *
  * reverse_heartbeat: send a heartbeat to the service processor
- * 	read: sleep (interruptible) until the reverse heartbeat fails
+ *	read: sleep (interruptible) until the reverse heartbeat fails
  *      write: wakeup sleeping heartbeat listener
  *
  * remote_video/width
  * remote_video/height
  * remote_video/width: control remote display settings
- * 	write: set value
- * 	read: read value
+ *	write: set value
+ *	read: read value
  */
 
 #include <linux/fs.h>
 #include <linux/pagemap.h>
+#include <linux/slab.h>
 #include <asm/uaccess.h>
 #include <asm/io.h>
 #include "ibmasm.h"
@@ -86,18 +87,17 @@
 static LIST_HEAD(service_processors);
 
 static struct inode *ibmasmfs_make_inode(struct super_block *sb, int mode);
-static void ibmasmfs_create_files (struct super_block *sb, struct dentry *root);
+static void ibmasmfs_create_files (struct super_block *sb);
 static int ibmasmfs_fill_super (struct super_block *sb, void *data, int silent);
 
 
-static int ibmasmfs_get_super(struct file_system_type *fst,
-			int flags, const char *name, void *data,
-			struct vfsmount *mnt)
+static struct dentry *ibmasmfs_mount(struct file_system_type *fst,
+			int flags, const char *name, void *data)
 {
-	return get_sb_single(fst, flags, data, ibmasmfs_fill_super, mnt);
+	return mount_single(fst, flags, data, ibmasmfs_fill_super);
 }
 
-static struct super_operations ibmasmfs_s_ops = {
+static const struct super_operations ibmasmfs_s_ops = {
 	.statfs		= simple_statfs,
 	.drop_inode	= generic_delete_inode,
 };
@@ -107,14 +107,13 @@ static const struct file_operations *ibmasmfs_dir_ops = &simple_dir_operations;
 static struct file_system_type ibmasmfs_type = {
 	.owner          = THIS_MODULE,
 	.name           = "ibmasmfs",
-	.get_sb         = ibmasmfs_get_super,
+	.mount          = ibmasmfs_mount,
 	.kill_sb        = kill_litter_super,
 };
 
 static int ibmasmfs_fill_super (struct super_block *sb, void *data, int silent)
 {
 	struct inode *root;
-	struct dentry *root_dentry;
 
 	sb->s_blocksize = PAGE_CACHE_SIZE;
 	sb->s_blocksize_bits = PAGE_CACHE_SHIFT;
@@ -129,14 +128,11 @@ static int ibmasmfs_fill_super (struct super_block *sb, void *data, int silent)
 	root->i_op = &simple_dir_inode_operations;
 	root->i_fop = ibmasmfs_dir_ops;
 
-	root_dentry = d_alloc_root(root);
-	if (!root_dentry) {
-		iput(root);
+	sb->s_root = d_make_root(root);
+	if (!sb->s_root)
 		return -ENOMEM;
-	}
-	sb->s_root = root_dentry;
 
-	ibmasmfs_create_files(sb, root_dentry);
+	ibmasmfs_create_files(sb);
 	return 0;
 }
 
@@ -145,9 +141,8 @@ static struct inode *ibmasmfs_make_inode(struct super_block *sb, int mode)
 	struct inode *ret = new_inode(sb);
 
 	if (ret) {
+		ret->i_ino = get_next_ino();
 		ret->i_mode = mode;
-		ret->i_uid = ret->i_gid = 0;
-		ret->i_blocks = 0;
 		ret->i_atime = ret->i_mtime = ret->i_ctime = CURRENT_TIME;
 	}
 	return ret;
@@ -155,7 +150,7 @@ static struct inode *ibmasmfs_make_inode(struct super_block *sb, int mode)
 
 static struct dentry *ibmasmfs_create_file (struct super_block *sb,
 			struct dentry *parent,
-		       	const char *name,
+			const char *name,
 			const struct file_operations *fops,
 			void *data,
 			int mode)
@@ -261,7 +256,7 @@ static int command_file_close(struct inode *inode, struct file *file)
 	struct ibmasmfs_command_data *command_data = file->private_data;
 
 	if (command_data->command)
-		command_put(command_data->command);	
+		command_put(command_data->command);
 
 	kfree(command_data);
 	return 0;
@@ -348,7 +343,7 @@ static ssize_t command_file_write(struct file *file, const char __user *ubuff, s
 static int event_file_open(struct inode *inode, struct file *file)
 {
 	struct ibmasmfs_event_data *event_data;
-	struct service_processor *sp; 
+	struct service_processor *sp;
 
 	if (!inode->i_private)
 		return -ENODEV;
@@ -505,12 +500,6 @@ static ssize_t r_heartbeat_file_write(struct file *file, const char __user *buf,
 	return 1;
 }
 
-static int remote_settings_file_open(struct inode *inode, struct file *file)
-{
-	file->private_data = inode->i_private;
-	return 0;
-}
-
 static int remote_settings_file_close(struct inode *inode, struct file *file)
 {
 	return 0;
@@ -563,17 +552,16 @@ static ssize_t remote_settings_file_write(struct file *file, const char __user *
 	if (*offset != 0)
 		return 0;
 
-	buff = kmalloc (count + 1, GFP_KERNEL);
+	buff = kzalloc (count + 1, GFP_KERNEL);
 	if (!buff)
 		return -ENOMEM;
 
-	memset(buff, 0x0, count + 1);
 
 	if (copy_from_user(buff, ubuff, count)) {
 		kfree(buff);
 		return -EFAULT;
 	}
-	
+
 	value = simple_strtoul(buff, NULL, 10);
 	writel(value, address);
 	kfree(buff);
@@ -586,6 +574,7 @@ static const struct file_operations command_fops = {
 	.release =	command_file_close,
 	.read =		command_file_read,
 	.write =	command_file_write,
+	.llseek =	generic_file_llseek,
 };
 
 static const struct file_operations event_fops = {
@@ -593,6 +582,7 @@ static const struct file_operations event_fops = {
 	.release =	event_file_close,
 	.read =		event_file_read,
 	.write =	event_file_write,
+	.llseek =	generic_file_llseek,
 };
 
 static const struct file_operations r_heartbeat_fops = {
@@ -600,17 +590,19 @@ static const struct file_operations r_heartbeat_fops = {
 	.release =	r_heartbeat_file_close,
 	.read =		r_heartbeat_file_read,
 	.write =	r_heartbeat_file_write,
+	.llseek =	generic_file_llseek,
 };
 
 static const struct file_operations remote_settings_fops = {
-	.open =		remote_settings_file_open,
+	.open =		simple_open,
 	.release =	remote_settings_file_close,
 	.read =		remote_settings_file_read,
 	.write =	remote_settings_file_write,
+	.llseek =	generic_file_llseek,
 };
 
 
-static void ibmasmfs_create_files (struct super_block *sb, struct dentry *root)
+static void ibmasmfs_create_files (struct super_block *sb)
 {
 	struct list_head *entry;
 	struct service_processor *sp;
@@ -619,7 +611,7 @@ static void ibmasmfs_create_files (struct super_block *sb, struct dentry *root)
 		struct dentry *dir;
 		struct dentry *remote_dir;
 		sp = list_entry(entry, struct service_processor, node);
-		dir = ibmasmfs_create_dir(sb, root, sp->dirname);
+		dir = ibmasmfs_create_dir(sb, sb->s_root, sp->dirname);
 		if (!dir)
 			continue;
 

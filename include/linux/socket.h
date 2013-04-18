@@ -1,36 +1,26 @@
 #ifndef _LINUX_SOCKET_H
 #define _LINUX_SOCKET_H
 
-/*
- * Desired design of maximum size and alignment (see RFC2553)
- */
-#define _K_SS_MAXSIZE	128	/* Implementation specific max size */
-#define _K_SS_ALIGNSIZE	(__alignof__ (struct sockaddr *))
-				/* Implementation specific desired alignment */
-
-struct __kernel_sockaddr_storage {
-	unsigned short	ss_family;		/* address family */
-	/* Following field(s) are implementation specific */
-	char		__data[_K_SS_MAXSIZE - sizeof(unsigned short)];
-				/* space to achieve desired size, */
-				/* _SS_MAXSIZE value minus size of ss_family */
-} __attribute__ ((aligned(_K_SS_ALIGNSIZE)));	/* force desired alignment */
-
-#if defined(__KERNEL__) || !defined(__GLIBC__) || (__GLIBC__ < 2)
 
 #include <asm/socket.h>			/* arch-dependent defines	*/
 #include <linux/sockios.h>		/* the SIOCxxx I/O controls	*/
 #include <linux/uio.h>			/* iovec support		*/
 #include <linux/types.h>		/* pid_t			*/
 #include <linux/compiler.h>		/* __user			*/
+#include <uapi/linux/socket.h>
 
-extern int sysctl_somaxconn;
+struct pid;
+struct cred;
+
+#define __sockaddr_check_size(size)	\
+	BUILD_BUG_ON(((size) > sizeof(struct __kernel_sockaddr_storage)))
+
 #ifdef CONFIG_PROC_FS
 struct seq_file;
 extern void socket_seq_show(struct seq_file *seq);
 #endif
 
-typedef unsigned short	sa_family_t;
+typedef __kernel_sa_family_t	sa_family_t;
 
 /*
  *	1003.1g requires sa_family_t and that sa_data is char.
@@ -61,7 +51,13 @@ struct msghdr {
 	__kernel_size_t	msg_iovlen;	/* Number of blocks		*/
 	void 	*	msg_control;	/* Per protocol magic (eg BSD file descriptor passing) */
 	__kernel_size_t	msg_controllen;	/* Length of cmsg list */
-	unsigned	msg_flags;
+	unsigned int	msg_flags;
+};
+
+/* For recvmmsg/sendmmsg */
+struct mmsghdr {
+	struct msghdr   msg_hdr;
+	unsigned int        msg_len;
 };
 
 /*
@@ -77,7 +73,7 @@ struct cmsghdr {
 };
 
 /*
- *	Ancilliary data object information MACROS
+ *	Ancillary data object information MACROS
  *	Table 5-14 of POSIX 1003.1g
  */
 
@@ -100,21 +96,6 @@ struct cmsghdr {
 			      ((char *)(cmsg) - (char *)(mhdr)->msg_control)))
 
 /*
- *	This mess will go away with glibc
- */
- 
-#ifdef __KERNEL__
-#define __KINLINE static inline
-#elif  defined(__GNUC__) 
-#define __KINLINE static __inline__
-#elif defined(__cplusplus)
-#define __KINLINE static inline
-#else
-#define __KINLINE static
-#endif
-
-
-/*
  *	Get the next cmsg header
  *
  *	PLEASE, do not touch this function. If you think, that it is
@@ -127,7 +108,7 @@ struct cmsghdr {
  *	ancillary object DATA.				--ANK (980731)
  */
  
-__KINLINE struct cmsghdr * __cmsg_nxthdr(void *__ctl, __kernel_size_t __size,
+static inline struct cmsghdr * __cmsg_nxthdr(void *__ctl, __kernel_size_t __size,
 					       struct cmsghdr *__cmsg)
 {
 	struct cmsghdr * __ptr;
@@ -139,7 +120,7 @@ __KINLINE struct cmsghdr * __cmsg_nxthdr(void *__ctl, __kernel_size_t __size,
 	return __ptr;
 }
 
-__KINLINE struct cmsghdr * cmsg_nxthdr (struct msghdr *__msg, struct cmsghdr *__cmsg)
+static inline struct cmsghdr * cmsg_nxthdr (struct msghdr *__msg, struct cmsghdr *__cmsg)
 {
 	return __cmsg_nxthdr(__msg->msg_control, __msg->msg_controllen, __cmsg);
 }
@@ -180,16 +161,24 @@ struct ucred {
 #define AF_ASH		18	/* Ash				*/
 #define AF_ECONET	19	/* Acorn Econet			*/
 #define AF_ATMSVC	20	/* ATM SVCs			*/
+#define AF_RDS		21	/* RDS sockets 			*/
 #define AF_SNA		22	/* Linux SNA Project (nutters!) */
 #define AF_IRDA		23	/* IRDA sockets			*/
 #define AF_PPPOX	24	/* PPPoX sockets		*/
 #define AF_WANPIPE	25	/* Wanpipe API Sockets */
 #define AF_LLC		26	/* Linux LLC			*/
+#define AF_CAN		29	/* Controller Area Network      */
 #define AF_TIPC		30	/* TIPC sockets			*/
 #define AF_BLUETOOTH	31	/* Bluetooth sockets 		*/
 #define AF_IUCV		32	/* IUCV sockets			*/
 #define AF_RXRPC	33	/* RxRPC sockets 		*/
-#define AF_MAX		34	/* For now.. */
+#define AF_ISDN		34	/* mISDN sockets 		*/
+#define AF_PHONET	35	/* Phonet sockets		*/
+#define AF_IEEE802154	36	/* IEEE802154 sockets		*/
+#define AF_CAIF		37	/* CAIF sockets			*/
+#define AF_ALG		38	/* Algorithm sockets		*/
+#define AF_NFC		39	/* NFC sockets			*/
+#define AF_MAX		40	/* For now.. */
 
 /* Protocol families, same as address families. */
 #define PF_UNSPEC	AF_UNSPEC
@@ -215,15 +204,23 @@ struct ucred {
 #define PF_ASH		AF_ASH
 #define PF_ECONET	AF_ECONET
 #define PF_ATMSVC	AF_ATMSVC
+#define PF_RDS		AF_RDS
 #define PF_SNA		AF_SNA
 #define PF_IRDA		AF_IRDA
 #define PF_PPPOX	AF_PPPOX
 #define PF_WANPIPE	AF_WANPIPE
 #define PF_LLC		AF_LLC
+#define PF_CAN		AF_CAN
 #define PF_TIPC		AF_TIPC
 #define PF_BLUETOOTH	AF_BLUETOOTH
 #define PF_IUCV		AF_IUCV
 #define PF_RXRPC	AF_RXRPC
+#define PF_ISDN		AF_ISDN
+#define PF_PHONET	AF_PHONET
+#define PF_IEEE802154	AF_IEEE802154
+#define PF_CAIF		AF_CAIF
+#define PF_ALG		AF_ALG
+#define PF_NFC		AF_NFC
 #define PF_MAX		AF_MAX
 
 /* Maximum queue length specifiable by listen.  */
@@ -250,9 +247,14 @@ struct ucred {
 #define MSG_ERRQUEUE	0x2000	/* Fetch message from error queue */
 #define MSG_NOSIGNAL	0x4000	/* Do not generate SIGPIPE */
 #define MSG_MORE	0x8000	/* Sender will send more */
-
+#define MSG_WAITFORONE	0x10000	/* recvmmsg(): block until 1+ packets avail */
+#define MSG_SENDPAGE_NOTLAST 0x20000 /* sendpage() internal : not the last page */
 #define MSG_EOF         MSG_FIN
 
+#define MSG_FASTOPEN	0x20000000	/* Send data in TCP SYN */
+#define MSG_CMSG_CLOEXEC 0x40000000	/* Set close_on_exit for file
+					   descriptor received through
+					   SCM_RIGHTS */
 #if defined(CONFIG_COMPAT)
 #define MSG_CMSG_COMPAT	0x80000000	/* This message needs 32 bit fixups */
 #else
@@ -287,25 +289,38 @@ struct ucred {
 #define SOL_NETLINK	270
 #define SOL_TIPC	271
 #define SOL_RXRPC	272
+#define SOL_PPPOL2TP	273
+#define SOL_BLUETOOTH	274
+#define SOL_PNPIPE	275
+#define SOL_RDS		276
+#define SOL_IUCV	277
+#define SOL_CAIF	278
+#define SOL_ALG		279
 
 /* IPX options */
 #define IPX_TYPE	1
 
-#ifdef __KERNEL__
+extern void cred_to_ucred(struct pid *pid, const struct cred *cred, struct ucred *ucred);
+
 extern int memcpy_fromiovec(unsigned char *kdata, struct iovec *iov, int len);
-extern int memcpy_fromiovecend(unsigned char *kdata, struct iovec *iov, 
-				int offset, int len);
+extern int memcpy_fromiovecend(unsigned char *kdata, const struct iovec *iov,
+			       int offset, int len);
 extern int csum_partial_copy_fromiovecend(unsigned char *kdata, 
 					  struct iovec *iov, 
 					  int offset, 
 					  unsigned int len, __wsum *csump);
 
-extern int verify_iovec(struct msghdr *m, struct iovec *iov, char *address, int mode);
+extern int verify_iovec(struct msghdr *m, struct iovec *iov, struct sockaddr_storage *address, int mode);
 extern int memcpy_toiovec(struct iovec *v, unsigned char *kdata, int len);
-extern int move_addr_to_user(void *kaddr, int klen, void __user *uaddr, int __user *ulen);
-extern int move_addr_to_kernel(void __user *uaddr, int ulen, void *kaddr);
+extern int memcpy_toiovecend(const struct iovec *v, unsigned char *kdata,
+			     int offset, int len);
+extern int move_addr_to_kernel(void __user *uaddr, int ulen, struct sockaddr_storage *kaddr);
 extern int put_cmsg(struct msghdr*, int level, int type, int len, void *data);
 
-#endif
-#endif /* not kernel and not glibc */
+struct timespec;
+
+extern int __sys_recvmmsg(int fd, struct mmsghdr __user *mmsg, unsigned int vlen,
+			  unsigned int flags, struct timespec *timeout);
+extern int __sys_sendmmsg(int fd, struct mmsghdr __user *mmsg,
+			  unsigned int vlen, unsigned int flags);
 #endif /* _LINUX_SOCKET_H */

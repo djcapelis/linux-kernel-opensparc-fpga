@@ -1,14 +1,9 @@
 #include <linux/pci.h>
 #include <linux/kernel.h>
-#include <asm/arch/hwregs/intr_vect.h>
+#include <arch/hwregs/intr_vect.h>
 
-void __devinit  pcibios_fixup_bus(struct pci_bus *b)
+void pcibios_fixup_bus(struct pci_bus *b)
 {
-}
-
-char * __devinit  pcibios_setup(char *str)
-{
-	return NULL;
 }
 
 void pcibios_set_master(struct pci_dev *dev)
@@ -41,18 +36,16 @@ int pci_mmap_page_range(struct pci_dev *dev, struct vm_area_struct *vma,
 	return 0;
 }
 
-void
-pcibios_align_resource(void *data, struct resource *res,
+resource_size_t
+pcibios_align_resource(void *data, const struct resource *res,
 		       resource_size_t size, resource_size_t align)
 {
-	if (res->flags & IORESOURCE_IO) {
-		resource_size_t start = res->start;
+	resource_size_t start = res->start;
 
-		if (start & 0x300) {
-			start = (start + 0x3ff) & ~0x3ff;
-			res->start = start;
-		}
-	}
+	if ((res->flags & IORESOURCE_IO) && (start & 0x300))
+		start = (start + 0x3ff) & ~0x3ff;
+
+	return start;
 }
 
 int pcibios_enable_resources(struct pci_dev *dev, int mask)
@@ -104,28 +97,3 @@ int pcibios_enable_device(struct pci_dev *dev, int mask)
 		pcibios_enable_irq(dev);
 	return 0;
 }
-
-int pcibios_assign_resources(void)
-{
-	struct pci_dev *dev = NULL;
-	int idx;
-	struct resource *r;
-
-	while ((dev = pci_get_device(PCI_ANY_ID, PCI_ANY_ID, dev)) != NULL) {
-		int class = dev->class >> 8;
-
-		/* Don't touch classless devices and host bridges */
-		if (!class || class == PCI_CLASS_BRIDGE_HOST)
-			continue;
-
-		for(idx=0; idx<6; idx++) {
-			r = &dev->resource[idx];
-
-			if (!r->start && r->end)
-				pci_assign_resource(dev, idx);
-		}
-	}
-	return 0;
-}
-
-EXPORT_SYMBOL(pcibios_assign_resources);

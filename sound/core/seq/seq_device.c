@@ -36,8 +36,8 @@
  *
  */
 
-#include <sound/driver.h>
 #include <linux/init.h>
+#include <linux/module.h>
 #include <sound/core.h>
 #include <sound/info.h>
 #include <sound/seq_device.h>
@@ -66,7 +66,7 @@ struct ops_list {
 	/* operators */
 	struct snd_seq_dev_ops ops;
 
-	/* registred devices */
+	/* registered devices */
 	struct list_head dev_list;	/* list of devices */
 	int num_devices;	/* number of associated devices */
 	int num_init_devices;	/* number of initialized devices */
@@ -125,7 +125,7 @@ static void snd_seq_device_info(struct snd_info_entry *entry,
  * load all registered drivers (called from seq_clientmgr.c)
  */
 
-#ifdef CONFIG_KMOD
+#ifdef CONFIG_MODULES
 /* avoid auto-loading during module_init() */
 static int snd_seq_in_init;
 void snd_seq_autoload_lock(void)
@@ -141,16 +141,13 @@ void snd_seq_autoload_unlock(void)
 
 void snd_seq_device_load_drivers(void)
 {
-#ifdef CONFIG_KMOD
+#ifdef CONFIG_MODULES
 	struct ops_list *ops;
 
 	/* Calling request_module during module_init()
 	 * may cause blocking.
 	 */
 	if (snd_seq_in_init)
-		return;
-
-	if (! current->fs->root)
 		return;
 
 	mutex_lock(&ops_mutex);
@@ -191,7 +188,8 @@ int snd_seq_device_new(struct snd_card *card, int device, char *id, int argsize,
 	if (result)
 		*result = NULL;
 
-	snd_assert(id != NULL, return -EINVAL);
+	if (snd_BUG_ON(!id))
+		return -EINVAL;
 
 	ops = find_driver(id, 1);
 	if (ops == NULL)
@@ -236,7 +234,8 @@ static int snd_seq_device_free(struct snd_seq_device *dev)
 {
 	struct ops_list *ops;
 
-	snd_assert(dev != NULL, return -EINVAL);
+	if (snd_BUG_ON(!dev))
+		return -EINVAL;
 
 	ops = find_driver(dev->id, 0);
 	if (ops == NULL)
@@ -570,7 +569,7 @@ EXPORT_SYMBOL(snd_seq_device_load_drivers);
 EXPORT_SYMBOL(snd_seq_device_new);
 EXPORT_SYMBOL(snd_seq_device_register_driver);
 EXPORT_SYMBOL(snd_seq_device_unregister_driver);
-#ifdef CONFIG_KMOD
+#ifdef CONFIG_MODULES
 EXPORT_SYMBOL(snd_seq_autoload_lock);
 EXPORT_SYMBOL(snd_seq_autoload_unlock);
 #endif

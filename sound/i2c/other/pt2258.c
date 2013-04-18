@@ -19,12 +19,12 @@
  *
  */      
 
-#include <sound/driver.h>
 #include <sound/core.h>
 #include <sound/control.h>
 #include <sound/tlv.h>
 #include <sound/i2c.h>
 #include <sound/pt2258.h>
+#include <linux/module.h>
 
 MODULE_AUTHOR("Jochen Voss <voss@seehuhn.de>");
 MODULE_DESCRIPTION("PT2258 volume controller (Princeton Technology Corp.)");
@@ -113,6 +113,8 @@ static int pt2258_stereo_volume_put(struct snd_kcontrol *kcontrol,
 
 	val0 = 79 - ucontrol->value.integer.value[0];
 	val1 = 79 - ucontrol->value.integer.value[1];
+	if (val0 < 0 || val0 > 79 || val1 < 0 || val1 > 79)
+		return -EINVAL;
 	if (val0 == pt->volume[base] && val1 == pt->volume[base + 1])
 		return 0;
 
@@ -140,15 +142,7 @@ static int pt2258_stereo_volume_put(struct snd_kcontrol *kcontrol,
 	return -EIO;
 }
 
-static int pt2258_switch_info(struct snd_kcontrol *kcontrol,
-			      struct snd_ctl_elem_info *uinfo)
-{
-	uinfo->type = SNDRV_CTL_ELEM_TYPE_BOOLEAN;
-	uinfo->count = 1;
-	uinfo->value.integer.min = 0;
-	uinfo->value.integer.max = 1;
-	return 0;
-}
+#define pt2258_switch_info	snd_ctl_boolean_mono_info
 
 static int pt2258_switch_get(struct snd_kcontrol *kcontrol,
 			     struct snd_ctl_elem_value *ucontrol)

@@ -7,8 +7,6 @@
  * Andy Adamson <andros@umich.edu>
  * Bruce Fields <bfields@umich.edu>
  * Copyright (c) 2000 The Regents of the University of Michigan
- *
- * $Id$
  */
 
 #ifndef _LINUX_SUNRPC_GSS_API_H
@@ -16,6 +14,7 @@
 
 #ifdef __KERNEL__
 #include <linux/sunrpc/xdr.h>
+#include <linux/sunrpc/msg_prot.h>
 #include <linux/uio.h>
 
 /* The mechanism-independent gss-api context: */
@@ -37,7 +36,8 @@ int gss_import_sec_context(
 		const void*		input_token,
 		size_t			bufsize,
 		struct gss_api_mech	*mech,
-		struct gss_ctx		**ctx_id);
+		struct gss_ctx		**ctx_id,
+		gfp_t			gfp_mask);
 u32 gss_get_mic(
 		struct gss_ctx		*ctx_id,
 		struct xdr_buf		*message,
@@ -58,6 +58,7 @@ u32 gss_unwrap(
 u32 gss_delete_sec_context(
 		struct gss_ctx		**ctx_id);
 
+u32 gss_svc_to_pseudoflavor(struct gss_api_mech *, u32 service);
 u32 gss_pseudoflavor_to_service(struct gss_api_mech *, u32 pseudoflavor);
 char *gss_service_to_auth_domain_name(struct gss_api_mech *, u32 service);
 
@@ -77,10 +78,12 @@ struct gss_api_mech {
 	struct module		*gm_owner;
 	struct xdr_netobj	gm_oid;
 	char			*gm_name;
-	struct gss_api_ops	*gm_ops;
+	const struct gss_api_ops *gm_ops;
 	/* pseudoflavors supported by this mechanism: */
 	int			gm_pf_num;
 	struct pf_desc *	gm_pfs;
+	/* Should the following be a callback operation instead? */
+	const char		*gm_upcall_enctypes;
 };
 
 /* and must provide the following operations: */
@@ -88,7 +91,8 @@ struct gss_api_ops {
 	int (*gss_import_sec_context)(
 			const void		*input_token,
 			size_t			bufsize,
-			struct gss_ctx		*ctx_id);
+			struct gss_ctx		*ctx_id,
+			gfp_t			gfp_mask);
 	u32 (*gss_get_mic)(
 			struct gss_ctx		*ctx_id,
 			struct xdr_buf		*message,
@@ -122,6 +126,9 @@ struct gss_api_mech *gss_mech_get_by_name(const char *);
 
 /* Similar, but get by pseudoflavor. */
 struct gss_api_mech *gss_mech_get_by_pseudoflavor(u32);
+
+/* Fill in an array with a list of supported pseudoflavors */
+int gss_mech_list_pseudoflavors(rpc_authflavor_t *, int);
 
 /* Just increments the mechanism's reference count and returns its input: */
 struct gss_api_mech * gss_mech_get(struct gss_api_mech *);

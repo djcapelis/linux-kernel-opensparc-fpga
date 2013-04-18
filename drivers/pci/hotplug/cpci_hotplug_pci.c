@@ -45,8 +45,6 @@ extern int cpci_debug;
 #define info(format, arg...) printk(KERN_INFO "%s: " format "\n", MY_NAME , ## arg)
 #define warn(format, arg...) printk(KERN_WARNING "%s: " format "\n", MY_NAME , ## arg)
 
-#define ROUND_UP(x, a)		(((x) + (a) - 1) & ~((a) - 1))
-
 
 u8 cpci_get_attention_status(struct slot* slot)
 {
@@ -211,7 +209,7 @@ int cpci_led_on(struct slot* slot)
 					      hs_cap + 2,
 					      hs_csr)) {
 			err("Could not set LOO for slot %s",
-			    slot->hotplug_slot->name);
+			    hotplug_slot_name(slot->hotplug_slot));
 			return -ENODEV;
 		}
 	}
@@ -240,7 +238,7 @@ int cpci_led_off(struct slot* slot)
 					      hs_cap + 2,
 					      hs_csr)) {
 			err("Could not clear LOO for slot %s",
-			    slot->hotplug_slot->name);
+			    hotplug_slot_name(slot->hotplug_slot));
 			return -ENODEV;
 		}
 	}
@@ -252,12 +250,12 @@ int cpci_led_off(struct slot* slot)
  * Device configuration functions
  */
 
-int cpci_configure_slot(struct slot* slot)
+int __ref cpci_configure_slot(struct slot *slot)
 {
 	struct pci_bus *parent;
 	int fn;
 
-	dbg("%s - enter", __FUNCTION__);
+	dbg("%s - enter", __func__);
 
 	if (slot->dev == NULL) {
 		dbg("pci_dev null, finding %02x:%02x:%x",
@@ -275,7 +273,7 @@ int cpci_configure_slot(struct slot* slot)
 		 * we will only call this case when lookup fails.
 		 */
 		n = pci_scan_slot(slot->bus, slot->devfn);
-		dbg("%s: pci_scan_slot returned %d", __FUNCTION__, n);
+		dbg("%s: pci_scan_slot returned %d", __func__, n);
 		slot->dev = pci_get_slot(slot->bus, slot->devfn);
 		if (slot->dev == NULL) {
 			err("Could not find PCI device for slot %02x", slot->number);
@@ -287,44 +285,21 @@ int cpci_configure_slot(struct slot* slot)
 	for (fn = 0; fn < 8; fn++) {
 		struct pci_dev *dev;
 
-		dev = pci_get_slot(parent, PCI_DEVFN(PCI_SLOT(slot->devfn), fn));
+		dev = pci_get_slot(parent,
+				   PCI_DEVFN(PCI_SLOT(slot->devfn), fn));
 		if (!dev)
 			continue;
 		if ((dev->hdr_type == PCI_HEADER_TYPE_BRIDGE) ||
-		    (dev->hdr_type == PCI_HEADER_TYPE_CARDBUS)) {
-			/* Find an unused bus number for the new bridge */
-			struct pci_bus *child;
-			unsigned char busnr, start = parent->secondary;
-			unsigned char end = parent->subordinate;
-
-			for (busnr = start; busnr <= end; busnr++) {
-				if (!pci_find_bus(pci_domain_nr(parent),
-						  busnr))
-					break;
-			}
-			if (busnr >= end) {
-				err("No free bus for hot-added bridge\n");
-				pci_dev_put(dev);
-				continue;
-			}
-			child = pci_add_new_bus(parent, dev, busnr);
-			if (!child) {
-				err("Cannot add new bus for %s\n",
-				    pci_name(dev));
-				pci_dev_put(dev);
-				continue;
-			}
-			child->subordinate = pci_do_scan_bus(child);
-			pci_bus_size_bridges(child);
-		}
+		    (dev->hdr_type == PCI_HEADER_TYPE_CARDBUS))
+			pci_hp_add_bridge(dev);
 		pci_dev_put(dev);
 	}
 
-	pci_bus_assign_resources(parent);
-	pci_bus_add_devices(parent);
-	pci_enable_bridges(parent);
+	pci_assign_unassigned_bridge_resources(parent->self);
 
-	dbg("%s - exit", __FUNCTION__);
+	pci_bus_add_devices(parent);
+
+	dbg("%s - exit", __func__);
 	return 0;
 }
 
@@ -333,7 +308,7 @@ int cpci_unconfigure_slot(struct slot* slot)
 	int i;
 	struct pci_dev *dev;
 
-	dbg("%s - enter", __FUNCTION__);
+	dbg("%s - enter", __func__);
 	if (!slot->dev) {
 		err("No device for slot %02x\n", slot->number);
 		return -ENODEV;
@@ -343,13 +318,13 @@ int cpci_unconfigure_slot(struct slot* slot)
 		dev = pci_get_slot(slot->bus,
 				    PCI_DEVFN(PCI_SLOT(slot->devfn), i));
 		if (dev) {
-			pci_remove_bus_device(dev);
+			pci_stop_and_remove_bus_device(dev);
 			pci_dev_put(dev);
 		}
 	}
 	pci_dev_put(slot->dev);
 	slot->dev = NULL;
 
-	dbg("%s - exit", __FUNCTION__);
+	dbg("%s - exit", __func__);
 	return 0;
 }

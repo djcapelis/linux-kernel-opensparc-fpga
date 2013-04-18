@@ -11,7 +11,7 @@
  * derived from
  *
  * Hardware driver for the AMD 768 Random Number Generator (RNG)
- * (c) Copyright 2001 Red Hat Inc <alan@redhat.com>
+ * (c) Copyright 2001 Red Hat Inc
  *
  * derived from
  *
@@ -28,6 +28,7 @@
 #include <linux/kernel.h>
 #include <linux/pci.h>
 #include <linux/hw_random.h>
+#include <linux/delay.h>
 #include <asm/io.h>
 
 
@@ -43,8 +44,8 @@
  * want to register another driver on the same PCI id.
  */
 static const struct pci_device_id pci_tbl[] = {
-	{ 0x1022, 0x7443, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0, },
-	{ 0x1022, 0x746b, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0, },
+	{ PCI_VDEVICE(AMD, 0x7443), 0, },
+	{ PCI_VDEVICE(AMD, 0x746b), 0, },
 	{ 0, },	/* terminate list */
 };
 MODULE_DEVICE_TABLE(pci, pci_tbl);
@@ -52,11 +53,18 @@ MODULE_DEVICE_TABLE(pci, pci_tbl);
 static struct pci_dev *amd_pdev;
 
 
-static int amd_rng_data_present(struct hwrng *rng)
+static int amd_rng_data_present(struct hwrng *rng, int wait)
 {
 	u32 pmbase = (u32)rng->priv;
+	int data, i;
 
-      	return !!(inl(pmbase + 0xF4) & 1);
+	for (i = 0; i < 20; i++) {
+		data = !!(inl(pmbase + 0xF4) & 1);
+		if (data || !wait)
+			break;
+		udelay(10);
+	}
+	return data;
 }
 
 static int amd_rng_data_read(struct hwrng *rng, u32 *data)
@@ -125,6 +133,12 @@ found:
 	pmbase &= 0x0000FF00;
 	if (pmbase == 0)
 		goto out;
+	if (!request_region(pmbase + 0xF0, 8, "AMD HWRNG")) {
+		dev_err(&pdev->dev, "AMD HWRNG region 0x%x already in use!\n",
+			pmbase + 0xF0);
+		err = -EBUSY;
+		goto out;
+	}
 	amd_rng.priv = (unsigned long)pmbase;
 	amd_pdev = pdev;
 
@@ -133,6 +147,7 @@ found:
 	if (err) {
 		printk(KERN_ERR PFX "RNG registering failed (%d)\n",
 		       err);
+		release_region(pmbase + 0xF0, 8);
 		goto out;
 	}
 out:
@@ -141,6 +156,8 @@ out:
 
 static void __exit mod_exit(void)
 {
+	u32 pmbase = (unsigned long)amd_rng.priv;
+	release_region(pmbase + 0xF0, 8);
 	hwrng_unregister(&amd_rng);
 }
 

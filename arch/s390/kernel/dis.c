@@ -1,6 +1,4 @@
 /*
- * arch/s390/kernel/dis.c
- *
  * Disassemble s390 instructions.
  *
  * Copyright IBM Corp. 2007
@@ -15,7 +13,6 @@
 #include <linux/timer.h>
 #include <linux/mm.h>
 #include <linux/smp.h>
-#include <linux/smp_lock.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/delay.h>
@@ -25,15 +22,14 @@
 #include <linux/kprobes.h>
 #include <linux/kdebug.h>
 
-#include <asm/system.h>
 #include <asm/uaccess.h>
 #include <asm/io.h>
-#include <asm/atomic.h>
+#include <linux/atomic.h>
 #include <asm/mathemu.h>
 #include <asm/cpcmd.h>
-#include <asm/s390_ext.h>
 #include <asm/lowcore.h>
 #include <asm/debug.h>
+#include <asm/irq.h>
 
 #ifndef CONFIG_64BIT
 #define ONELONG "%08lx: "
@@ -87,15 +83,29 @@ enum {
 	U4_12,	/* 4 bit unsigned value starting at 12 */
 	U4_16,	/* 4 bit unsigned value starting at 16 */
 	U4_20,	/* 4 bit unsigned value starting at 20 */
+	U4_24,	/* 4 bit unsigned value starting at 24 */
+	U4_28,	/* 4 bit unsigned value starting at 28 */
+	U4_32,	/* 4 bit unsigned value starting at 32 */
+	U4_36,	/* 4 bit unsigned value starting at 36 */
 	U8_8,	/* 8 bit unsigned value starting at 8 */
 	U8_16,	/* 8 bit unsigned value starting at 16 */
+	U8_24,	/* 8 bit unsigned value starting at 24 */
+	U8_32,	/* 8 bit unsigned value starting at 32 */
+	I8_8,	/* 8 bit signed value starting at 8 */
+	I8_32,	/* 8 bit signed value starting at 32 */
+	J12_12, /* PC relative offset at 12 */
 	I16_16,	/* 16 bit signed value starting at 16 */
+	I16_32,	/* 32 bit signed value starting at 16 */
 	U16_16,	/* 16 bit unsigned value starting at 16 */
+	U16_32,	/* 32 bit unsigned value starting at 16 */
 	J16_16,	/* PC relative jump offset at 16 */
+	J16_32, /* PC relative offset at 16 */
+	I24_24, /* 24 bit signed value starting at 24 */
 	J32_16,	/* PC relative long offset at 16 */
 	I32_16,	/* 32 bit signed value starting at 16 */
 	U32_16,	/* 32 bit unsigned value starting at 16 */
 	M_16,	/* 4 bit optional mask starting at 16 */
+	M_20,	/* 4 bit optional mask starting at 20 */
 	RO_28,	/* optional GPR starting at position 28 */
 };
 
@@ -105,21 +115,43 @@ enum {
  */
 enum {
 	INSTR_INVALID,
-	INSTR_E, INSTR_RIE_RRP, INSTR_RIL_RI, INSTR_RIL_RP, INSTR_RIL_RU,
-	INSTR_RIL_UP, INSTR_RI_RI, INSTR_RI_RP, INSTR_RI_RU, INSTR_RI_UP,
+	INSTR_E,
+	INSTR_IE_UU,
+	INSTR_MII_UPI,
+	INSTR_RIE_R0IU, INSTR_RIE_R0UU, INSTR_RIE_RRP, INSTR_RIE_RRPU,
+	INSTR_RIE_RRUUU, INSTR_RIE_RUPI, INSTR_RIE_RUPU, INSTR_RIE_RRI0,
+	INSTR_RIL_RI, INSTR_RIL_RP, INSTR_RIL_RU, INSTR_RIL_UP,
+	INSTR_RIS_R0RDU, INSTR_RIS_R0UU, INSTR_RIS_RURDI, INSTR_RIS_RURDU,
+	INSTR_RI_RI, INSTR_RI_RP, INSTR_RI_RU, INSTR_RI_UP,
 	INSTR_RRE_00, INSTR_RRE_0R, INSTR_RRE_AA, INSTR_RRE_AR, INSTR_RRE_F0,
-	INSTR_RRE_FF, INSTR_RRE_R0, INSTR_RRE_RA, INSTR_RRE_RF, INSTR_RRE_RR,
-	INSTR_RRE_RR_OPT, INSTR_RRF_F0FF, INSTR_RRF_FUFF, INSTR_RRF_M0RR,
-	INSTR_RRF_R0RR, INSTR_RRF_RURR, INSTR_RRF_U0FF, INSTR_RRF_U0RF,
+	INSTR_RRE_FF, INSTR_RRE_FR, INSTR_RRE_R0, INSTR_RRE_RA, INSTR_RRE_RF,
+	INSTR_RRE_RR, INSTR_RRE_RR_OPT,
+	INSTR_RRF_0UFF, INSTR_RRF_F0FF, INSTR_RRF_F0FF2, INSTR_RRF_F0FR,
+	INSTR_RRF_FFRU, INSTR_RRF_FUFF, INSTR_RRF_FUFF2, INSTR_RRF_M0RR,
+	INSTR_RRF_R0RR,	INSTR_RRF_R0RR2, INSTR_RRF_RMRR, INSTR_RRF_RURR,
+	INSTR_RRF_U0FF,	INSTR_RRF_U0RF, INSTR_RRF_U0RR, INSTR_RRF_UUFF,
+	INSTR_RRF_UUFR, INSTR_RRF_UURF,
+	INSTR_RRR_F0FF, INSTR_RRS_RRRDU,
 	INSTR_RR_FF, INSTR_RR_R0, INSTR_RR_RR, INSTR_RR_U0, INSTR_RR_UR,
-	INSTR_RSE_CCRD, INSTR_RSE_RRRD, INSTR_RSE_RURD, INSTR_RSI_RRP,
-	INSTR_RSL_R0RD, INSTR_RSY_AARD, INSTR_RSY_CCRD, INSTR_RSY_RRRD,
-	INSTR_RSY_RURD, INSTR_RS_AARD, INSTR_RS_CCRD, INSTR_RS_R0RD,
-	INSTR_RS_RRRD, INSTR_RS_RURD, INSTR_RXE_FRRD, INSTR_RXE_RRRD,
-	INSTR_RXF_FRRDF, INSTR_RXY_FRRD, INSTR_RXY_RRRD, INSTR_RX_FRRD,
-	INSTR_RX_RRRD, INSTR_RX_URRD, INSTR_SIY_URD, INSTR_SI_URD,
-	INSTR_SSE_RDRD, INSTR_SSF_RRDRD, INSTR_SS_L0RDRD, INSTR_SS_LIRDRD,
-	INSTR_SS_LLRDRD, INSTR_SS_RRRDRD, INSTR_SS_RRRDRD2, INSTR_SS_RRRDRD3,
+	INSTR_RSE_CCRD, INSTR_RSE_RRRD, INSTR_RSE_RURD,
+	INSTR_RSI_RRP,
+	INSTR_RSL_LRDFU, INSTR_RSL_R0RD,
+	INSTR_RSY_AARD, INSTR_RSY_CCRD, INSTR_RSY_RRRD, INSTR_RSY_RURD,
+	INSTR_RSY_RDRM,
+	INSTR_RS_AARD, INSTR_RS_CCRD, INSTR_RS_R0RD, INSTR_RS_RRRD,
+	INSTR_RS_RURD,
+	INSTR_RXE_FRRD, INSTR_RXE_RRRD,
+	INSTR_RXF_FRRDF,
+	INSTR_RXY_FRRD, INSTR_RXY_RRRD, INSTR_RXY_URRD,
+	INSTR_RX_FRRD, INSTR_RX_RRRD, INSTR_RX_URRD,
+	INSTR_SIL_RDI, INSTR_SIL_RDU,
+	INSTR_SIY_IRD, INSTR_SIY_URD,
+	INSTR_SI_URD,
+	INSTR_SMI_U0RDP,
+	INSTR_SSE_RDRD,
+	INSTR_SSF_RRDRD, INSTR_SSF_RRDRD2,
+	INSTR_SS_L0RDRD, INSTR_SS_LIRDRD, INSTR_SS_LLRDRD, INSTR_SS_RRRDRD,
+	INSTR_SS_RRRDRD2, INSTR_SS_RRRDRD3,
 	INSTR_S_00, INSTR_S_RD,
 };
 
@@ -171,99 +203,287 @@ static const struct operand operands[] =
 	[U4_12]  = {  4, 12, 0 },
 	[U4_16]  = {  4, 16, 0 },
 	[U4_20]  = {  4, 20, 0 },
+	[U4_24]  = {  4, 24, 0 },
+	[U4_28]  = {  4, 28, 0 },
+	[U4_32]  = {  4, 32, 0 },
+	[U4_36]  = {  4, 36, 0 },
 	[U8_8]	 = {  8,  8, 0 },
 	[U8_16]  = {  8, 16, 0 },
+	[U8_24]  = {  8, 24, 0 },
+	[U8_32]  = {  8, 32, 0 },
+	[J12_12] = { 12, 12, OPERAND_PCREL },
 	[I16_16] = { 16, 16, OPERAND_SIGNED },
 	[U16_16] = { 16, 16, 0 },
+	[U16_32] = { 16, 32, 0 },
 	[J16_16] = { 16, 16, OPERAND_PCREL },
+	[J16_32] = { 16, 32, OPERAND_PCREL },
+	[I16_32] = { 16, 32, OPERAND_SIGNED },
+	[I24_24] = { 24, 24, OPERAND_SIGNED },
 	[J32_16] = { 32, 16, OPERAND_PCREL },
 	[I32_16] = { 32, 16, OPERAND_SIGNED },
 	[U32_16] = { 32, 16, 0 },
 	[M_16]	 = {  4, 16, 0 },
+	[M_20]	 = {  4, 20, 0 },
 	[RO_28]  = {  4, 28, OPERAND_GPR }
 };
 
 static const unsigned char formats[][7] = {
-	[INSTR_E]	  = { 0xff, 0,0,0,0,0,0 },	       /* e.g. pr    */
-	[INSTR_RIE_RRP]	  = { 0xff, R_8,R_12,J16_16,0,0,0 },   /* e.g. brxhg */
-	[INSTR_RIL_RP]	  = { 0x0f, R_8,J32_16,0,0,0,0 },      /* e.g. brasl */
-	[INSTR_RIL_UP]	  = { 0x0f, U4_8,J32_16,0,0,0,0 },     /* e.g. brcl  */
-	[INSTR_RIL_RI]	  = { 0x0f, R_8,I32_16,0,0,0,0 },      /* e.g. afi   */
-	[INSTR_RIL_RU]	  = { 0x0f, R_8,U32_16,0,0,0,0 },      /* e.g. alfi  */
-	[INSTR_RI_RI]	  = { 0x0f, R_8,I16_16,0,0,0,0 },      /* e.g. ahi   */
-	[INSTR_RI_RP]	  = { 0x0f, R_8,J16_16,0,0,0,0 },      /* e.g. brct  */
-	[INSTR_RI_RU]	  = { 0x0f, R_8,U16_16,0,0,0,0 },      /* e.g. tml   */
-	[INSTR_RI_UP]	  = { 0x0f, U4_8,J16_16,0,0,0,0 },     /* e.g. brc   */
-	[INSTR_RRE_00]	  = { 0xff, 0,0,0,0,0,0 },	       /* e.g. palb  */
-	[INSTR_RRE_0R]	  = { 0xff, R_28,0,0,0,0,0 },	       /* e.g. tb    */
-	[INSTR_RRE_AA]	  = { 0xff, A_24,A_28,0,0,0,0 },       /* e.g. cpya  */
-	[INSTR_RRE_AR]	  = { 0xff, A_24,R_28,0,0,0,0 },       /* e.g. sar   */
-	[INSTR_RRE_F0]	  = { 0xff, F_24,0,0,0,0,0 },	       /* e.g. sqer  */
-	[INSTR_RRE_FF]	  = { 0xff, F_24,F_28,0,0,0,0 },       /* e.g. debr  */
-	[INSTR_RRE_R0]	  = { 0xff, R_24,0,0,0,0,0 },	       /* e.g. ipm   */
-	[INSTR_RRE_RA]	  = { 0xff, R_24,A_28,0,0,0,0 },       /* e.g. ear   */
-	[INSTR_RRE_RF]	  = { 0xff, R_24,F_28,0,0,0,0 },       /* e.g. cefbr */
-	[INSTR_RRE_RR]	  = { 0xff, R_24,R_28,0,0,0,0 },       /* e.g. lura  */
-	[INSTR_RRE_RR_OPT]= { 0xff, R_24,RO_28,0,0,0,0 },      /* efpc, sfpc */
-	[INSTR_RRF_F0FF]  = { 0xff, F_16,F_24,F_28,0,0,0 },    /* e.g. madbr */
-	[INSTR_RRF_FUFF]  = { 0xff, F_24,F_16,F_28,U4_20,0,0 },/* e.g. didbr */
-	[INSTR_RRF_RURR]  = { 0xff, R_24,R_28,R_16,U4_20,0,0 },/* e.g. .insn */
-	[INSTR_RRF_R0RR]  = { 0xff, R_24,R_28,R_16,0,0,0 },    /* e.g. idte  */
-	[INSTR_RRF_U0FF]  = { 0xff, F_24,U4_16,F_28,0,0,0 },   /* e.g. fixr  */
-	[INSTR_RRF_U0RF]  = { 0xff, R_24,U4_16,F_28,0,0,0 },   /* e.g. cfebr */
-	[INSTR_RRF_M0RR]  = { 0xff, R_24,R_28,M_16,0,0,0 },    /* e.g. sske  */
-	[INSTR_RR_FF]	  = { 0xff, F_8,F_12,0,0,0,0 },        /* e.g. adr   */
-	[INSTR_RR_R0]	  = { 0xff, R_8, 0,0,0,0,0 },	       /* e.g. spm   */
-	[INSTR_RR_RR]	  = { 0xff, R_8,R_12,0,0,0,0 },        /* e.g. lr    */
-	[INSTR_RR_U0]	  = { 0xff, U8_8, 0,0,0,0,0 },	       /* e.g. svc   */
-	[INSTR_RR_UR]	  = { 0xff, U4_8,R_12,0,0,0,0 },       /* e.g. bcr   */
-	[INSTR_RSE_RRRD]  = { 0xff, R_8,R_12,D_20,B_16,0,0 },  /* e.g. lmh   */
-	[INSTR_RSE_CCRD]  = { 0xff, C_8,C_12,D_20,B_16,0,0 },  /* e.g. lmh   */
-	[INSTR_RSE_RURD]  = { 0xff, R_8,U4_12,D_20,B_16,0,0 }, /* e.g. icmh  */
-	[INSTR_RSL_R0RD]  = { 0xff, R_8,D_20,B_16,0,0,0 },     /* e.g. tp    */
-	[INSTR_RSI_RRP]	  = { 0xff, R_8,R_12,J16_16,0,0,0 },   /* e.g. brxh  */
-	[INSTR_RSY_RRRD]  = { 0xff, R_8,R_12,D20_20,B_16,0,0 },/* e.g. stmy  */
+	[INSTR_E]	  = { 0xff, 0,0,0,0,0,0 },
+	[INSTR_IE_UU]	  = { 0xff, U4_24,U4_28,0,0,0,0 },
+	[INSTR_MII_UPI]	  = { 0xff, U4_8,J12_12,I24_24 },
+	[INSTR_RIE_R0IU]  = { 0xff, R_8,I16_16,U4_32,0,0,0 },
+	[INSTR_RIE_R0UU]  = { 0xff, R_8,U16_16,U4_32,0,0,0 },
+	[INSTR_RIE_RRI0]  = { 0xff, R_8,R_12,I16_16,0,0,0 },
+	[INSTR_RIE_RRPU]  = { 0xff, R_8,R_12,U4_32,J16_16,0,0 },
+	[INSTR_RIE_RRP]	  = { 0xff, R_8,R_12,J16_16,0,0,0 },
+	[INSTR_RIE_RRUUU] = { 0xff, R_8,R_12,U8_16,U8_24,U8_32,0 },
+	[INSTR_RIE_RUPI]  = { 0xff, R_8,I8_32,U4_12,J16_16,0,0 },
+	[INSTR_RIE_RUPU]  = { 0xff, R_8,U8_32,U4_12,J16_16,0,0 },
+	[INSTR_RIL_RI]	  = { 0x0f, R_8,I32_16,0,0,0,0 },
+	[INSTR_RIL_RP]	  = { 0x0f, R_8,J32_16,0,0,0,0 },
+	[INSTR_RIL_RU]	  = { 0x0f, R_8,U32_16,0,0,0,0 },
+	[INSTR_RIL_UP]	  = { 0x0f, U4_8,J32_16,0,0,0,0 },
+	[INSTR_RIS_R0RDU] = { 0xff, R_8,U8_32,D_20,B_16,0,0 },
+	[INSTR_RIS_RURDI] = { 0xff, R_8,I8_32,U4_12,D_20,B_16,0 },
+	[INSTR_RIS_RURDU] = { 0xff, R_8,U8_32,U4_12,D_20,B_16,0 },
+	[INSTR_RI_RI]	  = { 0x0f, R_8,I16_16,0,0,0,0 },
+	[INSTR_RI_RP]	  = { 0x0f, R_8,J16_16,0,0,0,0 },
+	[INSTR_RI_RU]	  = { 0x0f, R_8,U16_16,0,0,0,0 },
+	[INSTR_RI_UP]	  = { 0x0f, U4_8,J16_16,0,0,0,0 },
+	[INSTR_RRE_00]	  = { 0xff, 0,0,0,0,0,0 },
+	[INSTR_RRE_0R]	  = { 0xff, R_28,0,0,0,0,0 },
+	[INSTR_RRE_AA]	  = { 0xff, A_24,A_28,0,0,0,0 },
+	[INSTR_RRE_AR]	  = { 0xff, A_24,R_28,0,0,0,0 },
+	[INSTR_RRE_F0]	  = { 0xff, F_24,0,0,0,0,0 },
+	[INSTR_RRE_FF]	  = { 0xff, F_24,F_28,0,0,0,0 },
+	[INSTR_RRE_FR]	  = { 0xff, F_24,R_28,0,0,0,0 },
+	[INSTR_RRE_R0]	  = { 0xff, R_24,0,0,0,0,0 },
+	[INSTR_RRE_RA]	  = { 0xff, R_24,A_28,0,0,0,0 },
+	[INSTR_RRE_RF]	  = { 0xff, R_24,F_28,0,0,0,0 },
+	[INSTR_RRE_RR]	  = { 0xff, R_24,R_28,0,0,0,0 },
+	[INSTR_RRE_RR_OPT]= { 0xff, R_24,RO_28,0,0,0,0 },
+	[INSTR_RRF_0UFF]  = { 0xff, F_24,F_28,U4_20,0,0,0 },
+	[INSTR_RRF_F0FF2] = { 0xff, F_24,F_16,F_28,0,0,0 },
+	[INSTR_RRF_F0FF]  = { 0xff, F_16,F_24,F_28,0,0,0 },
+	[INSTR_RRF_F0FR]  = { 0xff, F_24,F_16,R_28,0,0,0 },
+	[INSTR_RRF_FFRU]  = { 0xff, F_24,F_16,R_28,U4_20,0,0 },
+	[INSTR_RRF_FUFF]  = { 0xff, F_24,F_16,F_28,U4_20,0,0 },
+	[INSTR_RRF_FUFF2] = { 0xff, F_24,F_28,F_16,U4_20,0,0 },
+	[INSTR_RRF_M0RR]  = { 0xff, R_24,R_28,M_16,0,0,0 },
+	[INSTR_RRF_R0RR]  = { 0xff, R_24,R_16,R_28,0,0,0 },
+	[INSTR_RRF_R0RR2] = { 0xff, R_24,R_28,R_16,0,0,0 },
+	[INSTR_RRF_RMRR]  = { 0xff, R_24,R_16,R_28,M_20,0,0 },
+	[INSTR_RRF_RURR]  = { 0xff, R_24,R_28,R_16,U4_20,0,0 },
+	[INSTR_RRF_U0FF]  = { 0xff, F_24,U4_16,F_28,0,0,0 },
+	[INSTR_RRF_U0RF]  = { 0xff, R_24,U4_16,F_28,0,0,0 },
+	[INSTR_RRF_U0RR]  = { 0xff, R_24,R_28,U4_16,0,0,0 },
+	[INSTR_RRF_UUFF]  = { 0xff, F_24,U4_16,F_28,U4_20,0,0 },
+	[INSTR_RRF_UUFR]  = { 0xff, F_24,U4_16,R_28,U4_20,0,0 },
+	[INSTR_RRF_UURF]  = { 0xff, R_24,U4_16,F_28,U4_20,0,0 },
+	[INSTR_RRR_F0FF]  = { 0xff, F_24,F_28,F_16,0,0,0 },
+	[INSTR_RRS_RRRDU] = { 0xff, R_8,R_12,U4_32,D_20,B_16,0 },
+	[INSTR_RR_FF]	  = { 0xff, F_8,F_12,0,0,0,0 },
+	[INSTR_RR_R0]	  = { 0xff, R_8, 0,0,0,0,0 },
+	[INSTR_RR_RR]	  = { 0xff, R_8,R_12,0,0,0,0 },
+	[INSTR_RR_U0]	  = { 0xff, U8_8, 0,0,0,0,0 },
+	[INSTR_RR_UR]	  = { 0xff, U4_8,R_12,0,0,0,0 },
+	[INSTR_RSE_CCRD]  = { 0xff, C_8,C_12,D_20,B_16,0,0 },
+	[INSTR_RSE_RRRD]  = { 0xff, R_8,R_12,D_20,B_16,0,0 },
+	[INSTR_RSE_RURD]  = { 0xff, R_8,U4_12,D_20,B_16,0,0 },
+	[INSTR_RSI_RRP]	  = { 0xff, R_8,R_12,J16_16,0,0,0 },
+	[INSTR_RSL_LRDFU] = { 0xff, F_32,D_20,L4_8,B_16,U4_36,0 },
+	[INSTR_RSL_R0RD]  = { 0xff, D_20,L4_8,B_16,0,0,0 },
+	[INSTR_RSY_AARD]  = { 0xff, A_8,A_12,D20_20,B_16,0,0 },
+	[INSTR_RSY_CCRD]  = { 0xff, C_8,C_12,D20_20,B_16,0,0 },
+	[INSTR_RSY_RDRM]  = { 0xff, R_8,D20_20,B_16,U4_12,0,0 },
+	[INSTR_RSY_RRRD]  = { 0xff, R_8,R_12,D20_20,B_16,0,0 },
 	[INSTR_RSY_RURD]  = { 0xff, R_8,U4_12,D20_20,B_16,0,0 },
-							       /* e.g. icmh  */
-	[INSTR_RSY_AARD]  = { 0xff, A_8,A_12,D20_20,B_16,0,0 },/* e.g. lamy  */
-	[INSTR_RSY_CCRD]  = { 0xff, C_8,C_12,D20_20,B_16,0,0 },/* e.g. lamy  */
-	[INSTR_RS_AARD]	  = { 0xff, A_8,A_12,D_20,B_16,0,0 },  /* e.g. lam   */
-	[INSTR_RS_CCRD]	  = { 0xff, C_8,C_12,D_20,B_16,0,0 },  /* e.g. lctl  */
-	[INSTR_RS_R0RD]	  = { 0xff, R_8,D_20,B_16,0,0,0 },     /* e.g. sll   */
-	[INSTR_RS_RRRD]	  = { 0xff, R_8,R_12,D_20,B_16,0,0 },  /* e.g. cs    */
-	[INSTR_RS_RURD]	  = { 0xff, R_8,U4_12,D_20,B_16,0,0 }, /* e.g. icm   */
-	[INSTR_RXE_FRRD]  = { 0xff, F_8,D_20,X_12,B_16,0,0 },  /* e.g. axbr  */
-	[INSTR_RXE_RRRD]  = { 0xff, R_8,D_20,X_12,B_16,0,0 },  /* e.g. lg    */
+	[INSTR_RS_AARD]	  = { 0xff, A_8,A_12,D_20,B_16,0,0 },
+	[INSTR_RS_CCRD]	  = { 0xff, C_8,C_12,D_20,B_16,0,0 },
+	[INSTR_RS_R0RD]	  = { 0xff, R_8,D_20,B_16,0,0,0 },
+	[INSTR_RS_RRRD]	  = { 0xff, R_8,R_12,D_20,B_16,0,0 },
+	[INSTR_RS_RURD]	  = { 0xff, R_8,U4_12,D_20,B_16,0,0 },
+	[INSTR_RXE_FRRD]  = { 0xff, F_8,D_20,X_12,B_16,0,0 },
+	[INSTR_RXE_RRRD]  = { 0xff, R_8,D_20,X_12,B_16,0,0 },
 	[INSTR_RXF_FRRDF] = { 0xff, F_32,F_8,D_20,X_12,B_16,0 },
-							       /* e.g. madb  */
-	[INSTR_RXY_RRRD]  = { 0xff, R_8,D20_20,X_12,B_16,0,0 },/* e.g. ly    */
-	[INSTR_RXY_FRRD]  = { 0xff, F_8,D20_20,X_12,B_16,0,0 },/* e.g. ley   */
-	[INSTR_RX_FRRD]	  = { 0xff, F_8,D_20,X_12,B_16,0,0 },  /* e.g. ae    */
-	[INSTR_RX_RRRD]	  = { 0xff, R_8,D_20,X_12,B_16,0,0 },  /* e.g. l     */
-	[INSTR_RX_URRD]	  = { 0x00, U4_8,D_20,X_12,B_16,0,0 }, /* e.g. bc    */
-	[INSTR_SI_URD]	  = { 0x00, D_20,B_16,U8_8,0,0,0 },    /* e.g. cli   */
-	[INSTR_SIY_URD]	  = { 0xff, D20_20,B_16,U8_8,0,0,0 },  /* e.g. tmy   */
-	[INSTR_SSE_RDRD]  = { 0xff, D_20,B_16,D_36,B_32,0,0 }, /* e.g. mvsdk */
+	[INSTR_RXY_FRRD]  = { 0xff, F_8,D20_20,X_12,B_16,0,0 },
+	[INSTR_RXY_RRRD]  = { 0xff, R_8,D20_20,X_12,B_16,0,0 },
+	[INSTR_RXY_URRD]  = { 0xff, U4_8,D20_20,X_12,B_16,0,0 },
+	[INSTR_RX_FRRD]	  = { 0xff, F_8,D_20,X_12,B_16,0,0 },
+	[INSTR_RX_RRRD]	  = { 0xff, R_8,D_20,X_12,B_16,0,0 },
+	[INSTR_RX_URRD]	  = { 0xff, U4_8,D_20,X_12,B_16,0,0 },
+	[INSTR_SIL_RDI]   = { 0xff, D_20,B_16,I16_32,0,0,0 },
+	[INSTR_SIL_RDU]   = { 0xff, D_20,B_16,U16_32,0,0,0 },
+	[INSTR_SIY_IRD]   = { 0xff, D20_20,B_16,I8_8,0,0,0 },
+	[INSTR_SIY_URD]	  = { 0xff, D20_20,B_16,U8_8,0,0,0 },
+	[INSTR_SI_URD]	  = { 0xff, D_20,B_16,U8_8,0,0,0 },
+	[INSTR_SMI_U0RDP] = { 0xff, U4_8,J16_32,D_20,B_16,0,0 },
+	[INSTR_SSE_RDRD]  = { 0xff, D_20,B_16,D_36,B_32,0,0 },
+	[INSTR_SSF_RRDRD] = { 0x0f, D_20,B_16,D_36,B_32,R_8,0 },
+	[INSTR_SSF_RRDRD2]= { 0x0f, R_8,D_20,B_16,D_36,B_32,0 },
 	[INSTR_SS_L0RDRD] = { 0xff, D_20,L8_8,B_16,D_36,B_32,0 },
-							       /* e.g. mvc   */
 	[INSTR_SS_LIRDRD] = { 0xff, D_20,L4_8,B_16,D_36,B_32,U4_12 },
-							       /* e.g. srp   */
 	[INSTR_SS_LLRDRD] = { 0xff, D_20,L4_8,B_16,D_36,L4_12,B_32 },
-							       /* e.g. pack  */
-	[INSTR_SS_RRRDRD] = { 0xff, D_20,R_8,B_16,D_36,B_32,R_12 },
-							       /* e.g. mvck  */
 	[INSTR_SS_RRRDRD2]= { 0xff, R_8,D_20,B_16,R_12,D_36,B_32 },
-							       /* e.g. plo   */
 	[INSTR_SS_RRRDRD3]= { 0xff, R_8,R_12,D_20,B_16,D_36,B_32 },
-							       /* e.g. lmd   */
-	[INSTR_S_00]	  = { 0xff, 0,0,0,0,0,0 },	       /* e.g. hsch  */
-	[INSTR_S_RD]	  = { 0xff, D_20,B_16,0,0,0,0 },       /* e.g. lpsw  */
-	[INSTR_SSF_RRDRD] = { 0x00, D_20,B_16,D_36,B_32,R_8,0 },
-							       /* e.g. mvcos */
+	[INSTR_SS_RRRDRD] = { 0xff, D_20,R_8,B_16,D_36,B_32,R_12 },
+	[INSTR_S_00]	  = { 0xff, 0,0,0,0,0,0 },
+	[INSTR_S_RD]	  = { 0xff, D_20,B_16,0,0,0,0 },
+};
+
+enum {
+	LONG_INSN_ALGHSIK,
+	LONG_INSN_ALHHHR,
+	LONG_INSN_ALHHLR,
+	LONG_INSN_ALHSIK,
+	LONG_INSN_ALSIHN,
+	LONG_INSN_CDFBRA,
+	LONG_INSN_CDGBRA,
+	LONG_INSN_CDGTRA,
+	LONG_INSN_CDLFBR,
+	LONG_INSN_CDLFTR,
+	LONG_INSN_CDLGBR,
+	LONG_INSN_CDLGTR,
+	LONG_INSN_CEFBRA,
+	LONG_INSN_CEGBRA,
+	LONG_INSN_CELFBR,
+	LONG_INSN_CELGBR,
+	LONG_INSN_CFDBRA,
+	LONG_INSN_CFEBRA,
+	LONG_INSN_CFXBRA,
+	LONG_INSN_CGDBRA,
+	LONG_INSN_CGDTRA,
+	LONG_INSN_CGEBRA,
+	LONG_INSN_CGXBRA,
+	LONG_INSN_CGXTRA,
+	LONG_INSN_CLFDBR,
+	LONG_INSN_CLFDTR,
+	LONG_INSN_CLFEBR,
+	LONG_INSN_CLFHSI,
+	LONG_INSN_CLFXBR,
+	LONG_INSN_CLFXTR,
+	LONG_INSN_CLGDBR,
+	LONG_INSN_CLGDTR,
+	LONG_INSN_CLGEBR,
+	LONG_INSN_CLGFRL,
+	LONG_INSN_CLGHRL,
+	LONG_INSN_CLGHSI,
+	LONG_INSN_CLGXBR,
+	LONG_INSN_CLGXTR,
+	LONG_INSN_CLHHSI,
+	LONG_INSN_CXFBRA,
+	LONG_INSN_CXGBRA,
+	LONG_INSN_CXGTRA,
+	LONG_INSN_CXLFBR,
+	LONG_INSN_CXLFTR,
+	LONG_INSN_CXLGBR,
+	LONG_INSN_CXLGTR,
+	LONG_INSN_FIDBRA,
+	LONG_INSN_FIEBRA,
+	LONG_INSN_FIXBRA,
+	LONG_INSN_LDXBRA,
+	LONG_INSN_LEDBRA,
+	LONG_INSN_LEXBRA,
+	LONG_INSN_LLGFAT,
+	LONG_INSN_LLGFRL,
+	LONG_INSN_LLGHRL,
+	LONG_INSN_LLGTAT,
+	LONG_INSN_POPCNT,
+	LONG_INSN_RIEMIT,
+	LONG_INSN_RINEXT,
+	LONG_INSN_RISBGN,
+	LONG_INSN_RISBHG,
+	LONG_INSN_RISBLG,
+	LONG_INSN_SLHHHR,
+	LONG_INSN_SLHHLR,
+	LONG_INSN_TABORT,
+	LONG_INSN_TBEGIN,
+	LONG_INSN_TBEGINC,
+	LONG_INSN_PCISTG,
+	LONG_INSN_MPCIFC,
+	LONG_INSN_STPCIFC,
+	LONG_INSN_PCISTB,
+};
+
+static char *long_insn_name[] = {
+	[LONG_INSN_ALGHSIK] = "alghsik",
+	[LONG_INSN_ALHHHR] = "alhhhr",
+	[LONG_INSN_ALHHLR] = "alhhlr",
+	[LONG_INSN_ALHSIK] = "alhsik",
+	[LONG_INSN_ALSIHN] = "alsihn",
+	[LONG_INSN_CDFBRA] = "cdfbra",
+	[LONG_INSN_CDGBRA] = "cdgbra",
+	[LONG_INSN_CDGTRA] = "cdgtra",
+	[LONG_INSN_CDLFBR] = "cdlfbr",
+	[LONG_INSN_CDLFTR] = "cdlftr",
+	[LONG_INSN_CDLGBR] = "cdlgbr",
+	[LONG_INSN_CDLGTR] = "cdlgtr",
+	[LONG_INSN_CEFBRA] = "cefbra",
+	[LONG_INSN_CEGBRA] = "cegbra",
+	[LONG_INSN_CELFBR] = "celfbr",
+	[LONG_INSN_CELGBR] = "celgbr",
+	[LONG_INSN_CFDBRA] = "cfdbra",
+	[LONG_INSN_CFEBRA] = "cfebra",
+	[LONG_INSN_CFXBRA] = "cfxbra",
+	[LONG_INSN_CGDBRA] = "cgdbra",
+	[LONG_INSN_CGDTRA] = "cgdtra",
+	[LONG_INSN_CGEBRA] = "cgebra",
+	[LONG_INSN_CGXBRA] = "cgxbra",
+	[LONG_INSN_CGXTRA] = "cgxtra",
+	[LONG_INSN_CLFDBR] = "clfdbr",
+	[LONG_INSN_CLFDTR] = "clfdtr",
+	[LONG_INSN_CLFEBR] = "clfebr",
+	[LONG_INSN_CLFHSI] = "clfhsi",
+	[LONG_INSN_CLFXBR] = "clfxbr",
+	[LONG_INSN_CLFXTR] = "clfxtr",
+	[LONG_INSN_CLGDBR] = "clgdbr",
+	[LONG_INSN_CLGDTR] = "clgdtr",
+	[LONG_INSN_CLGEBR] = "clgebr",
+	[LONG_INSN_CLGFRL] = "clgfrl",
+	[LONG_INSN_CLGHRL] = "clghrl",
+	[LONG_INSN_CLGHSI] = "clghsi",
+	[LONG_INSN_CLGXBR] = "clgxbr",
+	[LONG_INSN_CLGXTR] = "clgxtr",
+	[LONG_INSN_CLHHSI] = "clhhsi",
+	[LONG_INSN_CXFBRA] = "cxfbra",
+	[LONG_INSN_CXGBRA] = "cxgbra",
+	[LONG_INSN_CXGTRA] = "cxgtra",
+	[LONG_INSN_CXLFBR] = "cxlfbr",
+	[LONG_INSN_CXLFTR] = "cxlftr",
+	[LONG_INSN_CXLGBR] = "cxlgbr",
+	[LONG_INSN_CXLGTR] = "cxlgtr",
+	[LONG_INSN_FIDBRA] = "fidbra",
+	[LONG_INSN_FIEBRA] = "fiebra",
+	[LONG_INSN_FIXBRA] = "fixbra",
+	[LONG_INSN_LDXBRA] = "ldxbra",
+	[LONG_INSN_LEDBRA] = "ledbra",
+	[LONG_INSN_LEXBRA] = "lexbra",
+	[LONG_INSN_LLGFAT] = "llgfat",
+	[LONG_INSN_LLGFRL] = "llgfrl",
+	[LONG_INSN_LLGHRL] = "llghrl",
+	[LONG_INSN_LLGTAT] = "llgtat",
+	[LONG_INSN_POPCNT] = "popcnt",
+	[LONG_INSN_RIEMIT] = "riemit",
+	[LONG_INSN_RINEXT] = "rinext",
+	[LONG_INSN_RISBGN] = "risbgn",
+	[LONG_INSN_RISBHG] = "risbhg",
+	[LONG_INSN_RISBLG] = "risblg",
+	[LONG_INSN_SLHHHR] = "slhhhr",
+	[LONG_INSN_SLHHLR] = "slhhlr",
+	[LONG_INSN_TABORT] = "tabort",
+	[LONG_INSN_TBEGIN] = "tbegin",
+	[LONG_INSN_TBEGINC] = "tbeginc",
+	[LONG_INSN_PCISTG] = "pcistg",
+	[LONG_INSN_MPCIFC] = "mpcifc",
+	[LONG_INSN_STPCIFC] = "stpcifc",
+	[LONG_INSN_PCISTB] = "pcistb",
 };
 
 static struct insn opcode[] = {
 #ifdef CONFIG_64BIT
+	{ "bprp", 0xc5, INSTR_MII_UPI },
+	{ "bpp", 0xc7, INSTR_SMI_U0RDP },
+	{ "trtr", 0xd0, INSTR_SS_L0RDRD },
 	{ "lmd", 0xef, INSTR_SS_RRRDRD3 },
 #endif
 	{ "spm", 0x04, INSTR_RR_R0 },
@@ -298,7 +518,6 @@ static struct insn opcode[] = {
 	{ "lcdr", 0x23, INSTR_RR_FF },
 	{ "hdr", 0x24, INSTR_RR_FF },
 	{ "ldxr", 0x25, INSTR_RR_FF },
-	{ "lrdr", 0x25, INSTR_RR_FF },
 	{ "mxr", 0x26, INSTR_RR_FF },
 	{ "mxdr", 0x27, INSTR_RR_FF },
 	{ "ldr", 0x28, INSTR_RR_FF },
@@ -315,7 +534,6 @@ static struct insn opcode[] = {
 	{ "lcer", 0x33, INSTR_RR_FF },
 	{ "her", 0x34, INSTR_RR_FF },
 	{ "ledr", 0x35, INSTR_RR_FF },
-	{ "lrer", 0x35, INSTR_RR_FF },
 	{ "axr", 0x36, INSTR_RR_FF },
 	{ "sxr", 0x37, INSTR_RR_FF },
 	{ "ler", 0x38, INSTR_RR_FF },
@@ -323,7 +541,6 @@ static struct insn opcode[] = {
 	{ "aer", 0x3a, INSTR_RR_FF },
 	{ "ser", 0x3b, INSTR_RR_FF },
 	{ "mder", 0x3c, INSTR_RR_FF },
-	{ "mer", 0x3c, INSTR_RR_FF },
 	{ "der", 0x3d, INSTR_RR_FF },
 	{ "aur", 0x3e, INSTR_RR_FF },
 	{ "sur", 0x3f, INSTR_RR_FF },
@@ -374,7 +591,6 @@ static struct insn opcode[] = {
 	{ "ae", 0x7a, INSTR_RX_FRRD },
 	{ "se", 0x7b, INSTR_RX_FRRD },
 	{ "mde", 0x7c, INSTR_RX_FRRD },
-	{ "me", 0x7c, INSTR_RX_FRRD },
 	{ "de", 0x7d, INSTR_RX_FRRD },
 	{ "au", 0x7e, INSTR_RX_FRRD },
 	{ "su", 0x7f, INSTR_RX_FRRD },
@@ -454,6 +670,8 @@ static struct insn opcode[] = {
 
 static struct insn opcode_01[] = {
 #ifdef CONFIG_64BIT
+	{ "ptff", 0x04, INSTR_E },
+	{ "pfpo", 0x0a, INSTR_E },
 	{ "sam64", 0x0e, INSTR_E },
 #endif
 	{ "pr", 0x01, INSTR_E },
@@ -510,16 +728,41 @@ static struct insn opcode_a7[] = {
 	{ "", 0, INSTR_INVALID }
 };
 
+static struct insn opcode_aa[] = {
+#ifdef CONFIG_64BIT
+	{ { 0, LONG_INSN_RINEXT }, 0x00, INSTR_RI_RI },
+	{ "rion", 0x01, INSTR_RI_RI },
+	{ "tric", 0x02, INSTR_RI_RI },
+	{ "rioff", 0x03, INSTR_RI_RI },
+	{ { 0, LONG_INSN_RIEMIT }, 0x04, INSTR_RI_RI },
+#endif
+	{ "", 0, INSTR_INVALID }
+};
+
 static struct insn opcode_b2[] = {
 #ifdef CONFIG_64BIT
-	{ "sske", 0x2b, INSTR_RRF_M0RR },
 	{ "stckf", 0x7c, INSTR_S_RD },
-	{ "cu21", 0xa6, INSTR_RRF_M0RR },
-	{ "cuutf", 0xa6, INSTR_RRF_M0RR },
-	{ "cu12", 0xa7, INSTR_RRF_M0RR },
-	{ "cutfu", 0xa7, INSTR_RRF_M0RR },
+	{ "lpp", 0x80, INSTR_S_RD },
+	{ "lcctl", 0x84, INSTR_S_RD },
+	{ "lpctl", 0x85, INSTR_S_RD },
+	{ "qsi", 0x86, INSTR_S_RD },
+	{ "lsctl", 0x87, INSTR_S_RD },
+	{ "qctri", 0x8e, INSTR_S_RD },
 	{ "stfle", 0xb0, INSTR_S_RD },
 	{ "lpswe", 0xb2, INSTR_S_RD },
+	{ "srnmb", 0xb8, INSTR_S_RD },
+	{ "srnmt", 0xb9, INSTR_S_RD },
+	{ "lfas", 0xbd, INSTR_S_RD },
+	{ "scctr", 0xe0, INSTR_RRE_RR },
+	{ "spctr", 0xe1, INSTR_RRE_RR },
+	{ "ecctr", 0xe4, INSTR_RRE_RR },
+	{ "epctr", 0xe5, INSTR_RRE_RR },
+	{ "ppa", 0xe8, INSTR_RRF_U0RR },
+	{ "etnd", 0xec, INSTR_RRE_R0 },
+	{ "ecpga", 0xed, INSTR_RRE_RR },
+	{ "tend", 0xf8, INSTR_S_00 },
+	{ "niai", 0xfa, INSTR_IE_UU },
+	{ { 0, LONG_INSN_TABORT }, 0xfc, INSTR_S_RD },
 #endif
 	{ "stidp", 0x02, INSTR_S_RD },
 	{ "sck", 0x04, INSTR_S_RD },
@@ -538,6 +781,7 @@ static struct insn opcode_b2[] = {
 	{ "pc", 0x18, INSTR_S_RD },
 	{ "sac", 0x19, INSTR_S_RD },
 	{ "cfc", 0x1a, INSTR_S_RD },
+	{ "servc", 0x20, INSTR_RRE_RR },
 	{ "ipte", 0x21, INSTR_RRE_RR },
 	{ "ipm", 0x22, INSTR_RRE_R0 },
 	{ "ivsk", 0x23, INSTR_RRE_RR },
@@ -548,9 +792,9 @@ static struct insn opcode_b2[] = {
 	{ "pt", 0x28, INSTR_RRE_RR },
 	{ "iske", 0x29, INSTR_RRE_RR },
 	{ "rrbe", 0x2a, INSTR_RRE_RR },
-	{ "sske", 0x2b, INSTR_RRE_RR },
+	{ "sske", 0x2b, INSTR_RRF_M0RR },
 	{ "tb", 0x2c, INSTR_RRE_0R },
-	{ "dxr", 0x2d, INSTR_RRE_F0 },
+	{ "dxr", 0x2d, INSTR_RRE_FF },
 	{ "pgin", 0x2e, INSTR_RRE_RR },
 	{ "pgout", 0x2f, INSTR_RRE_RR },
 	{ "csch", 0x30, INSTR_S_00 },
@@ -568,8 +812,8 @@ static struct insn opcode_b2[] = {
 	{ "schm", 0x3c, INSTR_S_00 },
 	{ "bakr", 0x40, INSTR_RRE_RR },
 	{ "cksm", 0x41, INSTR_RRE_RR },
-	{ "sqdr", 0x44, INSTR_RRE_F0 },
-	{ "sqer", 0x45, INSTR_RRE_F0 },
+	{ "sqdr", 0x44, INSTR_RRE_FF },
+	{ "sqer", 0x45, INSTR_RRE_FF },
 	{ "stura", 0x46, INSTR_RRE_RR },
 	{ "msta", 0x47, INSTR_RRE_R0 },
 	{ "palb", 0x48, INSTR_RRE_00 },
@@ -577,7 +821,7 @@ static struct insn opcode_b2[] = {
 	{ "esta", 0x4a, INSTR_RRE_RR },
 	{ "lura", 0x4b, INSTR_RRE_RR },
 	{ "tar", 0x4c, INSTR_RRE_AR },
-	{ "cpya", INSTR_RRE_AA },
+	{ "cpya", 0x4d, INSTR_RRE_AA },
 	{ "sar", 0x4e, INSTR_RRE_AR },
 	{ "ear", 0x4f, INSTR_RRE_RA },
 	{ "csp", 0x50, INSTR_RRE_RR },
@@ -590,19 +834,19 @@ static struct insn opcode_b2[] = {
 	{ "clst", 0x5d, INSTR_RRE_RR },
 	{ "srst", 0x5e, INSTR_RRE_RR },
 	{ "cmpsc", 0x63, INSTR_RRE_RR },
-	{ "cmpsc", 0x63, INSTR_RRE_RR },
 	{ "siga", 0x74, INSTR_S_RD },
 	{ "xsch", 0x76, INSTR_S_00 },
 	{ "rp", 0x77, INSTR_S_RD },
 	{ "stcke", 0x78, INSTR_S_RD },
 	{ "sacf", 0x79, INSTR_S_RD },
 	{ "stsi", 0x7d, INSTR_S_RD },
+	{ "spp", 0x80, INSTR_S_RD },
 	{ "srnm", 0x99, INSTR_S_RD },
 	{ "stfpc", 0x9c, INSTR_S_RD },
 	{ "lfpc", 0x9d, INSTR_S_RD },
 	{ "tre", 0xa5, INSTR_RRE_RR },
-	{ "cuutf", 0xa6, INSTR_RRE_RR },
-	{ "cutfu", 0xa7, INSTR_RRE_RR },
+	{ "cuutf", 0xa6, INSTR_RRF_M0RR },
+	{ "cutfu", 0xa7, INSTR_RRF_M0RR },
 	{ "stfl", 0xb1, INSTR_S_RD },
 	{ "trap4", 0xff, INSTR_S_RD },
 	{ "", 0, INSTR_INVALID }
@@ -616,21 +860,87 @@ static struct insn opcode_b3[] = {
 	{ "myr", 0x3b, INSTR_RRF_F0FF },
 	{ "mayhr", 0x3c, INSTR_RRF_F0FF },
 	{ "myhr", 0x3d, INSTR_RRF_F0FF },
-	{ "cegbr", 0xa4, INSTR_RRE_RR },
-	{ "cdgbr", 0xa5, INSTR_RRE_RR },
-	{ "cxgbr", 0xa6, INSTR_RRE_RR },
-	{ "cgebr", 0xa8, INSTR_RRF_U0RF },
-	{ "cgdbr", 0xa9, INSTR_RRF_U0RF },
-	{ "cgxbr", 0xaa, INSTR_RRF_U0RF },
-	{ "cfer", 0xb8, INSTR_RRF_U0RF },
-	{ "cfdr", 0xb9, INSTR_RRF_U0RF },
-	{ "cfxr", 0xba, INSTR_RRF_U0RF },
-	{ "cegr", 0xc4, INSTR_RRE_RR },
-	{ "cdgr", 0xc5, INSTR_RRE_RR },
-	{ "cxgr", 0xc6, INSTR_RRE_RR },
+	{ "lpdfr", 0x70, INSTR_RRE_FF },
+	{ "lndfr", 0x71, INSTR_RRE_FF },
+	{ "cpsdr", 0x72, INSTR_RRF_F0FF2 },
+	{ "lcdfr", 0x73, INSTR_RRE_FF },
+	{ "sfasr", 0x85, INSTR_RRE_R0 },
+	{ { 0, LONG_INSN_CELFBR }, 0x90, INSTR_RRF_UUFR },
+	{ { 0, LONG_INSN_CDLFBR }, 0x91, INSTR_RRF_UUFR },
+	{ { 0, LONG_INSN_CXLFBR }, 0x92, INSTR_RRF_UURF },
+	{ { 0, LONG_INSN_CEFBRA }, 0x94, INSTR_RRF_UUFR },
+	{ { 0, LONG_INSN_CDFBRA }, 0x95, INSTR_RRF_UUFR },
+	{ { 0, LONG_INSN_CXFBRA }, 0x96, INSTR_RRF_UURF },
+	{ { 0, LONG_INSN_CFEBRA }, 0x98, INSTR_RRF_UURF },
+	{ { 0, LONG_INSN_CFDBRA }, 0x99, INSTR_RRF_UURF },
+	{ { 0, LONG_INSN_CFXBRA }, 0x9a, INSTR_RRF_UUFR },
+	{ { 0, LONG_INSN_CLFEBR }, 0x9c, INSTR_RRF_UURF },
+	{ { 0, LONG_INSN_CLFDBR }, 0x9d, INSTR_RRF_UURF },
+	{ { 0, LONG_INSN_CLFXBR }, 0x9e, INSTR_RRF_UUFR },
+	{ { 0, LONG_INSN_CELGBR }, 0xa0, INSTR_RRF_UUFR },
+	{ { 0, LONG_INSN_CDLGBR }, 0xa1, INSTR_RRF_UUFR },
+	{ { 0, LONG_INSN_CXLGBR }, 0xa2, INSTR_RRF_UURF },
+	{ { 0, LONG_INSN_CEGBRA }, 0xa4, INSTR_RRF_UUFR },
+	{ { 0, LONG_INSN_CDGBRA }, 0xa5, INSTR_RRF_UUFR },
+	{ { 0, LONG_INSN_CXGBRA }, 0xa6, INSTR_RRF_UURF },
+	{ { 0, LONG_INSN_CGEBRA }, 0xa8, INSTR_RRF_UURF },
+	{ { 0, LONG_INSN_CGDBRA }, 0xa9, INSTR_RRF_UURF },
+	{ { 0, LONG_INSN_CGXBRA }, 0xaa, INSTR_RRF_UUFR },
+	{ { 0, LONG_INSN_CLGEBR }, 0xac, INSTR_RRF_UURF },
+	{ { 0, LONG_INSN_CLGDBR }, 0xad, INSTR_RRF_UURF },
+	{ { 0, LONG_INSN_CLGXBR }, 0xae, INSTR_RRF_UUFR },
+	{ "ldgr", 0xc1, INSTR_RRE_FR },
+	{ "cegr", 0xc4, INSTR_RRE_FR },
+	{ "cdgr", 0xc5, INSTR_RRE_FR },
+	{ "cxgr", 0xc6, INSTR_RRE_FR },
 	{ "cger", 0xc8, INSTR_RRF_U0RF },
 	{ "cgdr", 0xc9, INSTR_RRF_U0RF },
 	{ "cgxr", 0xca, INSTR_RRF_U0RF },
+	{ "lgdr", 0xcd, INSTR_RRE_RF },
+	{ "mdtra", 0xd0, INSTR_RRF_FUFF2 },
+	{ "ddtra", 0xd1, INSTR_RRF_FUFF2 },
+	{ "adtra", 0xd2, INSTR_RRF_FUFF2 },
+	{ "sdtra", 0xd3, INSTR_RRF_FUFF2 },
+	{ "ldetr", 0xd4, INSTR_RRF_0UFF },
+	{ "ledtr", 0xd5, INSTR_RRF_UUFF },
+	{ "ltdtr", 0xd6, INSTR_RRE_FF },
+	{ "fidtr", 0xd7, INSTR_RRF_UUFF },
+	{ "mxtra", 0xd8, INSTR_RRF_FUFF2 },
+	{ "dxtra", 0xd9, INSTR_RRF_FUFF2 },
+	{ "axtra", 0xda, INSTR_RRF_FUFF2 },
+	{ "sxtra", 0xdb, INSTR_RRF_FUFF2 },
+	{ "lxdtr", 0xdc, INSTR_RRF_0UFF },
+	{ "ldxtr", 0xdd, INSTR_RRF_UUFF },
+	{ "ltxtr", 0xde, INSTR_RRE_FF },
+	{ "fixtr", 0xdf, INSTR_RRF_UUFF },
+	{ "kdtr", 0xe0, INSTR_RRE_FF },
+	{ { 0, LONG_INSN_CGDTRA }, 0xe1, INSTR_RRF_UURF },
+	{ "cudtr", 0xe2, INSTR_RRE_RF },
+	{ "csdtr", 0xe3, INSTR_RRE_RF },
+	{ "cdtr", 0xe4, INSTR_RRE_FF },
+	{ "eedtr", 0xe5, INSTR_RRE_RF },
+	{ "esdtr", 0xe7, INSTR_RRE_RF },
+	{ "kxtr", 0xe8, INSTR_RRE_FF },
+	{ { 0, LONG_INSN_CGXTRA }, 0xe9, INSTR_RRF_UUFR },
+	{ "cuxtr", 0xea, INSTR_RRE_RF },
+	{ "csxtr", 0xeb, INSTR_RRE_RF },
+	{ "cxtr", 0xec, INSTR_RRE_FF },
+	{ "eextr", 0xed, INSTR_RRE_RF },
+	{ "esxtr", 0xef, INSTR_RRE_RF },
+	{ { 0, LONG_INSN_CDGTRA }, 0xf1, INSTR_RRF_UUFR },
+	{ "cdutr", 0xf2, INSTR_RRE_FR },
+	{ "cdstr", 0xf3, INSTR_RRE_FR },
+	{ "cedtr", 0xf4, INSTR_RRE_FF },
+	{ "qadtr", 0xf5, INSTR_RRF_FUFF },
+	{ "iedtr", 0xf6, INSTR_RRF_F0FR },
+	{ "rrdtr", 0xf7, INSTR_RRF_FFRU },
+	{ { 0, LONG_INSN_CXGTRA }, 0xf9, INSTR_RRF_UURF },
+	{ "cxutr", 0xfa, INSTR_RRE_FR },
+	{ "cxstr", 0xfb, INSTR_RRE_FR },
+	{ "cextr", 0xfc, INSTR_RRE_FF },
+	{ "qaxtr", 0xfd, INSTR_RRF_FUFF },
+	{ "iextr", 0xfe, INSTR_RRF_F0FR },
+	{ "rrxtr", 0xff, INSTR_RRF_FFRU },
 #endif
 	{ "lpebr", 0x00, INSTR_RRE_FF },
 	{ "lnebr", 0x01, INSTR_RRE_FF },
@@ -677,10 +987,10 @@ static struct insn opcode_b3[] = {
 	{ "lnxbr", 0x41, INSTR_RRE_FF },
 	{ "ltxbr", 0x42, INSTR_RRE_FF },
 	{ "lcxbr", 0x43, INSTR_RRE_FF },
-	{ "ledbr", 0x44, INSTR_RRE_FF },
-	{ "ldxbr", 0x45, INSTR_RRE_FF },
-	{ "lexbr", 0x46, INSTR_RRE_FF },
-	{ "fixbr", 0x47, INSTR_RRF_U0FF },
+	{ { 0, LONG_INSN_LEDBRA }, 0x44, INSTR_RRF_UUFF },
+	{ { 0, LONG_INSN_LDXBRA }, 0x45, INSTR_RRF_UUFF },
+	{ { 0, LONG_INSN_LEXBRA }, 0x46, INSTR_RRF_UUFF },
+	{ { 0, LONG_INSN_FIXBRA }, 0x47, INSTR_RRF_UUFF },
 	{ "kxbr", 0x48, INSTR_RRE_FF },
 	{ "cxbr", 0x49, INSTR_RRE_FF },
 	{ "axbr", 0x4a, INSTR_RRE_FF },
@@ -690,24 +1000,24 @@ static struct insn opcode_b3[] = {
 	{ "tbedr", 0x50, INSTR_RRF_U0FF },
 	{ "tbdr", 0x51, INSTR_RRF_U0FF },
 	{ "diebr", 0x53, INSTR_RRF_FUFF },
-	{ "fiebr", 0x57, INSTR_RRF_U0FF },
-	{ "thder", 0x58, INSTR_RRE_RR },
-	{ "thdr", 0x59, INSTR_RRE_RR },
+	{ { 0, LONG_INSN_FIEBRA }, 0x57, INSTR_RRF_UUFF },
+	{ "thder", 0x58, INSTR_RRE_FF },
+	{ "thdr", 0x59, INSTR_RRE_FF },
 	{ "didbr", 0x5b, INSTR_RRF_FUFF },
-	{ "fidbr", 0x5f, INSTR_RRF_U0FF },
+	{ { 0, LONG_INSN_FIDBRA }, 0x5f, INSTR_RRF_UUFF },
 	{ "lpxr", 0x60, INSTR_RRE_FF },
 	{ "lnxr", 0x61, INSTR_RRE_FF },
 	{ "ltxr", 0x62, INSTR_RRE_FF },
 	{ "lcxr", 0x63, INSTR_RRE_FF },
-	{ "lxr", 0x65, INSTR_RRE_RR },
+	{ "lxr", 0x65, INSTR_RRE_FF },
 	{ "lexr", 0x66, INSTR_RRE_FF },
-	{ "fixr", 0x67, INSTR_RRF_U0FF },
+	{ "fixr", 0x67, INSTR_RRE_FF },
 	{ "cxr", 0x69, INSTR_RRE_FF },
-	{ "lzer", 0x74, INSTR_RRE_R0 },
-	{ "lzdr", 0x75, INSTR_RRE_R0 },
-	{ "lzxr", 0x76, INSTR_RRE_R0 },
-	{ "fier", 0x77, INSTR_RRF_U0FF },
-	{ "fidr", 0x7f, INSTR_RRF_U0FF },
+	{ "lzer", 0x74, INSTR_RRE_F0 },
+	{ "lzdr", 0x75, INSTR_RRE_F0 },
+	{ "lzxr", 0x76, INSTR_RRE_F0 },
+	{ "fier", 0x77, INSTR_RRE_FF },
+	{ "fidr", 0x7f, INSTR_RRE_FF },
 	{ "sfpc", 0x84, INSTR_RRE_RR_OPT },
 	{ "efpc", 0x8c, INSTR_RRE_RR_OPT },
 	{ "cefbr", 0x94, INSTR_RRE_RF },
@@ -716,9 +1026,12 @@ static struct insn opcode_b3[] = {
 	{ "cfebr", 0x98, INSTR_RRF_U0RF },
 	{ "cfdbr", 0x99, INSTR_RRF_U0RF },
 	{ "cfxbr", 0x9a, INSTR_RRF_U0RF },
-	{ "cefr", 0xb4, INSTR_RRE_RF },
-	{ "cdfr", 0xb5, INSTR_RRE_RF },
-	{ "cxfr", 0xb6, INSTR_RRE_RF },
+	{ "cefr", 0xb4, INSTR_RRE_FR },
+	{ "cdfr", 0xb5, INSTR_RRE_FR },
+	{ "cxfr", 0xb6, INSTR_RRE_FR },
+	{ "cfer", 0xb8, INSTR_RRF_U0RF },
+	{ "cfdr", 0xb9, INSTR_RRF_U0RF },
+	{ "cfxr", 0xba, INSTR_RRF_U0RF },
 	{ "", 0, INSTR_INVALID }
 };
 
@@ -760,7 +1073,23 @@ static struct insn opcode_b9[] = {
 	{ "lhr", 0x27, INSTR_RRE_RR },
 	{ "cgfr", 0x30, INSTR_RRE_RR },
 	{ "clgfr", 0x31, INSTR_RRE_RR },
+	{ "cfdtr", 0x41, INSTR_RRF_UURF },
+	{ { 0, LONG_INSN_CLGDTR }, 0x42, INSTR_RRF_UURF },
+	{ { 0, LONG_INSN_CLFDTR }, 0x43, INSTR_RRF_UURF },
 	{ "bctgr", 0x46, INSTR_RRE_RR },
+	{ "cfxtr", 0x49, INSTR_RRF_UURF },
+	{ { 0, LONG_INSN_CLGXTR }, 0x4a, INSTR_RRF_UUFR },
+	{ { 0, LONG_INSN_CLFXTR }, 0x4b, INSTR_RRF_UUFR },
+	{ "cdftr", 0x51, INSTR_RRF_UUFR },
+	{ { 0, LONG_INSN_CDLGTR }, 0x52, INSTR_RRF_UUFR },
+	{ { 0, LONG_INSN_CDLFTR }, 0x53, INSTR_RRF_UUFR },
+	{ "cxftr", 0x59, INSTR_RRF_UURF },
+	{ { 0, LONG_INSN_CXLGTR }, 0x5a, INSTR_RRF_UURF },
+	{ { 0, LONG_INSN_CXLFTR }, 0x5b, INSTR_RRF_UUFR },
+	{ "cgrt", 0x60, INSTR_RRF_U0RR },
+	{ "clgrt", 0x61, INSTR_RRF_U0RR },
+	{ "crt", 0x72, INSTR_RRF_U0RR },
+	{ "clrt", 0x73, INSTR_RRF_U0RR },
 	{ "ngr", 0x80, INSTR_RRE_RR },
 	{ "ogr", 0x81, INSTR_RRE_RR },
 	{ "xgr", 0x82, INSTR_RRE_RR },
@@ -773,14 +1102,53 @@ static struct insn opcode_b9[] = {
 	{ "slbgr", 0x89, INSTR_RRE_RR },
 	{ "cspg", 0x8a, INSTR_RRE_RR },
 	{ "idte", 0x8e, INSTR_RRF_R0RR },
+	{ "crdte", 0x8f, INSTR_RRF_RMRR },
 	{ "llcr", 0x94, INSTR_RRE_RR },
 	{ "llhr", 0x95, INSTR_RRE_RR },
 	{ "esea", 0x9d, INSTR_RRE_R0 },
+	{ "ptf", 0xa2, INSTR_RRE_R0 },
 	{ "lptea", 0xaa, INSTR_RRF_RURR },
+	{ "rrbm", 0xae, INSTR_RRE_RR },
+	{ "pfmf", 0xaf, INSTR_RRE_RR },
 	{ "cu14", 0xb0, INSTR_RRF_M0RR },
 	{ "cu24", 0xb1, INSTR_RRF_M0RR },
-	{ "cu41", 0xb2, INSTR_RRF_M0RR },
-	{ "cu42", 0xb3, INSTR_RRF_M0RR },
+	{ "cu41", 0xb2, INSTR_RRE_RR },
+	{ "cu42", 0xb3, INSTR_RRE_RR },
+	{ "trtre", 0xbd, INSTR_RRF_M0RR },
+	{ "srstu", 0xbe, INSTR_RRE_RR },
+	{ "trte", 0xbf, INSTR_RRF_M0RR },
+	{ "ahhhr", 0xc8, INSTR_RRF_R0RR2 },
+	{ "shhhr", 0xc9, INSTR_RRF_R0RR2 },
+	{ { 0, LONG_INSN_ALHHHR }, 0xca, INSTR_RRF_R0RR2 },
+	{ { 0, LONG_INSN_SLHHHR }, 0xcb, INSTR_RRF_R0RR2 },
+	{ "chhr", 0xcd, INSTR_RRE_RR },
+	{ "clhhr", 0xcf, INSTR_RRE_RR },
+	{ { 0, LONG_INSN_PCISTG }, 0xd0, INSTR_RRE_RR },
+	{ "pcilg", 0xd2, INSTR_RRE_RR },
+	{ "rpcit", 0xd3, INSTR_RRE_RR },
+	{ "ahhlr", 0xd8, INSTR_RRF_R0RR2 },
+	{ "shhlr", 0xd9, INSTR_RRF_R0RR2 },
+	{ { 0, LONG_INSN_ALHHLR }, 0xda, INSTR_RRF_R0RR2 },
+	{ { 0, LONG_INSN_SLHHLR }, 0xdb, INSTR_RRF_R0RR2 },
+	{ "chlr", 0xdd, INSTR_RRE_RR },
+	{ "clhlr", 0xdf, INSTR_RRE_RR },
+	{ { 0, LONG_INSN_POPCNT }, 0xe1, INSTR_RRE_RR },
+	{ "locgr", 0xe2, INSTR_RRF_M0RR },
+	{ "ngrk", 0xe4, INSTR_RRF_R0RR2 },
+	{ "ogrk", 0xe6, INSTR_RRF_R0RR2 },
+	{ "xgrk", 0xe7, INSTR_RRF_R0RR2 },
+	{ "agrk", 0xe8, INSTR_RRF_R0RR2 },
+	{ "sgrk", 0xe9, INSTR_RRF_R0RR2 },
+	{ "algrk", 0xea, INSTR_RRF_R0RR2 },
+	{ "slgrk", 0xeb, INSTR_RRF_R0RR2 },
+	{ "locr", 0xf2, INSTR_RRF_M0RR },
+	{ "nrk", 0xf4, INSTR_RRF_R0RR2 },
+	{ "ork", 0xf6, INSTR_RRF_R0RR2 },
+	{ "xrk", 0xf7, INSTR_RRF_R0RR2 },
+	{ "ark", 0xf8, INSTR_RRF_R0RR2 },
+	{ "srk", 0xf9, INSTR_RRF_R0RR2 },
+	{ "alrk", 0xfa, INSTR_RRF_R0RR2 },
+	{ "slrk", 0xfb, INSTR_RRF_R0RR2 },
 #endif
 	{ "kmac", 0x1e, INSTR_RRE_RR },
 	{ "lrvr", 0x1f, INSTR_RRE_RR },
@@ -789,13 +1157,9 @@ static struct insn opcode_b9[] = {
 	{ "kimd", 0x3e, INSTR_RRE_RR },
 	{ "klmd", 0x3f, INSTR_RRE_RR },
 	{ "epsw", 0x8d, INSTR_RRE_RR },
-	{ "trtt", 0x90, INSTR_RRE_RR },
 	{ "trtt", 0x90, INSTR_RRF_M0RR },
-	{ "trto", 0x91, INSTR_RRE_RR },
 	{ "trto", 0x91, INSTR_RRF_M0RR },
-	{ "trot", 0x92, INSTR_RRE_RR },
 	{ "trot", 0x92, INSTR_RRF_M0RR },
-	{ "troo", 0x93, INSTR_RRE_RR },
 	{ "troo", 0x93, INSTR_RRF_M0RR },
 	{ "mlr", 0x96, INSTR_RRE_RR },
 	{ "dlr", 0x97, INSTR_RRE_RR },
@@ -826,6 +1190,8 @@ static struct insn opcode_c0[] = {
 
 static struct insn opcode_c2[] = {
 #ifdef CONFIG_64BIT
+	{ "msgfi", 0x00, INSTR_RIL_RI },
+	{ "msfi", 0x01, INSTR_RIL_RI },
 	{ "slgfi", 0x04, INSTR_RIL_RU },
 	{ "slfi", 0x05, INSTR_RIL_RU },
 	{ "agfi", 0x08, INSTR_RIL_RI },
@@ -840,9 +1206,60 @@ static struct insn opcode_c2[] = {
 	{ "", 0, INSTR_INVALID }
 };
 
+static struct insn opcode_c4[] = {
+#ifdef CONFIG_64BIT
+	{ "llhrl", 0x02, INSTR_RIL_RP },
+	{ "lghrl", 0x04, INSTR_RIL_RP },
+	{ "lhrl", 0x05, INSTR_RIL_RP },
+	{ { 0, LONG_INSN_LLGHRL }, 0x06, INSTR_RIL_RP },
+	{ "sthrl", 0x07, INSTR_RIL_RP },
+	{ "lgrl", 0x08, INSTR_RIL_RP },
+	{ "stgrl", 0x0b, INSTR_RIL_RP },
+	{ "lgfrl", 0x0c, INSTR_RIL_RP },
+	{ "lrl", 0x0d, INSTR_RIL_RP },
+	{ { 0, LONG_INSN_LLGFRL }, 0x0e, INSTR_RIL_RP },
+	{ "strl", 0x0f, INSTR_RIL_RP },
+#endif
+	{ "", 0, INSTR_INVALID }
+};
+
+static struct insn opcode_c6[] = {
+#ifdef CONFIG_64BIT
+	{ "exrl", 0x00, INSTR_RIL_RP },
+	{ "pfdrl", 0x02, INSTR_RIL_UP },
+	{ "cghrl", 0x04, INSTR_RIL_RP },
+	{ "chrl", 0x05, INSTR_RIL_RP },
+	{ { 0, LONG_INSN_CLGHRL }, 0x06, INSTR_RIL_RP },
+	{ "clhrl", 0x07, INSTR_RIL_RP },
+	{ "cgrl", 0x08, INSTR_RIL_RP },
+	{ "clgrl", 0x0a, INSTR_RIL_RP },
+	{ "cgfrl", 0x0c, INSTR_RIL_RP },
+	{ "crl", 0x0d, INSTR_RIL_RP },
+	{ { 0, LONG_INSN_CLGFRL }, 0x0e, INSTR_RIL_RP },
+	{ "clrl", 0x0f, INSTR_RIL_RP },
+#endif
+	{ "", 0, INSTR_INVALID }
+};
+
 static struct insn opcode_c8[] = {
 #ifdef CONFIG_64BIT
 	{ "mvcos", 0x00, INSTR_SSF_RRDRD },
+	{ "ectg", 0x01, INSTR_SSF_RRDRD },
+	{ "csst", 0x02, INSTR_SSF_RRDRD },
+	{ "lpd", 0x04, INSTR_SSF_RRDRD2 },
+	{ "lpdg", 0x05, INSTR_SSF_RRDRD2 },
+#endif
+	{ "", 0, INSTR_INVALID }
+};
+
+static struct insn opcode_cc[] = {
+#ifdef CONFIG_64BIT
+	{ "brcth", 0x06, INSTR_RIL_RP },
+	{ "aih", 0x08, INSTR_RIL_RI },
+	{ "alsih", 0x0a, INSTR_RIL_RI },
+	{ { 0, LONG_INSN_ALSIHN }, 0x0b, INSTR_RIL_RI },
+	{ "cih", 0x0d, INSTR_RIL_RI },
+	{ "clih", 0x0f, INSTR_RIL_RI },
 #endif
 	{ "", 0, INSTR_INVALID }
 };
@@ -876,11 +1293,15 @@ static struct insn opcode_e3[] = {
 	{ "cg", 0x20, INSTR_RXY_RRRD },
 	{ "clg", 0x21, INSTR_RXY_RRRD },
 	{ "stg", 0x24, INSTR_RXY_RRRD },
+	{ "ntstg", 0x25, INSTR_RXY_RRRD },
 	{ "cvdy", 0x26, INSTR_RXY_RRRD },
 	{ "cvdg", 0x2e, INSTR_RXY_RRRD },
 	{ "strvg", 0x2f, INSTR_RXY_RRRD },
 	{ "cgf", 0x30, INSTR_RXY_RRRD },
 	{ "clgf", 0x31, INSTR_RXY_RRRD },
+	{ "ltgf", 0x32, INSTR_RXY_RRRD },
+	{ "cgh", 0x34, INSTR_RXY_RRRD },
+	{ "pfd", 0x36, INSTR_RXY_URRD },
 	{ "strvh", 0x3f, INSTR_RXY_RRRD },
 	{ "bctg", 0x46, INSTR_RXY_RRRD },
 	{ "sty", 0x50, INSTR_RXY_RRRD },
@@ -893,21 +1314,25 @@ static struct insn opcode_e3[] = {
 	{ "cy", 0x59, INSTR_RXY_RRRD },
 	{ "ay", 0x5a, INSTR_RXY_RRRD },
 	{ "sy", 0x5b, INSTR_RXY_RRRD },
+	{ "mfy", 0x5c, INSTR_RXY_RRRD },
 	{ "aly", 0x5e, INSTR_RXY_RRRD },
 	{ "sly", 0x5f, INSTR_RXY_RRRD },
 	{ "sthy", 0x70, INSTR_RXY_RRRD },
 	{ "lay", 0x71, INSTR_RXY_RRRD },
 	{ "stcy", 0x72, INSTR_RXY_RRRD },
 	{ "icy", 0x73, INSTR_RXY_RRRD },
+	{ "laey", 0x75, INSTR_RXY_RRRD },
 	{ "lb", 0x76, INSTR_RXY_RRRD },
 	{ "lgb", 0x77, INSTR_RXY_RRRD },
 	{ "lhy", 0x78, INSTR_RXY_RRRD },
 	{ "chy", 0x79, INSTR_RXY_RRRD },
 	{ "ahy", 0x7a, INSTR_RXY_RRRD },
 	{ "shy", 0x7b, INSTR_RXY_RRRD },
+	{ "mhy", 0x7c, INSTR_RXY_RRRD },
 	{ "ng", 0x80, INSTR_RXY_RRRD },
 	{ "og", 0x81, INSTR_RXY_RRRD },
 	{ "xg", 0x82, INSTR_RXY_RRRD },
+	{ "lgat", 0x85, INSTR_RXY_RRRD },
 	{ "mlg", 0x86, INSTR_RXY_RRRD },
 	{ "dlg", 0x87, INSTR_RXY_RRRD },
 	{ "alcg", 0x88, INSTR_RXY_RRRD },
@@ -918,6 +1343,22 @@ static struct insn opcode_e3[] = {
 	{ "llgh", 0x91, INSTR_RXY_RRRD },
 	{ "llc", 0x94, INSTR_RXY_RRRD },
 	{ "llh", 0x95, INSTR_RXY_RRRD },
+	{ { 0, LONG_INSN_LLGTAT }, 0x9c, INSTR_RXY_RRRD },
+	{ { 0, LONG_INSN_LLGFAT }, 0x9d, INSTR_RXY_RRRD },
+	{ "lat", 0x9f, INSTR_RXY_RRRD },
+	{ "lbh", 0xc0, INSTR_RXY_RRRD },
+	{ "llch", 0xc2, INSTR_RXY_RRRD },
+	{ "stch", 0xc3, INSTR_RXY_RRRD },
+	{ "lhh", 0xc4, INSTR_RXY_RRRD },
+	{ "llhh", 0xc6, INSTR_RXY_RRRD },
+	{ "sthh", 0xc7, INSTR_RXY_RRRD },
+	{ "lfhat", 0xc8, INSTR_RXY_RRRD },
+	{ "lfh", 0xca, INSTR_RXY_RRRD },
+	{ "stfh", 0xcb, INSTR_RXY_RRRD },
+	{ "chf", 0xcd, INSTR_RXY_RRRD },
+	{ "clhf", 0xcf, INSTR_RXY_RRRD },
+	{ { 0, LONG_INSN_MPCIFC }, 0xd0, INSTR_RXY_RRRD },
+	{ { 0, LONG_INSN_STPCIFC }, 0xd4, INSTR_RXY_RRRD },
 #endif
 	{ "lrv", 0x1e, INSTR_RXY_RRRD },
 	{ "lrvh", 0x1f, INSTR_RXY_RRRD },
@@ -932,6 +1373,17 @@ static struct insn opcode_e3[] = {
 static struct insn opcode_e5[] = {
 #ifdef CONFIG_64BIT
 	{ "strag", 0x02, INSTR_SSE_RDRD },
+	{ "mvhhi", 0x44, INSTR_SIL_RDI },
+	{ "mvghi", 0x48, INSTR_SIL_RDI },
+	{ "mvhi", 0x4c, INSTR_SIL_RDI },
+	{ "chhsi", 0x54, INSTR_SIL_RDI },
+	{ { 0, LONG_INSN_CLHHSI }, 0x55, INSTR_SIL_RDU },
+	{ "cghsi", 0x58, INSTR_SIL_RDI },
+	{ { 0, LONG_INSN_CLGHSI }, 0x59, INSTR_SIL_RDU },
+	{ "chsi", 0x5c, INSTR_SIL_RDI },
+	{ { 0, LONG_INSN_CLFHSI }, 0x5d, INSTR_SIL_RDU },
+	{ { 0, LONG_INSN_TBEGIN }, 0x60, INSTR_SIL_RDU },
+	{ { 0, LONG_INSN_TBEGINC }, 0x61, INSTR_SIL_RDU },
 #endif
 	{ "lasp", 0x00, INSTR_SSE_RDRD },
 	{ "tprot", 0x01, INSTR_SSE_RDRD },
@@ -952,9 +1404,11 @@ static struct insn opcode_eb[] = {
 	{ "rllg", 0x1c, INSTR_RSY_RRRD },
 	{ "clmh", 0x20, INSTR_RSY_RURD },
 	{ "clmy", 0x21, INSTR_RSY_RURD },
+	{ "clt", 0x23, INSTR_RSY_RURD },
 	{ "stmg", 0x24, INSTR_RSY_RRRD },
 	{ "stctg", 0x25, INSTR_RSY_CCRD },
 	{ "stmh", 0x26, INSTR_RSY_RRRD },
+	{ "clgt", 0x2b, INSTR_RSY_RURD },
 	{ "stcmh", 0x2c, INSTR_RSY_RURD },
 	{ "stcmy", 0x2d, INSTR_RSY_RURD },
 	{ "lctlg", 0x2f, INSTR_RSY_CCRD },
@@ -963,13 +1417,17 @@ static struct insn opcode_eb[] = {
 	{ "cdsg", 0x3e, INSTR_RSY_RRRD },
 	{ "bxhg", 0x44, INSTR_RSY_RRRD },
 	{ "bxleg", 0x45, INSTR_RSY_RRRD },
+	{ "ecag", 0x4c, INSTR_RSY_RRRD },
 	{ "tmy", 0x51, INSTR_SIY_URD },
 	{ "mviy", 0x52, INSTR_SIY_URD },
 	{ "niy", 0x54, INSTR_SIY_URD },
 	{ "cliy", 0x55, INSTR_SIY_URD },
 	{ "oiy", 0x56, INSTR_SIY_URD },
 	{ "xiy", 0x57, INSTR_SIY_URD },
-	{ "icmh", 0x80, INSTR_RSE_RURD },
+	{ "asi", 0x6a, INSTR_SIY_IRD },
+	{ "alsi", 0x6e, INSTR_SIY_IRD },
+	{ "agsi", 0x7a, INSTR_SIY_IRD },
+	{ "algsi", 0x7e, INSTR_SIY_IRD },
 	{ "icmh", 0x80, INSTR_RSY_RURD },
 	{ "icmy", 0x81, INSTR_RSY_RURD },
 	{ "clclu", 0x8f, INSTR_RSY_RRRD },
@@ -978,6 +1436,29 @@ static struct insn opcode_eb[] = {
 	{ "lmy", 0x98, INSTR_RSY_RRRD },
 	{ "lamy", 0x9a, INSTR_RSY_AARD },
 	{ "stamy", 0x9b, INSTR_RSY_AARD },
+	{ { 0, LONG_INSN_PCISTB }, 0xd0, INSTR_RSY_RRRD },
+	{ "sic", 0xd1, INSTR_RSY_RRRD },
+	{ "srak", 0xdc, INSTR_RSY_RRRD },
+	{ "slak", 0xdd, INSTR_RSY_RRRD },
+	{ "srlk", 0xde, INSTR_RSY_RRRD },
+	{ "sllk", 0xdf, INSTR_RSY_RRRD },
+	{ "locg", 0xe2, INSTR_RSY_RDRM },
+	{ "stocg", 0xe3, INSTR_RSY_RDRM },
+	{ "lang", 0xe4, INSTR_RSY_RRRD },
+	{ "laog", 0xe6, INSTR_RSY_RRRD },
+	{ "laxg", 0xe7, INSTR_RSY_RRRD },
+	{ "laag", 0xe8, INSTR_RSY_RRRD },
+	{ "laalg", 0xea, INSTR_RSY_RRRD },
+	{ "loc", 0xf2, INSTR_RSY_RDRM },
+	{ "stoc", 0xf3, INSTR_RSY_RDRM },
+	{ "lan", 0xf4, INSTR_RSY_RRRD },
+	{ "lao", 0xf6, INSTR_RSY_RRRD },
+	{ "lax", 0xf7, INSTR_RSY_RRRD },
+	{ "laa", 0xf8, INSTR_RSY_RRRD },
+	{ "laal", 0xfa, INSTR_RSY_RRRD },
+	{ "lric", 0x60, INSTR_RSY_RDRM },
+	{ "stric", 0x61, INSTR_RSY_RDRM },
+	{ "mric", 0x62, INSTR_RSY_RDRM },
 #endif
 	{ "rll", 0x1d, INSTR_RSY_RRRD },
 	{ "mvclu", 0x8e, INSTR_RSY_RRRD },
@@ -989,6 +1470,37 @@ static struct insn opcode_ec[] = {
 #ifdef CONFIG_64BIT
 	{ "brxhg", 0x44, INSTR_RIE_RRP },
 	{ "brxlg", 0x45, INSTR_RIE_RRP },
+	{ { 0, LONG_INSN_RISBLG }, 0x51, INSTR_RIE_RRUUU },
+	{ "rnsbg", 0x54, INSTR_RIE_RRUUU },
+	{ "risbg", 0x55, INSTR_RIE_RRUUU },
+	{ "rosbg", 0x56, INSTR_RIE_RRUUU },
+	{ "rxsbg", 0x57, INSTR_RIE_RRUUU },
+	{ { 0, LONG_INSN_RISBGN }, 0x59, INSTR_RIE_RRUUU },
+	{ { 0, LONG_INSN_RISBHG }, 0x5D, INSTR_RIE_RRUUU },
+	{ "cgrj", 0x64, INSTR_RIE_RRPU },
+	{ "clgrj", 0x65, INSTR_RIE_RRPU },
+	{ "cgit", 0x70, INSTR_RIE_R0IU },
+	{ "clgit", 0x71, INSTR_RIE_R0UU },
+	{ "cit", 0x72, INSTR_RIE_R0IU },
+	{ "clfit", 0x73, INSTR_RIE_R0UU },
+	{ "crj", 0x76, INSTR_RIE_RRPU },
+	{ "clrj", 0x77, INSTR_RIE_RRPU },
+	{ "cgij", 0x7c, INSTR_RIE_RUPI },
+	{ "clgij", 0x7d, INSTR_RIE_RUPU },
+	{ "cij", 0x7e, INSTR_RIE_RUPI },
+	{ "clij", 0x7f, INSTR_RIE_RUPU },
+	{ "ahik", 0xd8, INSTR_RIE_RRI0 },
+	{ "aghik", 0xd9, INSTR_RIE_RRI0 },
+	{ { 0, LONG_INSN_ALHSIK }, 0xda, INSTR_RIE_RRI0 },
+	{ { 0, LONG_INSN_ALGHSIK }, 0xdb, INSTR_RIE_RRI0 },
+	{ "cgrb", 0xe4, INSTR_RRS_RRRDU },
+	{ "clgrb", 0xe5, INSTR_RRS_RRRDU },
+	{ "crb", 0xf6, INSTR_RRS_RRRDU },
+	{ "clrb", 0xf7, INSTR_RRS_RRRDU },
+	{ "cgib", 0xfc, INSTR_RIS_RURDI },
+	{ "clgib", 0xfd, INSTR_RIS_RURDU },
+	{ "cib", 0xfe, INSTR_RIS_RURDI },
+	{ "clib", 0xff, INSTR_RIS_RURDU },
 #endif
 	{ "", 0, INSTR_INVALID }
 };
@@ -1001,10 +1513,24 @@ static struct insn opcode_ed[] = {
 	{ "my", 0x3b, INSTR_RXF_FRRDF },
 	{ "mayh", 0x3c, INSTR_RXF_FRRDF },
 	{ "myh", 0x3d, INSTR_RXF_FRRDF },
+	{ "sldt", 0x40, INSTR_RXF_FRRDF },
+	{ "srdt", 0x41, INSTR_RXF_FRRDF },
+	{ "slxt", 0x48, INSTR_RXF_FRRDF },
+	{ "srxt", 0x49, INSTR_RXF_FRRDF },
+	{ "tdcet", 0x50, INSTR_RXE_FRRD },
+	{ "tdget", 0x51, INSTR_RXE_FRRD },
+	{ "tdcdt", 0x54, INSTR_RXE_FRRD },
+	{ "tdgdt", 0x55, INSTR_RXE_FRRD },
+	{ "tdcxt", 0x58, INSTR_RXE_FRRD },
+	{ "tdgxt", 0x59, INSTR_RXE_FRRD },
 	{ "ley", 0x64, INSTR_RXY_FRRD },
 	{ "ldy", 0x65, INSTR_RXY_FRRD },
 	{ "stey", 0x66, INSTR_RXY_FRRD },
 	{ "stdy", 0x67, INSTR_RXY_FRRD },
+	{ "czdt", 0xa8, INSTR_RSL_LRDFU },
+	{ "czxt", 0xa9, INSTR_RSL_LRDFU },
+	{ "cdzt", 0xaa, INSTR_RSL_LRDFU },
+	{ "cxzt", 0xab, INSTR_RSL_LRDFU },
 #endif
 	{ "ldeb", 0x04, INSTR_RXE_FRRD },
 	{ "lxdb", 0x05, INSTR_RXE_FRRD },
@@ -1038,6 +1564,7 @@ static struct insn opcode_ed[] = {
 	{ "mae", 0x2e, INSTR_RXF_FRRDF },
 	{ "mse", 0x2f, INSTR_RXF_FRRDF },
 	{ "sqe", 0x34, INSTR_RXE_FRRD },
+	{ "sqd", 0x35, INSTR_RXE_FRRD },
 	{ "mee", 0x37, INSTR_RXE_FRRD },
 	{ "mad", 0x3e, INSTR_RXF_FRRDF },
 	{ "msd", 0x3f, INSTR_RXF_FRRDF },
@@ -1103,6 +1630,9 @@ static struct insn *find_insn(unsigned char *code)
 	case 0xa7:
 		table = opcode_a7;
 		break;
+	case 0xaa:
+		table = opcode_aa;
+		break;
 	case 0xb2:
 		table = opcode_b2;
 		break;
@@ -1118,8 +1648,17 @@ static struct insn *find_insn(unsigned char *code)
 	case 0xc2:
 		table = opcode_c2;
 		break;
+	case 0xc4:
+		table = opcode_c4;
+		break;
+	case 0xc6:
+		table = opcode_c6;
+		break;
 	case 0xc8:
 		table = opcode_c8;
+		break;
+	case 0xcc:
+		table = opcode_cc;
 		break;
 	case 0xe3:
 		table = opcode_e3;
@@ -1154,6 +1693,33 @@ static struct insn *find_insn(unsigned char *code)
 	return NULL;
 }
 
+/**
+ * insn_to_mnemonic - decode an s390 instruction
+ * @instruction: instruction to decode
+ * @buf: buffer to fill with mnemonic
+ *
+ * Decode the instruction at @instruction and store the corresponding
+ * mnemonic into @buf.
+ * @buf is left unchanged if the instruction could not be decoded.
+ * Returns:
+ *  %0 on success, %-ENOENT if the instruction was not found.
+ */
+int insn_to_mnemonic(unsigned char *instruction, char buf[8])
+{
+	struct insn *insn;
+
+	insn = find_insn(instruction);
+	if (!insn)
+		return -ENOENT;
+	if (insn->name[0] == '\0')
+		snprintf(buf, sizeof(buf), "%s",
+			 long_insn_name[(int) insn->name[1]]);
+	else
+		snprintf(buf, sizeof(buf), "%.5s", insn->name);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(insn_to_mnemonic);
+
 static int print_insn(char *buffer, unsigned char *code, unsigned long addr)
 {
 	struct insn *insn;
@@ -1162,14 +1728,20 @@ static int print_insn(char *buffer, unsigned char *code, unsigned long addr)
 	unsigned int value;
 	char separator;
 	char *ptr;
+	int i;
 
 	ptr = buffer;
 	insn = find_insn(code);
 	if (insn) {
-		ptr += sprintf(ptr, "%.5s\t", insn->name);
+		if (insn->name[0] == '\0')
+			ptr += sprintf(ptr, "%s\t",
+				       long_insn_name[(int) insn->name[1]]);
+		else
+			ptr += sprintf(ptr, "%.5s\t", insn->name);
 		/* Extract the operands. */
 		separator = 0;
-		for (ops = formats[insn->format] + 1; *ops != 0; ops++) {
+		for (ops = formats[insn->format] + 1, i = 0;
+		     *ops != 0 && i < 6; ops++, i++) {
 			operand = operands + *ops;
 			value = extract_operand(code, operand);
 			if ((operand->flags & OPERAND_INDEX)  && value == 0)
@@ -1190,7 +1762,8 @@ static int print_insn(char *buffer, unsigned char *code, unsigned long addr)
 			else if (operand->flags & OPERAND_CR)
 				ptr += sprintf(ptr, "%%c%i", value);
 			else if (operand->flags & OPERAND_PCREL)
-				ptr += sprintf(ptr, "%lx", value + addr);
+				ptr += sprintf(ptr, "%lx", (signed int) value
+								      + addr);
 			else if (operand->flags & OPERAND_SIGNED)
 				ptr += sprintf(ptr, "%i", value);
 			else
@@ -1210,7 +1783,7 @@ static int print_insn(char *buffer, unsigned char *code, unsigned long addr)
 
 void show_code(struct pt_regs *regs)
 {
-	char *mode = (regs->psw.mask & PSW_MASK_PSTATE) ? "User" : "Krnl";
+	char *mode = user_mode(regs) ? "User" : "Krnl";
 	unsigned char code[64];
 	char buffer[64], *ptr;
 	mm_segment_t old_fs;
@@ -1219,7 +1792,7 @@ void show_code(struct pt_regs *regs)
 
 	/* Get a snapshot of the 64 bytes surrounding the fault address. */
 	old_fs = get_fs();
-	set_fs((regs->psw.mask & PSW_MASK_PSTATE) ? USER_DS : KERNEL_DS);
+	set_fs(user_mode(regs) ? USER_DS : KERNEL_DS);
 	for (start = 32; start && regs->psw.addr >= 34 - start; start -= 2) {
 		addr = regs->psw.addr - 34 + start;
 		if (__copy_from_user(code + start - 2,
@@ -1240,7 +1813,6 @@ void show_code(struct pt_regs *regs)
 	}
 	/* Find a starting point for the disassembly. */
 	while (start < 32) {
-		hops = 0;
 		for (i = 0, hops = 0; start + i < 32 && hops < 3; hops++) {
 			if (!find_insn(code + start + i))
 				break;
@@ -1256,10 +1828,15 @@ void show_code(struct pt_regs *regs)
 	ptr += sprintf(ptr, "%s Code:", mode);
 	hops = 0;
 	while (start < end && hops < 8) {
-		*ptr++ = (start == 32) ? '>' : ' ';
+		opsize = insn_length(code[start]);
+		if  (start + opsize == 32)
+			*ptr++ = '#';
+		else if (start == 32)
+			*ptr++ = '>';
+		else
+			*ptr++ = ' ';
 		addr = regs->psw.addr + start - 32;
 		ptr += sprintf(ptr, ONELONG, addr);
-		opsize = insn_length(code[start]);
 		if (start + opsize >= end)
 			break;
 		for (i = 0; i < opsize; i++)
@@ -1275,4 +1852,27 @@ void show_code(struct pt_regs *regs)
 		hops++;
 	}
 	printk("\n");
+}
+
+void print_fn_code(unsigned char *code, unsigned long len)
+{
+	char buffer[64], *ptr;
+	int opsize, i;
+
+	while (len) {
+		ptr = buffer;
+		opsize = insn_length(*code);
+		ptr += sprintf(ptr, "%p: ", code);
+		for (i = 0; i < opsize; i++)
+			ptr += sprintf(ptr, "%02x", code[i]);
+		*ptr++ = '\t';
+		if (i < 4)
+			*ptr++ = '\t';
+		ptr += print_insn(ptr, code, (unsigned long) code);
+		*ptr++ = '\n';
+		*ptr++ = 0;
+		printk(buffer);
+		code += opsize;
+		len -= opsize;
+	}
 }

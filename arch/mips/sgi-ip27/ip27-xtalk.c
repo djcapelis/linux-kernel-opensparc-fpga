@@ -9,6 +9,7 @@
 
 #include <linux/init.h>
 #include <linux/kernel.h>
+#include <linux/smp.h>
 #include <asm/sn/types.h>
 #include <asm/sn/klconfig.h>
 #include <asm/sn/hub.h>
@@ -22,7 +23,7 @@
 
 extern int bridge_probe(nasid_t nasid, int widget, int masterwid);
 
-static int __init probe_one_port(nasid_t nasid, int widget, int masterwid)
+static int __cpuinit probe_one_port(nasid_t nasid, int widget, int masterwid)
 {
 	widgetreg_t 		widget_id;
 	xwidget_part_num_t	partnum;
@@ -46,7 +47,7 @@ static int __init probe_one_port(nasid_t nasid, int widget, int masterwid)
 	return 0;
 }
 
-static int __init xbow_probe(nasid_t nasid)
+static int __cpuinit xbow_probe(nasid_t nasid)
 {
 	lboard_t *brd;
 	klxbow_t *xbow_p;
@@ -99,7 +100,7 @@ static int __init xbow_probe(nasid_t nasid)
 	return 0;
 }
 
-void __init xtalk_probe_node(cnodeid_t nid)
+void __cpuinit xtalk_probe_node(cnodeid_t nid)
 {
 	volatile u64 		hubreg;
 	nasid_t	 		nasid;

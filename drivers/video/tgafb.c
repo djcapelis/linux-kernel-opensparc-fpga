@@ -5,7 +5,7 @@
  *	Copyright (C) 1997 Geert Uytterhoeven
  *	Copyright (C) 1999,2000 Martin Lucina, Tom Zerucha
  *	Copyright (C) 2002 Richard Henderson
- *	Copyright (C) 2006 Maciej W. Rozycki
+ *	Copyright (C) 2006, 2007  Maciej W. Rozycki
  *
  *  This file is subject to the terms and conditions of the GNU General Public
  *  License. See the file COPYING in the main directory of this archive for
@@ -13,6 +13,7 @@
  */
 
 #include <linux/bitrev.h>
+#include <linux/compiler.h>
 #include <linux/delay.h>
 #include <linux/device.h>
 #include <linux/errno.h>
@@ -24,7 +25,6 @@
 #include <linux/module.h>
 #include <linux/pci.h>
 #include <linux/selection.h>
-#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/tc.h>
 
@@ -61,8 +61,8 @@ static void tgafb_fillrect(struct fb_info *, const struct fb_fillrect *);
 static void tgafb_copyarea(struct fb_info *, const struct fb_copyarea *);
 static int tgafb_pan_display(struct fb_var_screeninfo *var, struct fb_info *info);
 
-static int __devinit tgafb_register(struct device *dev);
-static void __devexit tgafb_unregister(struct device *dev);
+static int tgafb_register(struct device *dev);
+static void tgafb_unregister(struct device *dev);
 
 static const char *mode_option;
 static const char *mode_option_pci = "640x480@60";
@@ -93,9 +93,8 @@ static struct fb_ops tgafb_ops = {
 /*
  *  PCI registration operations
  */
-static int __devinit tgafb_pci_register(struct pci_dev *,
-					const struct pci_device_id *);
-static void __devexit tgafb_pci_unregister(struct pci_dev *);
+static int tgafb_pci_register(struct pci_dev *, const struct pci_device_id *);
+static void tgafb_pci_unregister(struct pci_dev *);
 
 static struct pci_device_id const tgafb_pci_table[] = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_DEC, PCI_DEVICE_ID_DEC_TGA) },
@@ -107,17 +106,16 @@ static struct pci_driver tgafb_pci_driver = {
 	.name			= "tgafb",
 	.id_table		= tgafb_pci_table,
 	.probe			= tgafb_pci_register,
-	.remove			= __devexit_p(tgafb_pci_unregister),
+	.remove			= tgafb_pci_unregister,
 };
 
-static int __devinit
-tgafb_pci_register(struct pci_dev *pdev, const struct pci_device_id *ent)
+static int tgafb_pci_register(struct pci_dev *pdev,
+			      const struct pci_device_id *ent)
 {
 	return tgafb_register(&pdev->dev);
 }
 
-static void __devexit
-tgafb_pci_unregister(struct pci_dev *pdev)
+static void tgafb_pci_unregister(struct pci_dev *pdev)
 {
 	tgafb_unregister(&pdev->dev);
 }
@@ -127,8 +125,8 @@ tgafb_pci_unregister(struct pci_dev *pdev)
 /*
  *  TC registration operations
  */
-static int __devinit tgafb_tc_register(struct device *);
-static int __devexit tgafb_tc_unregister(struct device *);
+static int tgafb_tc_register(struct device *);
+static int tgafb_tc_unregister(struct device *);
 
 static struct tc_device_id const tgafb_tc_table[] = {
 	{ "DEC     ", "PMAGD-AA" },
@@ -143,12 +141,11 @@ static struct tc_driver tgafb_tc_driver = {
 		.name		= "tgafb",
 		.bus		= &tc_bus_type,
 		.probe		= tgafb_tc_register,
-		.remove		= __devexit_p(tgafb_tc_unregister),
+		.remove		= tgafb_tc_unregister,
 	},
 };
 
-static int __devinit
-tgafb_tc_register(struct device *dev)
+static int tgafb_tc_register(struct device *dev)
 {
 	int status = tgafb_register(dev);
 	if (!status)
@@ -156,8 +153,7 @@ tgafb_tc_register(struct device *dev)
 	return status;
 }
 
-static int __devexit
-tgafb_tc_unregister(struct device *dev)
+static int tgafb_tc_unregister(struct device *dev)
 {
 	put_device(dev);
 	tgafb_unregister(dev);
@@ -305,7 +301,7 @@ tgafb_set_par(struct fb_info *info)
 	TGA_WRITE_REG(par, htimings, TGA_HORIZ_REG);
 	TGA_WRITE_REG(par, vtimings, TGA_VERT_REG);
 
-	/* Initalise RAMDAC. */
+	/* Initialise RAMDAC. */
 	if (tga_type == TGA_TYPE_8PLANE && tga_bus_pci) {
 
 		/* Init BT485 RAMDAC registers.  */
@@ -636,15 +632,6 @@ tgafb_mono_imageblit(struct fb_info *info, const struct fb_image *image)
 
 	is8bpp = info->var.bits_per_pixel == 8;
 
-	/* For copies that aren't pixel expansion, there's little we
-	   can do better than the generic code.  */
-	/* ??? There is a DMA write mode; I wonder if that could be
-	   made to pull the data from the image buffer...  */
-	if (image->depth > 1) {
-		cfb_imageblit(info, image);
-		return;
-	}
-
 	dx = image->dx;
 	dy = image->dy;
 	width = image->width;
@@ -654,6 +641,9 @@ tgafb_mono_imageblit(struct fb_info *info, const struct fb_image *image)
 	line_length = info->fix.line_length;
 	rincr = (width + 7) / 8;
 
+	/* A shift below cannot cope with.  */
+	if (unlikely(width == 0))
+		return;
 	/* Crop the image to the screen.  */
 	if (dx > vxres || dy > vyres)
 		return;
@@ -709,9 +699,10 @@ tgafb_mono_imageblit(struct fb_info *info, const struct fb_image *image)
 		unsigned long bwidth;
 
 		/* Handle common case of imaging a single character, in
-		   a font less than 32 pixels wide.  */
+		   a font less than or 32 pixels wide.  */
 
-		pixelmask = (1 << width) - 1;
+		/* Avoid a shift by 32; width > 0 implied.  */
+		pixelmask = (2ul << (width - 1)) - 1;
 		pixelmask <<= shift;
 		__raw_writel(pixelmask, regs_base + TGA_PIXELMASK_REG);
 		wmb();
@@ -849,7 +840,7 @@ tgafb_clut_imageblit(struct fb_info *info, const struct fb_image *image)
 	u32 *palette = ((u32 *)info->pseudo_palette);
 	unsigned long pos, line_length, i, j;
 	const unsigned char *data;
-	void *regs_base, *fb_base;
+	void __iomem *regs_base, *fb_base;
 
 	dx = image->dx;
 	dy = image->dy;
@@ -1551,8 +1542,7 @@ static int tgafb_pan_display(struct fb_var_screeninfo *var, struct fb_info *info
 	return 0;
 }
 
-static int __devinit
-tgafb_register(struct device *dev)
+static int tgafb_register(struct device *dev)
 {
 	static const struct fb_videomode modedb_tc = {
 		/* 1280x1024 @ 72 Hz, 76.8 kHz hsync */
@@ -1625,8 +1615,7 @@ tgafb_register(struct device *dev)
 	par->tga_regs_base = mem_base + TGA_REGS_OFFSET;
 	par->tga_type = tga_type;
 	if (tga_bus_pci)
-		pci_read_config_byte(to_pci_dev(dev), PCI_REVISION_ID,
-				     &par->tga_chip_rev);
+		par->tga_chip_rev = (to_pci_dev(dev))->revision;
 	if (tga_bus_tc)
 		par->tga_chip_rev = TGA_READ_REG(par, TGA_START_REG) & 0xff;
 
@@ -1635,7 +1624,7 @@ tgafb_register(struct device *dev)
 		      FBINFO_HWACCEL_IMAGEBLIT | FBINFO_HWACCEL_FILLRECT;
 	info->fbops = &tgafb_ops;
 	info->screen_base = par->tga_fb_base;
-	info->pseudo_palette = (void *)(par + 1);
+	info->pseudo_palette = par->palette;
 
 	/* This should give a reasonable default video mode.  */
 	if (tga_bus_pci) {
@@ -1668,7 +1657,7 @@ tgafb_register(struct device *dev)
 	if (register_framebuffer(info) < 0) {
 		printk(KERN_ERR "tgafb: Could not register framebuffer\n");
 		ret = -EINVAL;
-		goto err1;
+		goto err2;
 	}
 
 	if (tga_bus_pci) {
@@ -1687,6 +1676,8 @@ tgafb_register(struct device *dev)
 
 	return 0;
 
+ err2:
+	fb_dealloc_cmap(&info->cmap);
  err1:
 	if (mem_base)
 		iounmap(mem_base);
@@ -1696,8 +1687,7 @@ tgafb_register(struct device *dev)
 	return ret;
 }
 
-static void __devexit
-tgafb_unregister(struct device *dev)
+static void tgafb_unregister(struct device *dev)
 {
 	resource_size_t bar0_start = 0, bar0_len = 0;
 	int tga_bus_pci = TGA_BUS_PCI(dev);
@@ -1725,16 +1715,14 @@ tgafb_unregister(struct device *dev)
 	framebuffer_release(info);
 }
 
-static void __devexit
-tgafb_exit(void)
+static void tgafb_exit(void)
 {
 	tc_unregister_driver(&tgafb_tc_driver);
 	pci_unregister_driver(&tgafb_pci_driver);
 }
 
 #ifndef MODULE
-static int __devinit
-tgafb_setup(char *arg)
+static int tgafb_setup(char *arg)
 {
 	char *this_opt;
 
@@ -1755,8 +1743,7 @@ tgafb_setup(char *arg)
 }
 #endif /* !MODULE */
 
-static int __devinit
-tgafb_init(void)
+static int tgafb_init(void)
 {
 	int status;
 #ifndef MODULE

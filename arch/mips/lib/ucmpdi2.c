@@ -2,7 +2,7 @@
 
 #include "libgcc.h"
 
-word_type __ucmpdi2 (unsigned long long a, unsigned long long b)
+word_type __ucmpdi2(unsigned long long a, unsigned long long b)
 {
 	const DWunion au = {.ll = a};
 	const DWunion bu = {.ll = b};
@@ -17,3 +17,5 @@ word_type __ucmpdi2 (unsigned long long a, unsigned long long b)
 		return 2;
 	return 1;
 }
+
+EXPORT_SYMBOL(__ucmpdi2);

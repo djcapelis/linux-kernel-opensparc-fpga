@@ -1,9 +1,7 @@
 /*
- *  linux/drivers/s390/crypto/zcrypt_error.h
- *
  *  zcrypt 2.1.0
  *
- *  Copyright (C)  2001, 2006 IBM Corporation
+ *  Copyright IBM Corp. 2001, 2006
  *  Author(s): Robert Burroughs
  *	       Eric Rossman (edrossma@us.ibm.com)
  *
@@ -28,6 +26,8 @@
 #ifndef _ZCRYPT_ERROR_H_
 #define _ZCRYPT_ERROR_H_
 
+#include <linux/atomic.h>
+#include "zcrypt_debug.h"
 #include "zcrypt_api.h"
 
 /**
@@ -92,10 +92,6 @@ static inline int convert_error(struct zcrypt_device *zdev,
 {
 	struct error_hdr *ehdr = reply->message;
 
-	PRINTK("Hardware error : Type %02x Message Header: %08x%08x\n",
-	       ehdr->type, *(unsigned int *) reply->message,
-	       *(unsigned int *) (reply->message + 4));
-
 	switch (ehdr->reply_code) {
 	case REP82_ERROR_OPERAND_INVALID:
 	case REP82_ERROR_OPERAND_SIZE:
@@ -108,24 +104,33 @@ static inline int convert_error(struct zcrypt_device *zdev,
 		return -EINVAL;
 	case REP82_ERROR_MESSAGE_TYPE:
 	//   REP88_ERROR_MESSAGE_TYPE		// '20' CEX2A
-		/**
+		/*
 		 * To sent a message of the wrong type is a bug in the
 		 * device driver. Warn about it, disable the device
 		 * and then repeat the request.
 		 */
 		WARN_ON(1);
+		atomic_set(&zcrypt_rescan_req, 1);
 		zdev->online = 0;
+		ZCRYPT_DBF_DEV(DBF_ERR, zdev, "dev%04xo%drc%d",
+			       zdev->ap_dev->qid,
+			       zdev->online, ehdr->reply_code);
 		return -EAGAIN;
 	case REP82_ERROR_TRANSPORT_FAIL:
 	case REP82_ERROR_MACHINE_FAILURE:
 	//   REP88_ERROR_MODULE_FAILURE		// '10' CEX2A
 		/* If a card fails disable it and repeat the request. */
+		atomic_set(&zcrypt_rescan_req, 1);
 		zdev->online = 0;
+		ZCRYPT_DBF_DEV(DBF_ERR, zdev, "dev%04xo%drc%d",
+			       zdev->ap_dev->qid,
+			       zdev->online, ehdr->reply_code);
 		return -EAGAIN;
 	default:
-		PRINTKW("unknown type %02x reply code = %d\n",
-			ehdr->type, ehdr->reply_code);
 		zdev->online = 0;
+		ZCRYPT_DBF_DEV(DBF_ERR, zdev, "dev%04xo%drc%d",
+			       zdev->ap_dev->qid,
+			       zdev->online, ehdr->reply_code);
 		return -EAGAIN;	/* repeat the request on a different device. */
 	}
 }

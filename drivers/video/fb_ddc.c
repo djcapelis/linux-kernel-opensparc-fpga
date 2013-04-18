@@ -1,5 +1,5 @@
 /*
- * driver/vide/fb_ddc.c - DDC/EDID read support.
+ * drivers/video/fb_ddc.c - DDC/EDID read support.
  *
  *  Copyright (C) 2006 Dennis Munsie <dmunsie@cecropia.com>
  *
@@ -10,8 +10,10 @@
 
 #include <linux/delay.h>
 #include <linux/device.h>
+#include <linux/module.h>
 #include <linux/fb.h>
 #include <linux/i2c-algo-bit.h>
+#include <linux/slab.h>
 
 #include "edid.h"
 
@@ -56,13 +58,12 @@ unsigned char *fb_ddc_read(struct i2c_adapter *adapter)
 	int i, j;
 
 	algo_data->setscl(algo_data->data, 1);
-	algo_data->setscl(algo_data->data, 0);
 
 	for (i = 0; i < 3; i++) {
 		/* For some old monitors we need the
 		 * following process to initialize/stop DDC
 		 */
-		algo_data->setsda(algo_data->data, 0);
+		algo_data->setsda(algo_data->data, 1);
 		msleep(13);
 
 		algo_data->setscl(algo_data->data, 1);
@@ -97,15 +98,17 @@ unsigned char *fb_ddc_read(struct i2c_adapter *adapter)
 		algo_data->setsda(algo_data->data, 1);
 		msleep(15);
 		algo_data->setscl(algo_data->data, 0);
+		algo_data->setsda(algo_data->data, 0);
 		if (edid)
 			break;
 	}
 	/* Release the DDC lines when done or the Apple Cinema HD display
 	 * will switch off
 	 */
-	algo_data->setsda(algo_data->data, 0);
-	algo_data->setscl(algo_data->data, 0);
+	algo_data->setsda(algo_data->data, 1);
+	algo_data->setscl(algo_data->data, 1);
 
+	adapter->class |= I2C_CLASS_DDC;
 	return edid;
 }
 

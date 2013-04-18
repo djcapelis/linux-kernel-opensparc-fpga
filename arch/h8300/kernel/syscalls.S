@@ -96,15 +96,15 @@ SYMBOL_NAME_LABEL(sys_call_table)
 	.long SYMBOL_NAME(sys_settimeofday)
 	.long SYMBOL_NAME(sys_getgroups16)	/* 80 */
 	.long SYMBOL_NAME(sys_setgroups16)
-	.long SYMBOL_NAME(old_select)
+	.long SYMBOL_NAME(sys_old_select)
 	.long SYMBOL_NAME(sys_symlink)
 	.long SYMBOL_NAME(sys_lstat)
 	.long SYMBOL_NAME(sys_readlink)		/* 85 */
 	.long SYMBOL_NAME(sys_uselib)
 	.long SYMBOL_NAME(sys_swapon)
 	.long SYMBOL_NAME(sys_reboot)
-	.long SYMBOL_NAME(old_readdir)
-	.long SYMBOL_NAME(old_mmap)		/* 90 */
+	.long SYMBOL_NAME(sys_old_readdir)
+	.long SYMBOL_NAME(sys_old_mmap)		/* 90 */
 	.long SYMBOL_NAME(sys_munmap)
 	.long SYMBOL_NAME(sys_truncate)
 	.long SYMBOL_NAME(sys_ftruncate)
@@ -183,7 +183,7 @@ SYMBOL_NAME_LABEL(sys_call_table)
 	.long SYMBOL_NAME(sys_ni_syscall)	/* for vm86 */
 	.long SYMBOL_NAME(sys_ni_syscall)	/* sys_query_module */
 	.long SYMBOL_NAME(sys_poll)
-	.long SYMBOL_NAME(sys_nfsservctl)
+	.long SYMBOL_NAME(sys_ni_syscall)	/* old nfsservctl */
 	.long SYMBOL_NAME(sys_setresgid16)	/* 170 */
 	.long SYMBOL_NAME(sys_getresgid16)
 	.long SYMBOL_NAME(sys_prctl)
@@ -206,7 +206,7 @@ SYMBOL_NAME_LABEL(sys_call_table)
 	.long SYMBOL_NAME(sys_ni_syscall)	/* streams2 */
 	.long SYMBOL_NAME(sys_vfork)            /* 190 */
 	.long SYMBOL_NAME(sys_getrlimit)
-	.long SYMBOL_NAME(sys_mmap2)
+	.long SYMBOL_NAME(sys_mmap_pgoff)
 	.long SYMBOL_NAME(sys_truncate64)
 	.long SYMBOL_NAME(sys_ftruncate64)
 	.long SYMBOL_NAME(sys_stat64)		/* 195 */
@@ -333,32 +333,18 @@ SYMBOL_NAME_LABEL(sys_call_table)
 	.long SYMBOL_NAME(sys_ni_syscall)	/* sys_move_pages */
 	.long SYMBOL_NAME(sys_getcpu)
 	.long SYMBOL_NAME(sys_ni_syscall)	/* sys_epoll_pwait */
+	.long SYMBOL_NAME(sys_setns)		/* 320 */
 
 	.macro	call_sp addr
 	mov.l	#SYMBOL_NAME(\addr),er6
 	bra	SYMBOL_NAME(syscall_trampoline):8
 	.endm
 
-SYMBOL_NAME_LABEL(sys_clone)	
-	call_sp	h8300_clone
-	
-SYMBOL_NAME_LABEL(sys_sigsuspend)
-	call_sp	do_sigsuspend
-
-SYMBOL_NAME_LABEL(sys_rt_sigsuspend)
-	call_sp	do_rt_sigsuspend
-
 SYMBOL_NAME_LABEL(sys_sigreturn)
 	call_sp	do_sigreturn
 
 SYMBOL_NAME_LABEL(sys_rt_sigreturn)
 	call_sp	do_rt_sigreturn
-
-SYMBOL_NAME_LABEL(sys_fork)
-	call_sp	h8300_fork
-
-SYMBOL_NAME_LABEL(sys_vfork)
-	call_sp	h8300_vfork
 
 SYMBOL_NAME_LABEL(syscall_trampoline)
 	mov.l	sp,er0

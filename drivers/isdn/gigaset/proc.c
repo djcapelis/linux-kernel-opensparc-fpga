@@ -14,20 +14,13 @@
  */
 
 #include "gigaset.h"
-#include <linux/ctype.h>
 
 static ssize_t show_cidmode(struct device *dev,
 			    struct device_attribute *attr, char *buf)
 {
-	int ret;
-	unsigned long flags;
 	struct cardstate *cs = dev_get_drvdata(dev);
 
-	spin_lock_irqsave(&cs->lock, flags);
-	ret = sprintf(buf, "%u\n", cs->cidmode);
-	spin_unlock_irqrestore(&cs->lock, flags);
-
-	return ret;
+	return sprintf(buf, "%u\n", cs->cidmode);
 }
 
 static ssize_t set_cidmode(struct device *dev, struct device_attribute *attr,
@@ -42,10 +35,10 @@ static ssize_t set_cidmode(struct device *dev, struct device_attribute *attr,
 		if (!isspace(*end++))
 			return -EINVAL;
 	if (value < 0 || value > 1)
-			return -EINVAL;
+		return -EINVAL;
 
 	if (mutex_lock_interruptible(&cs->mutex))
-		return -ERESTARTSYS; // FIXME -EINTR?
+		return -ERESTARTSYS;
 
 	cs->waiting = 1;
 	if (!gigaset_add_event(cs, &cs->at_state, EV_PROC_CIDMODE,
@@ -54,8 +47,6 @@ static ssize_t set_cidmode(struct device *dev, struct device_attribute *attr,
 		mutex_unlock(&cs->mutex);
 		return -ENOMEM;
 	}
-
-	gig_dbg(DEBUG_CMD, "scheduling PROC_CIDMODE");
 	gigaset_schedule_event(cs);
 
 	wait_event(cs->waitqueue, !cs->waiting);
@@ -65,7 +56,7 @@ static ssize_t set_cidmode(struct device *dev, struct device_attribute *attr,
 	return count;
 }
 
-static DEVICE_ATTR(cidmode, S_IRUGO|S_IWUSR, show_cidmode, set_cidmode);
+static DEVICE_ATTR(cidmode, S_IRUGO | S_IWUSR, show_cidmode, set_cidmode);
 
 /* free sysfs for device */
 void gigaset_free_dev_sysfs(struct cardstate *cs)
@@ -85,5 +76,5 @@ void gigaset_init_dev_sysfs(struct cardstate *cs)
 
 	gig_dbg(DEBUG_INIT, "setting up sysfs");
 	if (device_create_file(cs->tty_dev, &dev_attr_cidmode))
-		dev_err(cs->dev, "could not create sysfs attribute\n");
+		pr_err("could not create sysfs attribute\n");
 }

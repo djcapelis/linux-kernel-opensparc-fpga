@@ -25,10 +25,15 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/types.h>
+#include <linux/hardirq.h>
+#include <linux/acpi.h>
 #include <acpi/acpi_bus.h>
 #include <acpi/acpi_drivers.h>
+
+#include "internal.h"
 
 #define _COMPONENT		ACPI_BUS_COMPONENT
 ACPI_MODULE_NAME("utils");
@@ -36,16 +41,20 @@ ACPI_MODULE_NAME("utils");
 /* --------------------------------------------------------------------------
                             Object Evaluation Helpers
    -------------------------------------------------------------------------- */
+static void
+acpi_util_eval_error(acpi_handle h, acpi_string p, acpi_status s)
+{
 #ifdef ACPI_DEBUG_OUTPUT
-#define acpi_util_eval_error(h,p,s) {\
-	char prefix[80] = {'\0'};\
-	struct acpi_buffer buffer = {sizeof(prefix), prefix};\
-	acpi_get_name(h, ACPI_FULL_PATHNAME, &buffer);\
-	ACPI_DEBUG_PRINT((ACPI_DB_INFO, "Evaluate [%s.%s]: %s\n",\
-		(char *) prefix, p, acpi_format_exception(s))); }
+	char prefix[80] = {'\0'};
+	struct acpi_buffer buffer = {sizeof(prefix), prefix};
+	acpi_get_name(h, ACPI_FULL_PATHNAME, &buffer);
+	ACPI_DEBUG_PRINT((ACPI_DB_INFO, "Evaluate [%s.%s]: %s\n",
+		(char *) prefix, p, acpi_format_exception(s)));
 #else
-#define acpi_util_eval_error(h,p,s)
+	return;
 #endif
+}
+
 acpi_status
 acpi_extract_package(union acpi_object *package,
 		     struct acpi_buffer *format, struct acpi_buffer *buffer)
@@ -101,12 +110,12 @@ acpi_extract_package(union acpi_object *package,
 		case ACPI_TYPE_INTEGER:
 			switch (format_string[i]) {
 			case 'N':
-				size_required += sizeof(acpi_integer);
-				tail_offset += sizeof(acpi_integer);
+				size_required += sizeof(u64);
+				tail_offset += sizeof(u64);
 				break;
 			case 'S':
 				size_required +=
-				    sizeof(char *) + sizeof(acpi_integer) +
+				    sizeof(char *) + sizeof(u64) +
 				    sizeof(char);
 				tail_offset += sizeof(char *);
 				break;
@@ -187,17 +196,17 @@ acpi_extract_package(union acpi_object *package,
 		case ACPI_TYPE_INTEGER:
 			switch (format_string[i]) {
 			case 'N':
-				*((acpi_integer *) head) =
+				*((u64 *) head) =
 				    element->integer.value;
-				head += sizeof(acpi_integer);
+				head += sizeof(u64);
 				break;
 			case 'S':
 				pointer = (u8 **) head;
 				*pointer = tail;
-				*((acpi_integer *) tail) =
+				*((u64 *) tail) =
 				    element->integer.value;
-				head += sizeof(acpi_integer *);
-				tail += sizeof(acpi_integer);
+				head += sizeof(u64 *);
+				tail += sizeof(u64);
 				/* NULL terminate string */
 				*tail = (char)0;
 				tail += sizeof(char);
@@ -252,89 +261,36 @@ EXPORT_SYMBOL(acpi_extract_package);
 acpi_status
 acpi_evaluate_integer(acpi_handle handle,
 		      acpi_string pathname,
-		      struct acpi_object_list *arguments, unsigned long *data)
+		      struct acpi_object_list *arguments, unsigned long long *data)
 {
 	acpi_status status = AE_OK;
-	union acpi_object *element;
+	union acpi_object element;
 	struct acpi_buffer buffer = { 0, NULL };
-
 
 	if (!data)
 		return AE_BAD_PARAMETER;
 
-	element = kzalloc(sizeof(union acpi_object), irqs_disabled() ? GFP_ATOMIC: GFP_KERNEL);
-	if (!element)
-		return AE_NO_MEMORY;
-
 	buffer.length = sizeof(union acpi_object);
-	buffer.pointer = element;
+	buffer.pointer = &element;
 	status = acpi_evaluate_object(handle, pathname, arguments, &buffer);
 	if (ACPI_FAILURE(status)) {
 		acpi_util_eval_error(handle, pathname, status);
-		kfree(element);
 		return status;
 	}
 
-	if (element->type != ACPI_TYPE_INTEGER) {
+	if (element.type != ACPI_TYPE_INTEGER) {
 		acpi_util_eval_error(handle, pathname, AE_BAD_DATA);
-		kfree(element);
 		return AE_BAD_DATA;
 	}
 
-	*data = element->integer.value;
-	kfree(element);
+	*data = element.integer.value;
 
-	ACPI_DEBUG_PRINT((ACPI_DB_INFO, "Return value [%lu]\n", *data));
+	ACPI_DEBUG_PRINT((ACPI_DB_INFO, "Return value [%llu]\n", *data));
 
 	return AE_OK;
 }
 
 EXPORT_SYMBOL(acpi_evaluate_integer);
-
-#if 0
-acpi_status
-acpi_evaluate_string(acpi_handle handle,
-		     acpi_string pathname,
-		     acpi_object_list * arguments, acpi_string * data)
-{
-	acpi_status status = AE_OK;
-	acpi_object *element = NULL;
-	acpi_buffer buffer = { ACPI_ALLOCATE_BUFFER, NULL };
-
-
-	if (!data)
-		return AE_BAD_PARAMETER;
-
-	status = acpi_evaluate_object(handle, pathname, arguments, &buffer);
-	if (ACPI_FAILURE(status)) {
-		acpi_util_eval_error(handle, pathname, status);
-		return status;
-	}
-
-	element = (acpi_object *) buffer.pointer;
-
-	if ((element->type != ACPI_TYPE_STRING)
-	    || (element->type != ACPI_TYPE_BUFFER)
-	    || !element->string.length) {
-		acpi_util_eval_error(handle, pathname, AE_BAD_DATA);
-		return AE_BAD_DATA;
-	}
-
-	*data = kzalloc(element->string.length + 1, GFP_KERNEL);
-	if (!data) {
-		printk(KERN_ERR PREFIX "Memory allocation\n");
-		return -ENOMEM;
-	}
-
-	memcpy(*data, element->string.pointer, element->string.length);
-
-	ACPI_DEBUG_PRINT((ACPI_DB_INFO, "Return value [%s]\n", *data));
-
-	kfree(buffer.pointer);
-
-	return AE_OK;
-}
-#endif
 
 acpi_status
 acpi_evaluate_reference(acpi_handle handle,
@@ -394,7 +350,7 @@ acpi_evaluate_reference(acpi_handle handle,
 
 		element = &(package->package.elements[i]);
 
-		if (element->type != ACPI_TYPE_ANY) {
+		if (element->type != ACPI_TYPE_LOCAL_REFERENCE) {
 			status = AE_BAD_DATA;
 			printk(KERN_ERR PREFIX
 				    "Expecting a [Reference] package element, found type %X\n",
@@ -403,6 +359,12 @@ acpi_evaluate_reference(acpi_handle handle,
 			break;
 		}
 
+		if (!element->reference.handle) {
+			printk(KERN_WARNING PREFIX "Invalid reference in"
+			       " package %s\n", pathname);
+			status = AE_NULL_ENTRY;
+			break;
+		}
 		/* Get the  acpi_handle. */
 
 		list->handles[i] = element->reference.handle;
@@ -422,3 +384,114 @@ acpi_evaluate_reference(acpi_handle handle,
 }
 
 EXPORT_SYMBOL(acpi_evaluate_reference);
+
+acpi_status
+acpi_get_physical_device_location(acpi_handle handle, struct acpi_pld_info **pld)
+{
+	acpi_status status;
+	struct acpi_buffer buffer = { ACPI_ALLOCATE_BUFFER, NULL };
+	union acpi_object *output;
+
+	status = acpi_evaluate_object(handle, "_PLD", NULL, &buffer);
+
+	if (ACPI_FAILURE(status))
+		return status;
+
+	output = buffer.pointer;
+
+	if (!output || output->type != ACPI_TYPE_PACKAGE
+	    || !output->package.count
+	    || output->package.elements[0].type != ACPI_TYPE_BUFFER
+	    || output->package.elements[0].buffer.length < ACPI_PLD_REV1_BUFFER_SIZE) {
+		status = AE_TYPE;
+		goto out;
+	}
+
+	status = acpi_decode_pld_buffer(
+			output->package.elements[0].buffer.pointer,
+			output->package.elements[0].buffer.length,
+			pld);
+
+out:
+	kfree(buffer.pointer);
+	return status;
+}
+EXPORT_SYMBOL(acpi_get_physical_device_location);
+
+/**
+ * acpi_evaluate_hotplug_ost: Evaluate _OST for hotplug operations
+ * @handle: ACPI device handle
+ * @source_event: source event code
+ * @status_code: status code
+ * @status_buf: optional detailed information (NULL if none)
+ *
+ * Evaluate _OST for hotplug operations. All ACPI hotplug handlers
+ * must call this function when evaluating _OST for hotplug operations.
+ * When the platform does not support _OST, this function has no effect.
+ */
+acpi_status
+acpi_evaluate_hotplug_ost(acpi_handle handle, u32 source_event,
+		u32 status_code, struct acpi_buffer *status_buf)
+{
+#ifdef ACPI_HOTPLUG_OST
+	union acpi_object params[3] = {
+		{.type = ACPI_TYPE_INTEGER,},
+		{.type = ACPI_TYPE_INTEGER,},
+		{.type = ACPI_TYPE_BUFFER,}
+	};
+	struct acpi_object_list arg_list = {3, params};
+	acpi_status status;
+
+	params[0].integer.value = source_event;
+	params[1].integer.value = status_code;
+	if (status_buf != NULL) {
+		params[2].buffer.pointer = status_buf->pointer;
+		params[2].buffer.length = status_buf->length;
+	} else {
+		params[2].buffer.pointer = NULL;
+		params[2].buffer.length = 0;
+	}
+
+	status = acpi_evaluate_object(handle, "_OST", &arg_list, NULL);
+	return status;
+#else
+	return AE_OK;
+#endif
+}
+EXPORT_SYMBOL(acpi_evaluate_hotplug_ost);
+
+/**
+ * acpi_handle_printk: Print message with ACPI prefix and object path
+ *
+ * This function is called through acpi_handle_<level> macros and prints
+ * a message with ACPI prefix and object path.  This function acquires
+ * the global namespace mutex to obtain an object path.  In interrupt
+ * context, it shows the object path as <n/a>.
+ */
+void
+acpi_handle_printk(const char *level, acpi_handle handle, const char *fmt, ...)
+{
+	struct va_format vaf;
+	va_list args;
+	struct acpi_buffer buffer = {
+		.length = ACPI_ALLOCATE_BUFFER,
+		.pointer = NULL
+	};
+	const char *path;
+
+	va_start(args, fmt);
+	vaf.fmt = fmt;
+	vaf.va = &args;
+
+	if (in_interrupt() ||
+	    acpi_get_name(handle, ACPI_FULL_PATHNAME, &buffer) != AE_OK)
+		path = "<n/a>";
+	else
+		path = buffer.pointer;
+
+	printk("%sACPI: %s: %pV", level, path, &vaf);
+
+	va_end(args);
+	kfree(buffer.pointer);
+}
+EXPORT_SYMBOL(acpi_handle_printk);

@@ -29,22 +29,24 @@
  * 4  N/C
  */
 
-#define chkslot(_bus,_devfn)					\
-do {							        \
-	if ((_bus)->number > 0 || PCI_SLOT (_devfn) < 1	\
-	    || PCI_SLOT (_devfn) > 3)			        \
-		return PCIBIOS_DEVICE_NOT_FOUND;		\
-} while (0)
+static inline int mkaddr(struct pci_bus *bus, unsigned int devfn,
+	unsigned int reg)
+{
+	return ((bus->number & 0xff) << 16) |
+		((devfn & 0xff) << 8) |
+		(reg & 0xfc);
+}
 
-#define mkaddr(_devfn, _reg) \
-((((_devfn) & 0xffUL) << 8) | ((_reg) & 0xfcUL))
 
 static int
 mace_pci_read_config(struct pci_bus *bus, unsigned int devfn,
 		     int reg, int size, u32 *val)
 {
-	chkslot(bus, devfn);
-	mace->pci.config_addr = mkaddr(devfn, reg);
+	u32 control = mace->pci.control;
+
+	/* disable master aborts interrupts during config read */
+	mace->pci.control = control & ~MACEPCI_CONTROL_MAR_INT;
+	mace->pci.config_addr = mkaddr(bus, devfn, reg);
 	switch (size) {
 	case 1:
 		*val = mace->pci.config_data.b[(reg & 3) ^ 3];
@@ -56,6 +58,16 @@ mace_pci_read_config(struct pci_bus *bus, unsigned int devfn,
 		*val = mace->pci.config_data.l;
 		break;
 	}
+	/* ack possible master abort */
+	mace->pci.error &= ~MACEPCI_ERROR_MASTER_ABORT;
+	mace->pci.control = control;
+	/*
+	 * someone forgot to set the ultra bit for the onboard
+	 * scsi chips; we fake it here
+	 */
+	if (bus->number == 0 && reg == 0x40 && size == 4 &&
+	    (devfn == (1 << 3) || devfn == (2 << 3)))
+		*val |= 0x1000;
 
 	DPRINTK("read%d: reg=%08x,val=%02x\n", size * 8, reg, *val);
 
@@ -66,8 +78,7 @@ static int
 mace_pci_write_config(struct pci_bus *bus, unsigned int devfn,
 		      int reg, int size, u32 val)
 {
-	chkslot(bus, devfn);
-	mace->pci.config_addr = mkaddr(devfn, reg);
+	mace->pci.config_addr = mkaddr(bus, devfn, reg);
 	switch (size) {
 	case 1:
 		mace->pci.config_data.b[(reg & 3) ^ 3] = val;

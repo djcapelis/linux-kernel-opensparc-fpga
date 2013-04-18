@@ -3,8 +3,6 @@
  * Linux driver for Disk-On-Chip Millennium
  * (c) 1999 Machine Vision Holdings, Inc.
  * (c) 1999, 2000 David Woodhouse <dwmw2@infradead.org>
- *
- * $Id: doc2001.c,v 1.49 2005/11/07 11:14:24 gleixner Exp $
  */
 
 #include <linux/kernel.h>
@@ -12,7 +10,6 @@
 #include <asm/errno.h>
 #include <asm/io.h>
 #include <asm/uaccess.h>
-#include <linux/miscdevice.h>
 #include <linux/delay.h>
 #include <linux/slab.h>
 #include <linux/init.h>
@@ -58,15 +55,14 @@ static int _DoC_WaitReady(void __iomem * docptr)
 {
 	unsigned short c = 0xffff;
 
-	DEBUG(MTD_DEBUG_LEVEL3,
-	      "_DoC_WaitReady called for out-of-line wait\n");
+	pr_debug("_DoC_WaitReady called for out-of-line wait\n");
 
 	/* Out-of-line routine to wait for chip response */
 	while (!(ReadDOC(docptr, CDSNControl) & CDSN_CTRL_FR_B) && --c)
 		;
 
 	if (c == 0)
-		DEBUG(MTD_DEBUG_LEVEL2, "_DoC_WaitReady timed out.\n");
+		pr_debug("_DoC_WaitReady timed out.\n");
 
 	return (c == 0);
 }
@@ -347,25 +343,18 @@ void DoCMil_init(struct mtd_info *mtd)
 
 	mtd->type = MTD_NANDFLASH;
 	mtd->flags = MTD_CAP_NANDFLASH;
-	mtd->size = 0;
 
 	/* FIXME: erase size is not always 8KiB */
 	mtd->erasesize = 0x2000;
-
-	mtd->writesize = 512;
+	mtd->writebufsize = mtd->writesize = 512;
 	mtd->oobsize = 16;
+	mtd->ecc_strength = 2;
 	mtd->owner = THIS_MODULE;
-	mtd->erase = doc_erase;
-	mtd->point = NULL;
-	mtd->unpoint = NULL;
-	mtd->read = doc_read;
-	mtd->write = doc_write;
-	mtd->read_oob = doc_read_oob;
-	mtd->write_oob = doc_write_oob;
-	mtd->sync = NULL;
-
-	this->totlen = 0;
-	this->numchips = 0;
+	mtd->_erase = doc_erase;
+	mtd->_read = doc_read;
+	mtd->_write = doc_write;
+	mtd->_read_oob = doc_read_oob;
+	mtd->_write_oob = doc_write_oob;
 	this->curfloor = -1;
 	this->curchip = -1;
 
@@ -379,7 +368,7 @@ void DoCMil_init(struct mtd_info *mtd)
 		this->nextdoc = docmillist;
 		docmillist = mtd;
 		mtd->size  = this->totlen;
-		add_mtd_device(mtd);
+		mtd_device_register(mtd, NULL, 0);
 		return;
 	}
 }
@@ -394,10 +383,6 @@ static int doc_read (struct mtd_info *mtd, loff_t from, size_t len,
 	struct DiskOnChip *this = mtd->priv;
 	void __iomem *docptr = this->virtadr;
 	struct Nand *mychip = &this->chips[from >> (this->chipshift)];
-
-	/* Don't allow read past end of device */
-	if (from >= this->totlen)
-		return -EINVAL;
 
 	/* Don't allow a single read to cross a 512-byte block boundary */
 	if (from + len > ((from | 0x1ff) + 1))
@@ -467,7 +452,7 @@ static int doc_read (struct mtd_info *mtd, loff_t from, size_t len,
 #ifdef ECC_DEBUG
 		printk("DiskOnChip ECC Error: Read at %lx\n", (long)from);
 #endif
-		/* Read the ECC syndrom through the DiskOnChip ECC logic.
+		/* Read the ECC syndrome through the DiskOnChip ECC logic.
 		   These syndrome will be all ZERO when there is no error */
 		for (i = 0; i < 6; i++) {
 			syndrome[i] = ReadDOC(docptr, ECCSyndrome0 + i);
@@ -505,10 +490,6 @@ static int doc_write (struct mtd_info *mtd, loff_t to, size_t len,
 	struct DiskOnChip *this = mtd->priv;
 	void __iomem *docptr = this->virtadr;
 	struct Nand *mychip = &this->chips[to >> (this->chipshift)];
-
-	/* Don't allow write past end of device */
-	if (to >= this->totlen)
-		return -EINVAL;
 
 #if 0
 	/* Don't allow a single write to cross a 512-byte block boundary */
@@ -611,7 +592,6 @@ static int doc_write (struct mtd_info *mtd, loff_t to, size_t len,
 		printk("Error programming flash\n");
 		/* Error in programming
 		   FIXME: implement Bad Block Replacement (in nftl.c ??) */
-		*retlen = 0;
 		ret = -EIO;
 	}
 	dummy = ReadDOC(docptr, LastDataRead);
@@ -635,7 +615,7 @@ static int doc_read_oob(struct mtd_info *mtd, loff_t ofs,
 	uint8_t *buf = ops->oobbuf;
 	size_t len = ops->len;
 
-	BUG_ON(ops->mode != MTD_OOB_PLACE);
+	BUG_ON(ops->mode != MTD_OPS_PLACE_OOB);
 
 	ofs += ops->ooboffs;
 
@@ -693,7 +673,7 @@ static int doc_write_oob(struct mtd_info *mtd, loff_t ofs,
 	uint8_t *buf = ops->oobbuf;
 	size_t len = ops->len;
 
-	BUG_ON(ops->mode != MTD_OOB_PLACE);
+	BUG_ON(ops->mode != MTD_OPS_PLACE_OOB);
 
 	ofs += ops->ooboffs;
 
@@ -829,7 +809,7 @@ static void __exit cleanup_doc2001(void)
 		this = mtd->priv;
 		docmillist = this->nextdoc;
 
-		del_mtd_device(mtd);
+		mtd_device_unregister(mtd);
 
 		iounmap(this->virtadr);
 		kfree(this->chips);

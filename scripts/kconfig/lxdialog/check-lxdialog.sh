@@ -4,7 +4,7 @@
 # What library to link
 ldflags()
 {
-	for ext in so a dylib ; do
+	for ext in so a dll.a dylib ; do
 		for lib in ncursesw ncurses curses ; do
 			$cc -print-file-name=lib${lib}.${ext} | grep -q /
 			if [ $? -eq 0 ]; then
@@ -19,7 +19,9 @@ ldflags()
 # Where is ncurses.h?
 ccflags()
 {
-	if [ -f /usr/include/ncurses/ncurses.h ]; then
+	if [ -f /usr/include/ncursesw/curses.h ]; then
+		echo '-I/usr/include/ncursesw -DCURSES_LOC="<ncursesw/curses.h>"'
+	elif [ -f /usr/include/ncurses/ncurses.h ]; then
 		echo '-I/usr/include/ncurses -DCURSES_LOC="<ncurses.h>"'
 	elif [ -f /usr/include/ncurses/curses.h ]; then
 		echo '-I/usr/include/ncurses -DCURSES_LOC="<ncurses/curses.h>"'
@@ -36,22 +38,26 @@ trap "rm -f $tmp" 0 1 2 3 15
 
 # Check if we can link to ncurses
 check() {
-	echo "main() {}" | $cc -xc - -o $tmp 2> /dev/null
+        $cc -x c - -o $tmp 2>/dev/null <<'EOF'
+#include CURSES_LOC
+main() {}
+EOF
 	if [ $? != 0 ]; then
-		echo " *** Unable to find the ncurses libraries."          1>&2
-		echo " *** make menuconfig require the ncurses libraries"  1>&2
-		echo " *** "                                               1>&2
-		echo " *** Install ncurses (ncurses-devel) and try again"  1>&2
-		echo " *** "                                               1>&2
-		exit 1
+	    echo " *** Unable to find the ncurses libraries or the"       1>&2
+	    echo " *** required header files."                            1>&2
+	    echo " *** 'make menuconfig' requires the ncurses libraries." 1>&2
+	    echo " *** "                                                  1>&2
+	    echo " *** Install ncurses (ncurses-devel) and try again."    1>&2
+	    echo " *** "                                                  1>&2
+	    exit 1
 	fi
 }
 
 usage() {
-	printf "Usage: $0 [-check compiler options|-header|-library]\n"
+	printf "Usage: $0 [-check compiler options|-ccflags|-ldflags compiler options]\n"
 }
 
-if [ $# == 0 ]; then
+if [ $# -eq 0 ]; then
 	usage
 	exit 1
 fi

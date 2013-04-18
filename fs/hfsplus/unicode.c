@@ -17,14 +17,14 @@
 /* Returns folded char, or 0 if ignorable */
 static inline u16 case_fold(u16 c)
 {
-        u16 tmp;
+	u16 tmp;
 
-        tmp = hfsplus_case_fold_table[c >> 8];
-        if (tmp)
-                tmp = hfsplus_case_fold_table[tmp + (c & 0xff)];
-        else
-                tmp = c;
-        return tmp;
+	tmp = hfsplus_case_fold_table[c >> 8];
+	if (tmp)
+		tmp = hfsplus_case_fold_table[tmp + (c & 0xff)];
+	else
+		tmp = c;
+	return tmp;
 }
 
 /* Compare unicode strings, return values like normal strcmp */
@@ -118,10 +118,12 @@ static u16 *hfsplus_compose_lookup(u16 *p, u16 cc)
 	return NULL;
 }
 
-int hfsplus_uni2asc(struct super_block *sb, const struct hfsplus_unistr *ustr, char *astr, int *len_p)
+int hfsplus_uni2asc(struct super_block *sb,
+		const struct hfsplus_unistr *ustr,
+		char *astr, int *len_p)
 {
 	const hfsplus_unichr *ip;
-	struct nls_table *nls = HFSPLUS_SB(sb).nls;
+	struct nls_table *nls = HFSPLUS_SB(sb)->nls;
 	u8 *op;
 	u16 cc, c0, c1;
 	u16 *ce1, *ce2;
@@ -132,7 +134,7 @@ int hfsplus_uni2asc(struct super_block *sb, const struct hfsplus_unistr *ustr, c
 	ustrlen = be16_to_cpu(ustr->length);
 	len = *len_p;
 	ce1 = NULL;
-	compose = !(HFSPLUS_SB(sb).flags & HFSPLUS_SB_NODECOMPOSE);
+	compose = !test_bit(HFSPLUS_SB_NODECOMPOSE, &HFSPLUS_SB(sb)->flags);
 
 	while (ustrlen > 0) {
 		c0 = be16_to_cpu(*ip++);
@@ -140,7 +142,11 @@ int hfsplus_uni2asc(struct super_block *sb, const struct hfsplus_unistr *ustr, c
 		/* search for single decomposed char */
 		if (likely(compose))
 			ce1 = hfsplus_compose_lookup(hfsplus_compose_table, c0);
-		if (ce1 && (cc = ce1[0])) {
+		if (ce1)
+			cc = ce1[0];
+		else
+			cc = 0;
+		if (cc) {
 			/* start of a possibly decomposed Hangul char */
 			if (cc != 0xffff)
 				goto done;
@@ -171,7 +177,8 @@ int hfsplus_uni2asc(struct super_block *sb, const struct hfsplus_unistr *ustr, c
 				goto same;
 			c1 = be16_to_cpu(*ip);
 			if (likely(compose))
-				ce1 = hfsplus_compose_lookup(hfsplus_compose_table, c1);
+				ce1 = hfsplus_compose_lookup(
+					hfsplus_compose_table, c1);
 			if (ce1)
 				break;
 			switch (c0) {
@@ -199,19 +206,21 @@ int hfsplus_uni2asc(struct super_block *sb, const struct hfsplus_unistr *ustr, c
 		if (ce2) {
 			i = 1;
 			while (i < ustrlen) {
-				ce1 = hfsplus_compose_lookup(ce2, be16_to_cpu(ip[i]));
+				ce1 = hfsplus_compose_lookup(ce2,
+					be16_to_cpu(ip[i]));
 				if (!ce1)
 					break;
 				i++;
 				ce2 = ce1;
 			}
-			if ((cc = ce2[0])) {
+			cc = ce2[0];
+			if (cc) {
 				ip += i;
 				ustrlen -= i;
 				goto done;
 			}
 		}
-	same:
+same:
 		switch (c0) {
 		case 0:
 			cc = 0x2400;
@@ -222,7 +231,7 @@ int hfsplus_uni2asc(struct super_block *sb, const struct hfsplus_unistr *ustr, c
 		default:
 			cc = c0;
 		}
-	done:
+done:
 		res = nls->uni2char(cc, op, len);
 		if (res < 0) {
 			if (res == -ENAMETOOLONG)
@@ -239,61 +248,224 @@ out:
 	return res;
 }
 
-int hfsplus_asc2uni(struct super_block *sb, struct hfsplus_unistr *ustr, const char *astr, int len)
+/*
+ * Convert one or more ASCII characters into a single unicode character.
+ * Returns the number of ASCII characters corresponding to the unicode char.
+ */
+static inline int asc2unichar(struct super_block *sb, const char *astr, int len,
+			      wchar_t *uc)
 {
-	struct nls_table *nls = HFSPLUS_SB(sb).nls;
-	int size, off, decompose;
+	int size = HFSPLUS_SB(sb)->nls->char2uni(astr, len, uc);
+	if (size <= 0) {
+		*uc = '?';
+		size = 1;
+	}
+	switch (*uc) {
+	case 0x2400:
+		*uc = 0;
+		break;
+	case ':':
+		*uc = '/';
+		break;
+	}
+	return size;
+}
+
+/* Decomposes a single unicode character. */
+static inline u16 *decompose_unichar(wchar_t uc, int *size)
+{
+	int off;
+
+	off = hfsplus_decompose_table[(uc >> 12) & 0xf];
+	if (off == 0 || off == 0xffff)
+		return NULL;
+
+	off = hfsplus_decompose_table[off + ((uc >> 8) & 0xf)];
+	if (!off)
+		return NULL;
+
+	off = hfsplus_decompose_table[off + ((uc >> 4) & 0xf)];
+	if (!off)
+		return NULL;
+
+	off = hfsplus_decompose_table[off + (uc & 0xf)];
+	*size = off & 3;
+	if (*size == 0)
+		return NULL;
+	return hfsplus_decompose_table + (off / 4);
+}
+
+int hfsplus_asc2uni(struct super_block *sb, struct hfsplus_unistr *ustr,
+		    const char *astr, int len)
+{
+	int size, dsize, decompose;
+	u16 *dstr, outlen = 0;
 	wchar_t c;
-	u16 outlen = 0;
 
-	decompose = !(HFSPLUS_SB(sb).flags & HFSPLUS_SB_NODECOMPOSE);
-
+	decompose = !test_bit(HFSPLUS_SB_NODECOMPOSE, &HFSPLUS_SB(sb)->flags);
 	while (outlen < HFSPLUS_MAX_STRLEN && len > 0) {
-		size = nls->char2uni(astr, len, &c);
-		if (size <= 0) {
-			c = '?';
-			size = 1;
-		}
-		astr += size;
-		len -= size;
-		switch (c) {
-		case 0x2400:
-			c = 0;
-			break;
-		case ':':
-			c = '/';
-			break;
-		}
-		if (c >= 0xc0 && decompose) {
-			off = hfsplus_decompose_table[(c >> 12) & 0xf];
-			if (!off)
-				goto done;
-			if (off == 0xffff) {
-				goto done;
-			}
-			off = hfsplus_decompose_table[off + ((c >> 8) & 0xf)];
-			if (!off)
-				goto done;
-			off = hfsplus_decompose_table[off + ((c >> 4) & 0xf)];
-			if (!off)
-				goto done;
-			off = hfsplus_decompose_table[off + (c & 0xf)];
-			size = off & 3;
-			if (!size)
-				goto done;
-			off /= 4;
-			if (outlen + size > HFSPLUS_MAX_STRLEN)
+		size = asc2unichar(sb, astr, len, &c);
+
+		if (decompose)
+			dstr = decompose_unichar(c, &dsize);
+		else
+			dstr = NULL;
+		if (dstr) {
+			if (outlen + dsize > HFSPLUS_MAX_STRLEN)
 				break;
 			do {
-				ustr->unicode[outlen++] = cpu_to_be16(hfsplus_decompose_table[off++]);
-			} while (--size > 0);
-			continue;
-		}
-	done:
-		ustr->unicode[outlen++] = cpu_to_be16(c);
+				ustr->unicode[outlen++] = cpu_to_be16(*dstr++);
+			} while (--dsize > 0);
+		} else
+			ustr->unicode[outlen++] = cpu_to_be16(c);
+
+		astr += size;
+		len -= size;
 	}
 	ustr->length = cpu_to_be16(outlen);
 	if (len > 0)
 		return -ENAMETOOLONG;
+	return 0;
+}
+
+/*
+ * Hash a string to an integer as appropriate for the HFS+ filesystem.
+ * Composed unicode characters are decomposed and case-folding is performed
+ * if the appropriate bits are (un)set on the superblock.
+ */
+int hfsplus_hash_dentry(const struct dentry *dentry, const struct inode *inode,
+		struct qstr *str)
+{
+	struct super_block *sb = dentry->d_sb;
+	const char *astr;
+	const u16 *dstr;
+	int casefold, decompose, size, len;
+	unsigned long hash;
+	wchar_t c;
+	u16 c2;
+
+	casefold = test_bit(HFSPLUS_SB_CASEFOLD, &HFSPLUS_SB(sb)->flags);
+	decompose = !test_bit(HFSPLUS_SB_NODECOMPOSE, &HFSPLUS_SB(sb)->flags);
+	hash = init_name_hash();
+	astr = str->name;
+	len = str->len;
+	while (len > 0) {
+		int uninitialized_var(dsize);
+		size = asc2unichar(sb, astr, len, &c);
+		astr += size;
+		len -= size;
+
+		if (decompose)
+			dstr = decompose_unichar(c, &dsize);
+		else
+			dstr = NULL;
+		if (dstr) {
+			do {
+				c2 = *dstr++;
+				if (casefold)
+					c2 = case_fold(c2);
+				if (!casefold || c2)
+					hash = partial_name_hash(c2, hash);
+			} while (--dsize > 0);
+		} else {
+			c2 = c;
+			if (casefold)
+				c2 = case_fold(c2);
+			if (!casefold || c2)
+				hash = partial_name_hash(c2, hash);
+		}
+	}
+	str->hash = end_name_hash(hash);
+
+	return 0;
+}
+
+/*
+ * Compare strings with HFS+ filename ordering.
+ * Composed unicode characters are decomposed and case-folding is performed
+ * if the appropriate bits are (un)set on the superblock.
+ */
+int hfsplus_compare_dentry(const struct dentry *parent,
+		const struct inode *pinode,
+		const struct dentry *dentry, const struct inode *inode,
+		unsigned int len, const char *str, const struct qstr *name)
+{
+	struct super_block *sb = parent->d_sb;
+	int casefold, decompose, size;
+	int dsize1, dsize2, len1, len2;
+	const u16 *dstr1, *dstr2;
+	const char *astr1, *astr2;
+	u16 c1, c2;
+	wchar_t c;
+
+	casefold = test_bit(HFSPLUS_SB_CASEFOLD, &HFSPLUS_SB(sb)->flags);
+	decompose = !test_bit(HFSPLUS_SB_NODECOMPOSE, &HFSPLUS_SB(sb)->flags);
+	astr1 = str;
+	len1 = len;
+	astr2 = name->name;
+	len2 = name->len;
+	dsize1 = dsize2 = 0;
+	dstr1 = dstr2 = NULL;
+
+	while (len1 > 0 && len2 > 0) {
+		if (!dsize1) {
+			size = asc2unichar(sb, astr1, len1, &c);
+			astr1 += size;
+			len1 -= size;
+
+			if (decompose)
+				dstr1 = decompose_unichar(c, &dsize1);
+			if (!decompose || !dstr1) {
+				c1 = c;
+				dstr1 = &c1;
+				dsize1 = 1;
+			}
+		}
+
+		if (!dsize2) {
+			size = asc2unichar(sb, astr2, len2, &c);
+			astr2 += size;
+			len2 -= size;
+
+			if (decompose)
+				dstr2 = decompose_unichar(c, &dsize2);
+			if (!decompose || !dstr2) {
+				c2 = c;
+				dstr2 = &c2;
+				dsize2 = 1;
+			}
+		}
+
+		c1 = *dstr1;
+		c2 = *dstr2;
+		if (casefold) {
+			c1 = case_fold(c1);
+			if (!c1) {
+				dstr1++;
+				dsize1--;
+				continue;
+			}
+			c2 = case_fold(c2);
+			if (!c2) {
+				dstr2++;
+				dsize2--;
+				continue;
+			}
+		}
+		if (c1 < c2)
+			return -1;
+		else if (c1 > c2)
+			return 1;
+
+		dstr1++;
+		dsize1--;
+		dstr2++;
+		dsize2--;
+	}
+
+	if (len1 < len2)
+		return -1;
+	if (len1 > len2)
+		return 1;
 	return 0;
 }

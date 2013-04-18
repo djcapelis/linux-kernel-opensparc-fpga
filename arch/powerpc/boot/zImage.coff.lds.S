@@ -3,14 +3,13 @@ ENTRY(_zimage_start_opd)
 EXTERN(_zimage_start_opd)
 SECTIONS
 {
-  . = (5*1024*1024);
-  _start = .;
   .text      :
   {
+    _start = .;
     *(.text)
     *(.fixup)
+    _etext = .;
   }
-  _etext = .;
   . = ALIGN(4096);
   .data    :
   {
@@ -18,9 +17,7 @@ SECTIONS
     *(.data*)
     *(__builtin_*)
     *(.sdata*)
-    __got2_start = .;
     *(.got2)
-    __got2_end = .;
 
     _dtb_start = .;
     *(.kernel:dtb)

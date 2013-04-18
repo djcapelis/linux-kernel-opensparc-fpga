@@ -7,7 +7,7 @@
  * Reiner Sailer <sailer@watson.ibm.com>
  * Kylene Hall <kjhall@us.ibm.com>
  *
- * Maintained by: <tpmdd_devel@lists.sourceforge.net>
+ * Maintained by: <tpmdd-devel@lists.sourceforge.net>
  *
  * Device driver for TCG/TCPA TPM (trusted platform module).
  * Specifications at www.trustedcomputinggroup.org	 
@@ -168,12 +168,14 @@ static void atml_plat_remove(void)
 	}
 }
 
-static struct device_driver atml_drv = {
-	.name = "tpm_atmel",
-	.bus = &platform_bus_type,
-	.owner = THIS_MODULE,
-	.suspend = tpm_pm_suspend,
-	.resume = tpm_pm_resume,
+static SIMPLE_DEV_PM_OPS(tpm_atml_pm, tpm_pm_suspend, tpm_pm_resume);
+
+static struct platform_driver atml_drv = {
+	.driver = {
+		.name = "tpm_atmel",
+		.owner		= THIS_MODULE,
+		.pm		= &tpm_atml_pm,
+	},
 };
 
 static int __init init_atmel(void)
@@ -184,7 +186,7 @@ static int __init init_atmel(void)
 	unsigned long base;
 	struct  tpm_chip *chip;
 
-	rc = driver_register(&atml_drv);
+	rc = platform_driver_register(&atml_drv);
 	if (rc)
 		return rc;
 
@@ -223,13 +225,13 @@ err_rel_reg:
 		atmel_release_region(base,
 				     region_size);
 err_unreg_drv:
-	driver_unregister(&atml_drv);
+	platform_driver_unregister(&atml_drv);
 	return rc;
 }
 
 static void __exit cleanup_atmel(void)
 {
-	driver_unregister(&atml_drv);
+	platform_driver_unregister(&atml_drv);
 	atml_plat_remove();
 }
 

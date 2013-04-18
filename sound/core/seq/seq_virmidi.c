@@ -35,9 +35,9 @@
  *
  */
 
-#include <sound/driver.h>
 #include <linux/init.h>
 #include <linux/wait.h>
+#include <linux/module.h>
 #include <linux/slab.h>
 #include <sound/core.h>
 #include <sound/rawmidi.h>
@@ -363,7 +363,7 @@ static int snd_virmidi_dev_attach_seq(struct snd_virmidi_dev *rdev)
 	if (rdev->client >= 0)
 		return 0;
 
-	pinfo = kmalloc(sizeof(*pinfo), GFP_KERNEL);
+	pinfo = kzalloc(sizeof(*pinfo), GFP_KERNEL);
 	if (!pinfo) {
 		err = -ENOMEM;
 		goto __error;
@@ -380,7 +380,6 @@ static int snd_virmidi_dev_attach_seq(struct snd_virmidi_dev *rdev)
 	rdev->client = client;
 
 	/* create a port */
-	memset(pinfo, 0, sizeof(*pinfo));
 	pinfo->addr.client = client;
 	sprintf(pinfo->name, "VirMIDI %d-%d", rdev->card->number, rdev->device);
 	/* set all capabilities */

@@ -134,7 +134,7 @@ typedef struct {
 } CACHE_ENTRY;
 
 /*
- *  Information about each registred IrLAP layer
+ *  Information about each registered IrLAP layer
  */
 struct lap_cb {
 	irda_queue_t queue; /* Must be first */
@@ -274,7 +274,7 @@ static inline int irlmp_lap_tx_queue_full(struct lsap_cb *self)
 	if (self->lap->irlap == NULL)
 		return 0;
 
-	return(IRLAP_GET_TX_QUEUE_LEN(self->lap->irlap) >= LAP_HIGH_THRESHOLD);
+	return IRLAP_GET_TX_QUEUE_LEN(self->lap->irlap) >= LAP_HIGH_THRESHOLD;
 }
 
 /* After doing a irlmp_dup(), this get one of the two socket back into

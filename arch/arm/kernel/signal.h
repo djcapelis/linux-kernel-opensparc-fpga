@@ -1,7 +1,7 @@
 /*
  *  linux/arch/arm/kernel/signal.h
  *
- *  Copyright (C) 2005 Russell King.
+ *  Copyright (C) 2005-2009 Russell King.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as

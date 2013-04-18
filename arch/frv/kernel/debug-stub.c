@@ -15,8 +15,8 @@
 #include <linux/sched.h>
 #include <linux/init.h>
 #include <linux/serial_reg.h>
+#include <linux/start_kernel.h>
 
-#include <asm/system.h>
 #include <asm/serial-regs.h>
 #include <asm/timer-regs.h>
 #include <asm/irc-regs.h>

@@ -31,7 +31,7 @@
 #include <linux/string.h>
 EXPORT_SYMBOL(memset);
 
-#include <asm/atomic.h>
+#include <linux/atomic.h>
 EXPORT_SYMBOL(__xchg8);
 EXPORT_SYMBOL(__xchg32);
 EXPORT_SYMBOL(__cmpxchg_u32);
@@ -44,7 +44,6 @@ EXPORT_SYMBOL(__cmpxchg_u64);
 #endif
 
 #include <asm/uaccess.h>
-EXPORT_SYMBOL(lstrncpy_from_user);
 EXPORT_SYMBOL(lclear_user);
 EXPORT_SYMBOL(lstrnlen_user);
 
@@ -68,11 +67,6 @@ EXPORT_SYMBOL($global$);
 EXPORT_SYMBOL(memcpy_toio);
 EXPORT_SYMBOL(memcpy_fromio);
 EXPORT_SYMBOL(memset_io);
-
-#include <asm/semaphore.h>
-EXPORT_SYMBOL(__up);
-EXPORT_SYMBOL(__down_interruptible);
-EXPORT_SYMBOL(__down);
 
 extern void $$divI(void);
 extern void $$divU(void);
@@ -157,3 +151,11 @@ EXPORT_SYMBOL($$dyncall);
 EXPORT_SYMBOL(node_data);
 EXPORT_SYMBOL(pfnnid_map);
 #endif
+
+#ifdef CONFIG_FUNCTION_TRACER
+extern void _mcount(void);
+EXPORT_SYMBOL(_mcount);
+#endif
+
+/* from pacache.S -- needed for copy_page */
+EXPORT_SYMBOL(copy_user_page_asm);

@@ -1,76 +1,77 @@
 /*
-	vt8231.c - Part of lm_sensors, Linux kernel modules
-				for hardware monitoring
+ * vt8231.c - Part of lm_sensors, Linux kernel modules
+ *	      for hardware monitoring
+ *
+ * Copyright (c) 2005 Roger Lucas <vt8231@hiddenengine.co.uk>
+ * Copyright (c) 2002 Mark D. Studebaker <mdsxyz123@yahoo.com>
+ *		      Aaron M. Marsh <amarsh@sdf.lonestar.org>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ */
 
-	Copyright (c) 2005 Roger Lucas <roger@planbit.co.uk>
-	Copyright (c) 2002 Mark D. Studebaker <mdsxyz123@yahoo.com>
-			   Aaron M. Marsh <amarsh@sdf.lonestar.org>
+/*
+ * Supports VIA VT8231 South Bridge embedded sensors
+ */
 
-	This program is free software; you can redistribute it and/or modify
-	it under the terms of the GNU General Public License as published by
-	the Free Software Foundation; either version 2 of the License, or
-	(at your option) any later version.
-
-	This program is distributed in the hope that it will be useful,
-	but WITHOUT ANY WARRANTY; without even the implied warranty of
-	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-	GNU General Public License for more details.
-
-	You should have received a copy of the GNU General Public License
-	along with this program; if not, write to the Free Software
-	Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
-*/
-
-/* Supports VIA VT8231 South Bridge embedded sensors
-*/
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/pci.h>
 #include <linux/jiffies.h>
-#include <linux/i2c.h>
-#include <linux/i2c-isa.h>
+#include <linux/platform_device.h>
 #include <linux/hwmon.h>
 #include <linux/hwmon-sysfs.h>
 #include <linux/hwmon-vid.h>
 #include <linux/err.h>
 #include <linux/mutex.h>
-#include <asm/io.h>
+#include <linux/acpi.h>
+#include <linux/io.h>
 
 static int force_addr;
 module_param(force_addr, int, 0);
 MODULE_PARM_DESC(force_addr, "Initialize the base address of the sensors");
 
-/* Device address
-   Note that we can't determine the ISA address until we have initialized
-   our module */
-static unsigned short isa_address;
+static struct platform_device *pdev;
 
 #define VT8231_EXTENT 0x80
 #define VT8231_BASE_REG 0x70
 #define VT8231_ENABLE_REG 0x74
 
-/* The VT8231 registers
-
-   The reset value for the input channel configuration is used (Reg 0x4A=0x07)
-   which sets the selected inputs marked with '*' below if multiple options are
-   possible:
-
-	            Voltage Mode	  Temperature Mode
-	Sensor	      Linux Id	      Linux Id        VIA Id
-	--------      --------	      --------        ------
-	CPU Diode	N/A		temp1		0
-	UIC1		in0		temp2 *		1
-	UIC2		in1 *		temp3   	2
-	UIC3		in2 *		temp4		3
-	UIC4		in3 *		temp5		4
-	UIC5		in4 *		temp6		5
-	3.3V		in5		N/A
-
-   Note that the BIOS may set the configuration register to a different value
-   to match the motherboard configuration.
-*/
+/*
+ * The VT8231 registers
+ *
+ * The reset value for the input channel configuration is used (Reg 0x4A=0x07)
+ * which sets the selected inputs marked with '*' below if multiple options are
+ * possible:
+ *
+ *		    Voltage Mode	  Temperature Mode
+ *	Sensor	      Linux Id	      Linux Id	      VIA Id
+ *	--------      --------	      --------	      ------
+ *	CPU Diode	N/A		temp1		0
+ *	UIC1		in0		temp2 *		1
+ *	UIC2		in1 *		temp3		2
+ *	UIC3		in2 *		temp4		3
+ *	UIC4		in3 *		temp5		4
+ *	UIC5		in4 *		temp6		5
+ *	3.3V		in5		N/A
+ *
+ * Note that the BIOS may set the configuration register to a different value
+ * to match the motherboard configuration.
+ */
 
 /* fans numbered 0-1 */
 #define VT8231_REG_FAN_MIN(nr)	(0x3b + (nr))
@@ -82,13 +83,14 @@ static const u8 regvolt[]    = { 0x21, 0x22, 0x23, 0x24, 0x25, 0x26 };
 static const u8 regvoltmax[] = { 0x3d, 0x2b, 0x2d, 0x2f, 0x31, 0x33 };
 static const u8 regvoltmin[] = { 0x3e, 0x2c, 0x2e, 0x30, 0x32, 0x34 };
 
-/* Temperatures are numbered 1-6 according to the Linux kernel specification.
-**
-** In the VIA datasheet, however, the temperatures are numbered from zero.
-** Since it is important that this driver can easily be compared to the VIA
-** datasheet, we will use the VIA numbering within this driver and map the
-** kernel sysfs device name to the VIA number in the sysfs callback.
-*/
+/*
+ * Temperatures are numbered 1-6 according to the Linux kernel specification.
+ *
+ * In the VIA datasheet, however, the temperatures are numbered from zero.
+ * Since it is important that this driver can easily be compared to the VIA
+ * datasheet, we will use the VIA numbering within this driver and map the
+ * kernel sysfs device name to the VIA number in the sysfs callback.
+ */
 
 #define VT8231_REG_TEMP_LOW01	0x49
 #define VT8231_REG_TEMP_LOW25	0x4d
@@ -109,9 +111,10 @@ static const u8 regtempmin[] = { 0x3a, 0x3e, 0x2c, 0x2e, 0x30, 0x32 };
 #define VT8231_REG_TEMP1_CONFIG 0x4b
 #define VT8231_REG_TEMP2_CONFIG 0x4c
 
-/* temps 0-5 as numbered in VIA datasheet - see later for mapping to Linux
-** numbering
-*/
+/*
+ * temps 0-5 as numbered in VIA datasheet - see later for mapping to Linux
+ * numbering
+ */
 #define ISTEMP(i, ch_config) ((i) == 0 ? 1 : \
 			      ((ch_config) >> ((i)+1)) & 0x01)
 /* voltages 0-5 */
@@ -120,24 +123,26 @@ static const u8 regtempmin[] = { 0x3a, 0x3e, 0x2c, 0x2e, 0x30, 0x32 };
 
 #define DIV_FROM_REG(val) (1 << (val))
 
-/* NB  The values returned here are NOT temperatures.  The calibration curves
-**     for the thermistor curves are board-specific and must go in the
-**     sensors.conf file.  Temperature sensors are actually ten bits, but the
-**     VIA datasheet only considers the 8 MSBs obtained from the regtemp[]
-**     register.  The temperature value returned should have a magnitude of 3,
-**     so we use the VIA scaling as the "true" scaling and use the remaining 2
-**     LSBs as fractional precision.
-**
-**     All the on-chip hardware temperature comparisons for the alarms are only
-**     8-bits wide, and compare against the 8 MSBs of the temperature.  The bits
-**     in the registers VT8231_REG_TEMP_LOW01 and VT8231_REG_TEMP_LOW25 are
-**     ignored.
-*/
+/*
+ * NB  The values returned here are NOT temperatures.  The calibration curves
+ *     for the thermistor curves are board-specific and must go in the
+ *     sensors.conf file.  Temperature sensors are actually ten bits, but the
+ *     VIA datasheet only considers the 8 MSBs obtained from the regtemp[]
+ *     register.  The temperature value returned should have a magnitude of 3,
+ *     so we use the VIA scaling as the "true" scaling and use the remaining 2
+ *     LSBs as fractional precision.
+ *
+ *     All the on-chip hardware temperature comparisons for the alarms are only
+ *     8-bits wide, and compare against the 8 MSBs of the temperature.  The bits
+ *     in the registers VT8231_REG_TEMP_LOW01 and VT8231_REG_TEMP_LOW25 are
+ *     ignored.
+ */
 
-/******** FAN RPM CONVERSIONS ********
-** This chip saturates back at 0, not at 255 like many the other chips.
-** So, 0 means 0 RPM
-*/
+/*
+ ****** FAN RPM CONVERSIONS ********
+ * This chip saturates back at 0, not at 255 like many the other chips.
+ * So, 0 means 0 RPM
+ */
 static inline u8 FAN_TO_REG(long rpm, int div)
 {
 	if (rpm == 0)
@@ -148,9 +153,11 @@ static inline u8 FAN_TO_REG(long rpm, int div)
 #define FAN_FROM_REG(val, div) ((val) == 0 ? 0 : 1310720 / ((val) * (div)))
 
 struct vt8231_data {
-	struct i2c_client client;
+	unsigned short addr;
+	const char *name;
+
 	struct mutex update_lock;
-	struct class_device *class_dev;
+	struct device *hwmon_dev;
 	char valid;		/* !=0 if following fields are valid */
 	unsigned long last_updated;	/* In jiffies */
 
@@ -168,20 +175,20 @@ struct vt8231_data {
 };
 
 static struct pci_dev *s_bridge;
-static int vt8231_detect(struct i2c_adapter *adapter);
-static int vt8231_detach_client(struct i2c_client *client);
+static int vt8231_probe(struct platform_device *pdev);
+static int vt8231_remove(struct platform_device *pdev);
 static struct vt8231_data *vt8231_update_device(struct device *dev);
-static void vt8231_init_client(struct i2c_client *client);
+static void vt8231_init_device(struct vt8231_data *data);
 
-static inline int vt8231_read_value(struct i2c_client *client, u8 reg)
+static inline int vt8231_read_value(struct vt8231_data *data, u8 reg)
 {
-	return inb_p(client->addr + reg);
+	return inb_p(data->addr + reg);
 }
 
-static inline void vt8231_write_value(struct i2c_client *client, u8 reg,
+static inline void vt8231_write_value(struct vt8231_data *data, u8 reg,
 					u8 value)
 {
-	outb_p(value, client->addr + reg);
+	outb_p(value, data->addr + reg);
 }
 
 /* following are the sysfs callback functions */
@@ -220,13 +227,17 @@ static ssize_t set_in_min(struct device *dev, struct device_attribute *attr,
 {
 	struct sensor_device_attribute *sensor_attr = to_sensor_dev_attr(attr);
 	int nr = sensor_attr->index;
-	struct i2c_client *client = to_i2c_client(dev);
-	struct vt8231_data *data = i2c_get_clientdata(client);
-	unsigned long val = simple_strtoul(buf, NULL, 10);
+	struct vt8231_data *data = dev_get_drvdata(dev);
+	unsigned long val;
+	int err;
+
+	err = kstrtoul(buf, 10, &val);
+	if (err)
+		return err;
 
 	mutex_lock(&data->update_lock);
 	data->in_min[nr] = SENSORS_LIMIT(((val * 958) / 10000) + 3, 0, 255);
-	vt8231_write_value(client, regvoltmin[nr], data->in_min[nr]);
+	vt8231_write_value(data, regvoltmin[nr], data->in_min[nr]);
 	mutex_unlock(&data->update_lock);
 	return count;
 }
@@ -236,13 +247,17 @@ static ssize_t set_in_max(struct device *dev, struct device_attribute *attr,
 {
 	struct sensor_device_attribute *sensor_attr = to_sensor_dev_attr(attr);
 	int nr = sensor_attr->index;
-	struct i2c_client *client = to_i2c_client(dev);
-	struct vt8231_data *data = i2c_get_clientdata(client);
-	unsigned long val = simple_strtoul(buf, NULL, 10);
+	struct vt8231_data *data = dev_get_drvdata(dev);
+	unsigned long val;
+	int err;
+
+	err = kstrtoul(buf, 10, &val);
+	if (err)
+		return err;
 
 	mutex_lock(&data->update_lock);
 	data->in_max[nr] = SENSORS_LIMIT(((val * 958) / 10000) + 3, 0, 255);
-	vt8231_write_value(client, regvoltmax[nr], data->in_max[nr]);
+	vt8231_write_value(data, regvoltmax[nr], data->in_max[nr]);
 	mutex_unlock(&data->update_lock);
 	return count;
 }
@@ -278,14 +293,18 @@ static ssize_t show_in5_max(struct device *dev, struct device_attribute *attr,
 static ssize_t set_in5_min(struct device *dev, struct device_attribute *attr,
 		const char *buf, size_t count)
 {
-	struct i2c_client *client = to_i2c_client(dev);
-	struct vt8231_data *data = i2c_get_clientdata(client);
-	unsigned long val = simple_strtoul(buf, NULL, 10);
+	struct vt8231_data *data = dev_get_drvdata(dev);
+	unsigned long val;
+	int err;
+
+	err = kstrtoul(buf, 10, &val);
+	if (err)
+		return err;
 
 	mutex_lock(&data->update_lock);
 	data->in_min[5] = SENSORS_LIMIT(((val * 958 * 34) / (10000 * 54)) + 3,
 					0, 255);
-	vt8231_write_value(client, regvoltmin[5], data->in_min[5]);
+	vt8231_write_value(data, regvoltmin[5], data->in_min[5]);
 	mutex_unlock(&data->update_lock);
 	return count;
 }
@@ -293,14 +312,18 @@ static ssize_t set_in5_min(struct device *dev, struct device_attribute *attr,
 static ssize_t set_in5_max(struct device *dev, struct device_attribute *attr,
 		const char *buf, size_t count)
 {
-	struct i2c_client *client = to_i2c_client(dev);
-	struct vt8231_data *data = i2c_get_clientdata(client);
-	unsigned long val = simple_strtoul(buf, NULL, 10);
+	struct vt8231_data *data = dev_get_drvdata(dev);
+	unsigned long val;
+	int err;
+
+	err = kstrtoul(buf, 10, &val);
+	if (err)
+		return err;
 
 	mutex_lock(&data->update_lock);
 	data->in_max[5] = SENSORS_LIMIT(((val * 958 * 34) / (10000 * 54)) + 3,
 					0, 255);
-	vt8231_write_value(client, regvoltmax[5], data->in_max[5]);
+	vt8231_write_value(data, regvoltmax[5], data->in_max[5]);
 	mutex_unlock(&data->update_lock);
 	return count;
 }
@@ -348,26 +371,34 @@ static ssize_t show_temp0_min(struct device *dev, struct device_attribute *attr,
 static ssize_t set_temp0_max(struct device *dev, struct device_attribute *attr,
 		const char *buf, size_t count)
 {
-	struct i2c_client *client = to_i2c_client(dev);
-	struct vt8231_data *data = i2c_get_clientdata(client);
-	int val = simple_strtol(buf, NULL, 10);
+	struct vt8231_data *data = dev_get_drvdata(dev);
+	long val;
+	int err;
+
+	err = kstrtol(buf, 10, &val);
+	if (err)
+		return err;
 
 	mutex_lock(&data->update_lock);
 	data->temp_max[0] = SENSORS_LIMIT((val + 500) / 1000, 0, 255);
-	vt8231_write_value(client, regtempmax[0], data->temp_max[0]);
+	vt8231_write_value(data, regtempmax[0], data->temp_max[0]);
 	mutex_unlock(&data->update_lock);
 	return count;
 }
 static ssize_t set_temp0_min(struct device *dev, struct device_attribute *attr,
 		const char *buf, size_t count)
 {
-	struct i2c_client *client = to_i2c_client(dev);
-	struct vt8231_data *data = i2c_get_clientdata(client);
-	int val = simple_strtol(buf, NULL, 10);
+	struct vt8231_data *data = dev_get_drvdata(dev);
+	long val;
+	int err;
+
+	err = kstrtol(buf, 10, &val);
+	if (err)
+		return err;
 
 	mutex_lock(&data->update_lock);
 	data->temp_min[0] = SENSORS_LIMIT((val + 500) / 1000, 0, 255);
-	vt8231_write_value(client, regtempmin[0], data->temp_min[0]);
+	vt8231_write_value(data, regtempmin[0], data->temp_min[0]);
 	mutex_unlock(&data->update_lock);
 	return count;
 }
@@ -404,13 +435,17 @@ static ssize_t set_temp_max(struct device *dev, struct device_attribute *attr,
 {
 	struct sensor_device_attribute *sensor_attr = to_sensor_dev_attr(attr);
 	int nr = sensor_attr->index;
-	struct i2c_client *client = to_i2c_client(dev);
-	struct vt8231_data *data = i2c_get_clientdata(client);
-	int val = simple_strtol(buf, NULL, 10);
+	struct vt8231_data *data = dev_get_drvdata(dev);
+	long val;
+	int err;
+
+	err = kstrtol(buf, 10, &val);
+	if (err)
+		return err;
 
 	mutex_lock(&data->update_lock);
 	data->temp_max[nr] = SENSORS_LIMIT(TEMP_MAXMIN_TO_REG(val), 0, 255);
-	vt8231_write_value(client, regtempmax[nr], data->temp_max[nr]);
+	vt8231_write_value(data, regtempmax[nr], data->temp_max[nr]);
 	mutex_unlock(&data->update_lock);
 	return count;
 }
@@ -419,20 +454,25 @@ static ssize_t set_temp_min(struct device *dev, struct device_attribute *attr,
 {
 	struct sensor_device_attribute *sensor_attr = to_sensor_dev_attr(attr);
 	int nr = sensor_attr->index;
-	struct i2c_client *client = to_i2c_client(dev);
-	struct vt8231_data *data = i2c_get_clientdata(client);
-	int val = simple_strtol(buf, NULL, 10);
+	struct vt8231_data *data = dev_get_drvdata(dev);
+	long val;
+	int err;
+
+	err = kstrtol(buf, 10, &val);
+	if (err)
+		return err;
 
 	mutex_lock(&data->update_lock);
 	data->temp_min[nr] = SENSORS_LIMIT(TEMP_MAXMIN_TO_REG(val), 0, 255);
-	vt8231_write_value(client, regtempmin[nr], data->temp_min[nr]);
+	vt8231_write_value(data, regtempmin[nr], data->temp_min[nr]);
 	mutex_unlock(&data->update_lock);
 	return count;
 }
 
-/* Note that these map the Linux temperature sensor numbering (1-6) to the VIA
-** temperature sensor numbering (0-5)
-*/
+/*
+ * Note that these map the Linux temperature sensor numbering (1-6) to the VIA
+ * temperature sensor numbering (0-5)
+ */
 #define define_temperature_sysfs(offset)				\
 static SENSOR_DEVICE_ATTR(temp##offset##_input, S_IRUGO,		\
 		show_temp, NULL, offset - 1);				\
@@ -443,7 +483,8 @@ static SENSOR_DEVICE_ATTR(temp##offset##_max_hyst, S_IRUGO | S_IWUSR,	\
 
 static DEVICE_ATTR(temp1_input, S_IRUGO, show_temp0, NULL);
 static DEVICE_ATTR(temp1_max, S_IRUGO | S_IWUSR, show_temp0_max, set_temp0_max);
-static DEVICE_ATTR(temp1_max_hyst, S_IRUGO | S_IWUSR, show_temp0_min, set_temp0_min);
+static DEVICE_ATTR(temp1_max_hyst, S_IRUGO | S_IWUSR, show_temp0_min,
+		   set_temp0_min);
 
 define_temperature_sysfs(2);
 define_temperature_sysfs(3);
@@ -486,13 +527,17 @@ static ssize_t set_fan_min(struct device *dev, struct device_attribute *attr,
 {
 	struct sensor_device_attribute *sensor_attr = to_sensor_dev_attr(attr);
 	int nr = sensor_attr->index;
-	struct i2c_client *client = to_i2c_client(dev);
-	struct vt8231_data *data = i2c_get_clientdata(client);
-	int val = simple_strtoul(buf, NULL, 10);
+	struct vt8231_data *data = dev_get_drvdata(dev);
+	unsigned long val;
+	int err;
+
+	err = kstrtoul(buf, 10, &val);
+	if (err)
+		return err;
 
 	mutex_lock(&data->update_lock);
 	data->fan_min[nr] = FAN_TO_REG(val, DIV_FROM_REG(data->fan_div[nr]));
-	vt8231_write_value(client, VT8231_REG_FAN_MIN(nr), data->fan_min[nr]);
+	vt8231_write_value(data, VT8231_REG_FAN_MIN(nr), data->fan_min[nr]);
 	mutex_unlock(&data->update_lock);
 	return count;
 }
@@ -500,34 +545,46 @@ static ssize_t set_fan_min(struct device *dev, struct device_attribute *attr,
 static ssize_t set_fan_div(struct device *dev, struct device_attribute *attr,
 		const char *buf, size_t count)
 {
-	struct i2c_client *client = to_i2c_client(dev);
-	struct vt8231_data *data = i2c_get_clientdata(client);
+	struct vt8231_data *data = dev_get_drvdata(dev);
 	struct sensor_device_attribute *sensor_attr = to_sensor_dev_attr(attr);
-	unsigned long val = simple_strtoul(buf, NULL, 10);
+	unsigned long val;
 	int nr = sensor_attr->index;
-	int old = vt8231_read_value(client, VT8231_REG_FANDIV);
+	int old = vt8231_read_value(data, VT8231_REG_FANDIV);
 	long min = FAN_FROM_REG(data->fan_min[nr],
 				 DIV_FROM_REG(data->fan_div[nr]));
+	int err;
+
+	err = kstrtoul(buf, 10, &val);
+	if (err)
+		return err;
 
 	mutex_lock(&data->update_lock);
 	switch (val) {
-	case 1: data->fan_div[nr] = 0; break;
-	case 2: data->fan_div[nr] = 1; break;
-	case 4: data->fan_div[nr] = 2; break;
-	case 8: data->fan_div[nr] = 3; break;
+	case 1:
+		data->fan_div[nr] = 0;
+		break;
+	case 2:
+		data->fan_div[nr] = 1;
+		break;
+	case 4:
+		data->fan_div[nr] = 2;
+		break;
+	case 8:
+		data->fan_div[nr] = 3;
+		break;
 	default:
-		dev_err(&client->dev, "fan_div value %ld not supported."
-		        "Choose one of 1, 2, 4 or 8!\n", val);
+		dev_err(dev, "fan_div value %ld not supported. "
+			"Choose one of 1, 2, 4 or 8!\n", val);
 		mutex_unlock(&data->update_lock);
 		return -EINVAL;
 	}
 
 	/* Correct the fan minimum speed */
 	data->fan_min[nr] = FAN_TO_REG(min, DIV_FROM_REG(data->fan_div[nr]));
-	vt8231_write_value(client, VT8231_REG_FAN_MIN(nr), data->fan_min[nr]);
+	vt8231_write_value(data, VT8231_REG_FAN_MIN(nr), data->fan_min[nr]);
 
 	old = (old & 0x0f) | (data->fan_div[1] << 6) | (data->fan_div[0] << 4);
-	vt8231_write_value(client, VT8231_REG_FANDIV, old);
+	vt8231_write_value(data, VT8231_REG_FANDIV, old);
 	mutex_unlock(&data->update_lock);
 	return count;
 }
@@ -551,39 +608,74 @@ static ssize_t show_alarms(struct device *dev, struct device_attribute *attr,
 	struct vt8231_data *data = vt8231_update_device(dev);
 	return sprintf(buf, "%d\n", data->alarms);
 }
-
 static DEVICE_ATTR(alarms, S_IRUGO, show_alarms, NULL);
 
-static struct attribute *vt8231_attributes_temps[6][4] = {
+static ssize_t show_alarm(struct device *dev, struct device_attribute *attr,
+			  char *buf)
+{
+	int bitnr = to_sensor_dev_attr(attr)->index;
+	struct vt8231_data *data = vt8231_update_device(dev);
+	return sprintf(buf, "%u\n", (data->alarms >> bitnr) & 1);
+}
+static SENSOR_DEVICE_ATTR(temp1_alarm, S_IRUGO, show_alarm, NULL, 4);
+static SENSOR_DEVICE_ATTR(temp2_alarm, S_IRUGO, show_alarm, NULL, 11);
+static SENSOR_DEVICE_ATTR(temp3_alarm, S_IRUGO, show_alarm, NULL, 0);
+static SENSOR_DEVICE_ATTR(temp4_alarm, S_IRUGO, show_alarm, NULL, 1);
+static SENSOR_DEVICE_ATTR(temp5_alarm, S_IRUGO, show_alarm, NULL, 3);
+static SENSOR_DEVICE_ATTR(temp6_alarm, S_IRUGO, show_alarm, NULL, 8);
+static SENSOR_DEVICE_ATTR(in0_alarm, S_IRUGO, show_alarm, NULL, 11);
+static SENSOR_DEVICE_ATTR(in1_alarm, S_IRUGO, show_alarm, NULL, 0);
+static SENSOR_DEVICE_ATTR(in2_alarm, S_IRUGO, show_alarm, NULL, 1);
+static SENSOR_DEVICE_ATTR(in3_alarm, S_IRUGO, show_alarm, NULL, 3);
+static SENSOR_DEVICE_ATTR(in4_alarm, S_IRUGO, show_alarm, NULL, 8);
+static SENSOR_DEVICE_ATTR(in5_alarm, S_IRUGO, show_alarm, NULL, 2);
+static SENSOR_DEVICE_ATTR(fan1_alarm, S_IRUGO, show_alarm, NULL, 6);
+static SENSOR_DEVICE_ATTR(fan2_alarm, S_IRUGO, show_alarm, NULL, 7);
+
+static ssize_t show_name(struct device *dev, struct device_attribute
+			 *devattr, char *buf)
+{
+	struct vt8231_data *data = dev_get_drvdata(dev);
+	return sprintf(buf, "%s\n", data->name);
+}
+static DEVICE_ATTR(name, S_IRUGO, show_name, NULL);
+
+static struct attribute *vt8231_attributes_temps[6][5] = {
 	{
 		&dev_attr_temp1_input.attr,
 		&dev_attr_temp1_max_hyst.attr,
 		&dev_attr_temp1_max.attr,
+		&sensor_dev_attr_temp1_alarm.dev_attr.attr,
 		NULL
 	}, {
 		&sensor_dev_attr_temp2_input.dev_attr.attr,
 		&sensor_dev_attr_temp2_max_hyst.dev_attr.attr,
 		&sensor_dev_attr_temp2_max.dev_attr.attr,
+		&sensor_dev_attr_temp2_alarm.dev_attr.attr,
 		NULL
 	}, {
 		&sensor_dev_attr_temp3_input.dev_attr.attr,
 		&sensor_dev_attr_temp3_max_hyst.dev_attr.attr,
 		&sensor_dev_attr_temp3_max.dev_attr.attr,
+		&sensor_dev_attr_temp3_alarm.dev_attr.attr,
 		NULL
 	}, {
 		&sensor_dev_attr_temp4_input.dev_attr.attr,
 		&sensor_dev_attr_temp4_max_hyst.dev_attr.attr,
 		&sensor_dev_attr_temp4_max.dev_attr.attr,
+		&sensor_dev_attr_temp4_alarm.dev_attr.attr,
 		NULL
 	}, {
 		&sensor_dev_attr_temp5_input.dev_attr.attr,
 		&sensor_dev_attr_temp5_max_hyst.dev_attr.attr,
 		&sensor_dev_attr_temp5_max.dev_attr.attr,
+		&sensor_dev_attr_temp5_alarm.dev_attr.attr,
 		NULL
 	}, {
 		&sensor_dev_attr_temp6_input.dev_attr.attr,
 		&sensor_dev_attr_temp6_max_hyst.dev_attr.attr,
 		&sensor_dev_attr_temp6_max.dev_attr.attr,
+		&sensor_dev_attr_temp6_alarm.dev_attr.attr,
 		NULL
 	}
 };
@@ -597,36 +689,42 @@ static const struct attribute_group vt8231_group_temps[6] = {
 	{ .attrs = vt8231_attributes_temps[5] },
 };
 
-static struct attribute *vt8231_attributes_volts[6][4] = {
+static struct attribute *vt8231_attributes_volts[6][5] = {
 	{
 		&sensor_dev_attr_in0_input.dev_attr.attr,
 		&sensor_dev_attr_in0_min.dev_attr.attr,
 		&sensor_dev_attr_in0_max.dev_attr.attr,
+		&sensor_dev_attr_in0_alarm.dev_attr.attr,
 		NULL
 	}, {
 		&sensor_dev_attr_in1_input.dev_attr.attr,
 		&sensor_dev_attr_in1_min.dev_attr.attr,
 		&sensor_dev_attr_in1_max.dev_attr.attr,
+		&sensor_dev_attr_in1_alarm.dev_attr.attr,
 		NULL
 	}, {
 		&sensor_dev_attr_in2_input.dev_attr.attr,
 		&sensor_dev_attr_in2_min.dev_attr.attr,
 		&sensor_dev_attr_in2_max.dev_attr.attr,
+		&sensor_dev_attr_in2_alarm.dev_attr.attr,
 		NULL
 	}, {
 		&sensor_dev_attr_in3_input.dev_attr.attr,
 		&sensor_dev_attr_in3_min.dev_attr.attr,
 		&sensor_dev_attr_in3_max.dev_attr.attr,
+		&sensor_dev_attr_in3_alarm.dev_attr.attr,
 		NULL
 	}, {
 		&sensor_dev_attr_in4_input.dev_attr.attr,
 		&sensor_dev_attr_in4_min.dev_attr.attr,
 		&sensor_dev_attr_in4_max.dev_attr.attr,
+		&sensor_dev_attr_in4_alarm.dev_attr.attr,
 		NULL
 	}, {
 		&dev_attr_in5_input.attr,
 		&dev_attr_in5_min.attr,
 		&dev_attr_in5_max.attr,
+		&sensor_dev_attr_in5_alarm.dev_attr.attr,
 		NULL
 	}
 };
@@ -647,7 +745,10 @@ static struct attribute *vt8231_attributes[] = {
 	&sensor_dev_attr_fan2_min.dev_attr.attr,
 	&sensor_dev_attr_fan1_div.dev_attr.attr,
 	&sensor_dev_attr_fan2_div.dev_attr.attr,
+	&sensor_dev_attr_fan1_alarm.dev_attr.attr,
+	&sensor_dev_attr_fan2_alarm.dev_attr.attr,
 	&dev_attr_alarms.attr,
+	&dev_attr_name.attr,
 	NULL
 };
 
@@ -655,24 +756,24 @@ static const struct attribute_group vt8231_group = {
 	.attrs = vt8231_attributes,
 };
 
-static struct i2c_driver vt8231_driver = {
+static struct platform_driver vt8231_driver = {
 	.driver = {
 		.owner	= THIS_MODULE,
 		.name	= "vt8231",
 	},
-	.attach_adapter	= vt8231_detect,
-	.detach_client	= vt8231_detach_client,
+	.probe	= vt8231_probe,
+	.remove	= vt8231_remove,
 };
 
-static struct pci_device_id vt8231_pci_ids[] = {
+static DEFINE_PCI_DEVICE_TABLE(vt8231_pci_ids) = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_VIA, PCI_DEVICE_ID_VIA_8231_4) },
 	{ 0, }
 };
 
 MODULE_DEVICE_TABLE(pci, vt8231_pci_ids);
 
-static int __devinit vt8231_pci_probe(struct pci_dev *dev,
-			 	      const struct pci_device_id *id);
+static int vt8231_pci_probe(struct pci_dev *dev,
+				      const struct pci_device_id *id);
 
 static struct pci_driver vt8231_pci_driver = {
 	.name		= "vt8231",
@@ -680,147 +781,103 @@ static struct pci_driver vt8231_pci_driver = {
 	.probe		= vt8231_pci_probe,
 };
 
-int vt8231_detect(struct i2c_adapter *adapter)
+static int vt8231_probe(struct platform_device *pdev)
 {
-	struct i2c_client *client;
+	struct resource *res;
 	struct vt8231_data *data;
 	int err = 0, i;
-	u16 val;
-
-	/* 8231 requires multiple of 256 */
-	if (force_addr)	{
-		isa_address = force_addr & 0xFF00;
-		dev_warn(&adapter->dev, "forcing ISA address 0x%04X\n",
-				 isa_address);
-		if (PCIBIOS_SUCCESSFUL != pci_write_config_word(s_bridge,
-						VT8231_BASE_REG, isa_address))
-			return -ENODEV;
-	}
-
-	if (PCIBIOS_SUCCESSFUL !=
-		pci_read_config_word(s_bridge, VT8231_ENABLE_REG, &val))
-		return -ENODEV;
-
-	if (!(val & 0x0001)) {
-		dev_warn(&adapter->dev, "enabling sensors\n");
-		if (PCIBIOS_SUCCESSFUL !=
-			pci_write_config_word(s_bridge, VT8231_ENABLE_REG,
-							  val | 0x0001))
-			return -ENODEV;
-	}
 
 	/* Reserve the ISA region */
-	if (!request_region(isa_address, VT8231_EXTENT,
-			    vt8231_pci_driver.name)) {
-		dev_err(&adapter->dev, "region 0x%x already in use!\n",
-			   isa_address);
+	res = platform_get_resource(pdev, IORESOURCE_IO, 0);
+	if (!devm_request_region(&pdev->dev, res->start, VT8231_EXTENT,
+				 vt8231_driver.driver.name)) {
+		dev_err(&pdev->dev, "Region 0x%lx-0x%lx already in use!\n",
+			(unsigned long)res->start, (unsigned long)res->end);
 		return -ENODEV;
 	}
 
-	if (!(data = kzalloc(sizeof(struct vt8231_data), GFP_KERNEL))) {
-		err = -ENOMEM;
-		goto exit_release;
-	}
+	data = devm_kzalloc(&pdev->dev, sizeof(struct vt8231_data), GFP_KERNEL);
+	if (!data)
+		return -ENOMEM;
 
-	client = &data->client;
-	i2c_set_clientdata(client, data);
-	client->addr = isa_address;
-	client->adapter = adapter;
-	client->driver = &vt8231_driver;
-
-	/* Fill in the remaining client fields and put into the global list */
-	strlcpy(client->name, "vt8231", I2C_NAME_SIZE);
+	platform_set_drvdata(pdev, data);
+	data->addr = res->start;
+	data->name = "vt8231";
 
 	mutex_init(&data->update_lock);
-
-	/* Tell the I2C layer a new client has arrived */
-	if ((err = i2c_attach_client(client)))
-		goto exit_free;
-
-	vt8231_init_client(client);
+	vt8231_init_device(data);
 
 	/* Register sysfs hooks */
-	if ((err = sysfs_create_group(&client->dev.kobj, &vt8231_group)))
-		goto exit_detach;
+	err = sysfs_create_group(&pdev->dev.kobj, &vt8231_group);
+	if (err)
+		return err;
 
 	/* Must update device information to find out the config field */
-	data->uch_config = vt8231_read_value(client, VT8231_REG_UCH_CONFIG);
+	data->uch_config = vt8231_read_value(data, VT8231_REG_UCH_CONFIG);
 
 	for (i = 0; i < ARRAY_SIZE(vt8231_group_temps); i++) {
 		if (ISTEMP(i, data->uch_config)) {
-			if ((err = sysfs_create_group(&client->dev.kobj,
-					&vt8231_group_temps[i])))
+			err = sysfs_create_group(&pdev->dev.kobj,
+						 &vt8231_group_temps[i]);
+			if (err)
 				goto exit_remove_files;
 		}
 	}
 
 	for (i = 0; i < ARRAY_SIZE(vt8231_group_volts); i++) {
 		if (ISVOLT(i, data->uch_config)) {
-			if ((err = sysfs_create_group(&client->dev.kobj,
-					&vt8231_group_volts[i])))
+			err = sysfs_create_group(&pdev->dev.kobj,
+						 &vt8231_group_volts[i]);
+			if (err)
 				goto exit_remove_files;
 		}
 	}
 
-	data->class_dev = hwmon_device_register(&client->dev);
-	if (IS_ERR(data->class_dev)) {
-		err = PTR_ERR(data->class_dev);
+	data->hwmon_dev = hwmon_device_register(&pdev->dev);
+	if (IS_ERR(data->hwmon_dev)) {
+		err = PTR_ERR(data->hwmon_dev);
 		goto exit_remove_files;
 	}
 	return 0;
 
 exit_remove_files:
 	for (i = 0; i < ARRAY_SIZE(vt8231_group_volts); i++)
-		sysfs_remove_group(&client->dev.kobj, &vt8231_group_volts[i]);
+		sysfs_remove_group(&pdev->dev.kobj, &vt8231_group_volts[i]);
 
 	for (i = 0; i < ARRAY_SIZE(vt8231_group_temps); i++)
-		sysfs_remove_group(&client->dev.kobj, &vt8231_group_temps[i]);
+		sysfs_remove_group(&pdev->dev.kobj, &vt8231_group_temps[i]);
 
-	sysfs_remove_group(&client->dev.kobj, &vt8231_group);
-exit_detach:
-	i2c_detach_client(client);
-exit_free:
-	kfree(data);
-exit_release:
-	release_region(isa_address, VT8231_EXTENT);
+	sysfs_remove_group(&pdev->dev.kobj, &vt8231_group);
 	return err;
 }
 
-static int vt8231_detach_client(struct i2c_client *client)
+static int vt8231_remove(struct platform_device *pdev)
 {
-	struct vt8231_data *data = i2c_get_clientdata(client);
-	int err, i;
+	struct vt8231_data *data = platform_get_drvdata(pdev);
+	int i;
 
-	hwmon_device_unregister(data->class_dev);
+	hwmon_device_unregister(data->hwmon_dev);
 
 	for (i = 0; i < ARRAY_SIZE(vt8231_group_volts); i++)
-		sysfs_remove_group(&client->dev.kobj, &vt8231_group_volts[i]);
+		sysfs_remove_group(&pdev->dev.kobj, &vt8231_group_volts[i]);
 
 	for (i = 0; i < ARRAY_SIZE(vt8231_group_temps); i++)
-		sysfs_remove_group(&client->dev.kobj, &vt8231_group_temps[i]);
+		sysfs_remove_group(&pdev->dev.kobj, &vt8231_group_temps[i]);
 
-	sysfs_remove_group(&client->dev.kobj, &vt8231_group);
-
-	if ((err = i2c_detach_client(client))) {
-		return err;
-	}
-
-	release_region(client->addr, VT8231_EXTENT);
-	kfree(data);
+	sysfs_remove_group(&pdev->dev.kobj, &vt8231_group);
 
 	return 0;
 }
 
-static void vt8231_init_client(struct i2c_client *client)
+static void vt8231_init_device(struct vt8231_data *data)
 {
-	vt8231_write_value(client, VT8231_REG_TEMP1_CONFIG, 0);
-	vt8231_write_value(client, VT8231_REG_TEMP2_CONFIG, 0);
+	vt8231_write_value(data, VT8231_REG_TEMP1_CONFIG, 0);
+	vt8231_write_value(data, VT8231_REG_TEMP2_CONFIG, 0);
 }
 
 static struct vt8231_data *vt8231_update_device(struct device *dev)
 {
-	struct i2c_client *client = to_i2c_client(dev);
-	struct vt8231_data *data = i2c_get_clientdata(client);
+	struct vt8231_data *data = dev_get_drvdata(dev);
 	int i;
 	u16 low;
 
@@ -830,54 +887,52 @@ static struct vt8231_data *vt8231_update_device(struct device *dev)
 	    || !data->valid) {
 		for (i = 0; i < 6; i++) {
 			if (ISVOLT(i, data->uch_config)) {
-				data->in[i] = vt8231_read_value(client,
+				data->in[i] = vt8231_read_value(data,
 						regvolt[i]);
-				data->in_min[i] = vt8231_read_value(client,
+				data->in_min[i] = vt8231_read_value(data,
 						regvoltmin[i]);
-				data->in_max[i] = vt8231_read_value(client,
+				data->in_max[i] = vt8231_read_value(data,
 						regvoltmax[i]);
 			}
 		}
 		for (i = 0; i < 2; i++) {
-			data->fan[i] = vt8231_read_value(client,
+			data->fan[i] = vt8231_read_value(data,
 						VT8231_REG_FAN(i));
-			data->fan_min[i] = vt8231_read_value(client,
+			data->fan_min[i] = vt8231_read_value(data,
 						VT8231_REG_FAN_MIN(i));
 		}
 
-		low = vt8231_read_value(client, VT8231_REG_TEMP_LOW01);
+		low = vt8231_read_value(data, VT8231_REG_TEMP_LOW01);
 		low = (low >> 6) | ((low & 0x30) >> 2)
-		    | (vt8231_read_value(client, VT8231_REG_TEMP_LOW25) << 4);
+		    | (vt8231_read_value(data, VT8231_REG_TEMP_LOW25) << 4);
 		for (i = 0; i < 6; i++) {
 			if (ISTEMP(i, data->uch_config)) {
-				data->temp[i] = (vt8231_read_value(client,
+				data->temp[i] = (vt8231_read_value(data,
 						       regtemp[i]) << 2)
 						| ((low >> (2 * i)) & 0x03);
-				data->temp_max[i] = vt8231_read_value(client,
+				data->temp_max[i] = vt8231_read_value(data,
 						      regtempmax[i]);
-				data->temp_min[i] = vt8231_read_value(client,
+				data->temp_min[i] = vt8231_read_value(data,
 						      regtempmin[i]);
 			}
 		}
 
-		i = vt8231_read_value(client, VT8231_REG_FANDIV);
+		i = vt8231_read_value(data, VT8231_REG_FANDIV);
 		data->fan_div[0] = (i >> 4) & 0x03;
 		data->fan_div[1] = i >> 6;
-		data->alarms = vt8231_read_value(client, VT8231_REG_ALARM1) |
-			(vt8231_read_value(client, VT8231_REG_ALARM2) << 8);
+		data->alarms = vt8231_read_value(data, VT8231_REG_ALARM1) |
+			(vt8231_read_value(data, VT8231_REG_ALARM2) << 8);
 
 		/* Set alarm flags correctly */
-		if (!data->fan[0] && data->fan_min[0]) {
+		if (!data->fan[0] && data->fan_min[0])
 			data->alarms |= 0x40;
-		} else if (data->fan[0] && !data->fan_min[0]) {
+		else if (data->fan[0] && !data->fan_min[0])
 			data->alarms &= ~0x40;
-		}
 
-		if (!data->fan[1] && data->fan_min[1]) {
+		if (!data->fan[1] && data->fan_min[1])
 			data->alarms |= 0x80;
-		} else if (data->fan[1] && !data->fan_min[1]) {
+		else if (data->fan[1] && !data->fan_min[1])
 			data->alarms &= ~0x80;
-		}
 
 		data->last_updated = jiffies;
 		data->valid = 1;
@@ -888,33 +943,106 @@ static struct vt8231_data *vt8231_update_device(struct device *dev)
 	return data;
 }
 
-static int __devinit vt8231_pci_probe(struct pci_dev *dev,
+static int vt8231_device_add(unsigned short address)
+{
+	struct resource res = {
+		.start	= address,
+		.end	= address + VT8231_EXTENT - 1,
+		.name	= "vt8231",
+		.flags	= IORESOURCE_IO,
+	};
+	int err;
+
+	err = acpi_check_resource_conflict(&res);
+	if (err)
+		goto exit;
+
+	pdev = platform_device_alloc("vt8231", address);
+	if (!pdev) {
+		err = -ENOMEM;
+		pr_err("Device allocation failed\n");
+		goto exit;
+	}
+
+	err = platform_device_add_resources(pdev, &res, 1);
+	if (err) {
+		pr_err("Device resource addition failed (%d)\n", err);
+		goto exit_device_put;
+	}
+
+	err = platform_device_add(pdev);
+	if (err) {
+		pr_err("Device addition failed (%d)\n", err);
+		goto exit_device_put;
+	}
+
+	return 0;
+
+exit_device_put:
+	platform_device_put(pdev);
+exit:
+	return err;
+}
+
+static int vt8231_pci_probe(struct pci_dev *dev,
 				const struct pci_device_id *id)
 {
-	u16 val;
+	u16 address, val;
+	if (force_addr) {
+		address = force_addr & 0xff00;
+		dev_warn(&dev->dev, "Forcing ISA address 0x%x\n",
+			 address);
+
+		if (PCIBIOS_SUCCESSFUL !=
+		    pci_write_config_word(dev, VT8231_BASE_REG, address | 1))
+			return -ENODEV;
+	}
 
 	if (PCIBIOS_SUCCESSFUL != pci_read_config_word(dev, VT8231_BASE_REG,
 							&val))
 		return -ENODEV;
 
-	isa_address = val & ~(VT8231_EXTENT - 1);
-	if (isa_address == 0 && force_addr == 0) {
-		dev_err(&dev->dev, "base address not set -\
-				 upgrade BIOS or use force_addr=0xaddr\n");
+	address = val & ~(VT8231_EXTENT - 1);
+	if (address == 0) {
+		dev_err(&dev->dev, "base address not set - upgrade BIOS or use force_addr=0xaddr\n");
 		return -ENODEV;
 	}
 
-	s_bridge = pci_dev_get(dev);
+	if (PCIBIOS_SUCCESSFUL != pci_read_config_word(dev, VT8231_ENABLE_REG,
+							&val))
+		return -ENODEV;
 
-	if (i2c_isa_add_driver(&vt8231_driver)) {
-		pci_dev_put(s_bridge);
-		s_bridge = NULL;
+	if (!(val & 0x0001)) {
+		dev_warn(&dev->dev, "enabling sensors\n");
+		if (PCIBIOS_SUCCESSFUL !=
+			pci_write_config_word(dev, VT8231_ENABLE_REG,
+							val | 0x0001))
+			return -ENODEV;
 	}
 
-	/* Always return failure here.  This is to allow other drivers to bind
+	if (platform_driver_register(&vt8231_driver))
+		goto exit;
+
+	/* Sets global pdev as a side effect */
+	if (vt8231_device_add(address))
+		goto exit_unregister;
+
+	/*
+	 * Always return failure here.  This is to allow other drivers to bind
 	 * to this pci device.  We don't really want to have control over the
 	 * pci device, we only wanted to read as few register values from it.
 	 */
+
+	/*
+	 * We do, however, mark ourselves as using the PCI device to stop it
+	 * getting unloaded.
+	 */
+	s_bridge = pci_dev_get(dev);
+	return -ENODEV;
+
+exit_unregister:
+	platform_driver_unregister(&vt8231_driver);
+exit:
 	return -ENODEV;
 }
 
@@ -927,13 +1055,14 @@ static void __exit sm_vt8231_exit(void)
 {
 	pci_unregister_driver(&vt8231_pci_driver);
 	if (s_bridge != NULL) {
-		i2c_isa_del_driver(&vt8231_driver);
+		platform_device_unregister(pdev);
+		platform_driver_unregister(&vt8231_driver);
 		pci_dev_put(s_bridge);
 		s_bridge = NULL;
 	}
 }
 
-MODULE_AUTHOR("Roger Lucas <roger@planbit.co.uk>");
+MODULE_AUTHOR("Roger Lucas <vt8231@hiddenengine.co.uk>");
 MODULE_DESCRIPTION("VT8231 sensors");
 MODULE_LICENSE("GPL");
 

@@ -41,7 +41,6 @@ ldd
 Debugging modules
 The proc file system
 Starting points for debugging scripting languages etc.
-Dumptool & Lcrash
 SysRq
 References
 Special Thanks
@@ -1402,7 +1401,7 @@ Syscalls are implemented on Linux for S390 by the Supervisor call instruction (S
 possibilities of these as the instruction is made up of a  0xA opcode & the second byte being
 the syscall number. They are traced using the simple command.
 TR SVC  <Optional value or range>
-the syscalls are defined in linux/include/asm-s390/unistd.h
+the syscalls are defined in linux/arch/s390/include/asm/unistd.h
 e.g. to trace all file opens just do
 TR SVC 5 ( as this is the syscall number of open )
 
@@ -1984,7 +1983,7 @@ break *$pc
 
 break *0x400618
 
-heres a really useful one for large programs
+Here's a really useful one for large programs
 rbr
 Set a breakpoint for all functions matching REGEXP
 e.g.
@@ -2211,7 +2210,7 @@ Breakpoint 2 at 0x4d87a4: file top.c, line 2609.
 #5  0x51692c in readline_internal () at readline.c:521
 #6  0x5164fe in readline (prompt=0x7ffff810 "\177ÿøx\177ÿ÷Ø\177ÿøxÀ")
     at readline.c:349
-#7  0x4d7a8a in command_line_input (prrompt=0x564420 "(gdb) ", repeat=1,
+#7  0x4d7a8a in command_line_input (prompt=0x564420 "(gdb) ", repeat=1,
     annotation_suffix=0x4d6b44 "prompt") at top.c:2091
 #8  0x4d6cf0 in command_loop () at top.c:1345
 #9  0x4e25bc in main (argc=1, argv=0x7ffffdf4) at main.c:635
@@ -2273,7 +2272,7 @@ IP forwarding is on.
 There is a lot of useful info in here best found by going in & having a look around,
 so I'll take you through some entries I consider important.
 
-All the processes running on the machine have there own entry defined by
+All the processes running on the machine have their own entry defined by
 /proc/<pid>
 So lets have a look at the init process
 cd /proc/1
@@ -2455,39 +2454,6 @@ jdb <filename> another fully interactive gdb style debugger.
 
 
 
-Dumptool & Lcrash ( lkcd )
-==========================
-Michael Holzheu & others here at IBM have a fairly mature port of 
-SGI's lcrash tool which allows one to look at kernel structures in a
-running kernel.
-
-It also complements a tool called dumptool which dumps all the kernel's
-memory pages & registers to either a tape or a disk.
-This can be used by tech support or an ambitious end user do
-post mortem debugging of a machine like gdb core dumps.
-
-Going into how to use this tool in detail will be explained
-in other documentation supplied by IBM with the patches & the 
-lcrash homepage http://oss.sgi.com/projects/lkcd/ & the lcrash manpage.
-
-How they work
--------------
-Lcrash is a perfectly normal program,however, it requires 2 
-additional files, Kerntypes which is built using a patch to the 
-linux kernel sources in the linux root directory & the System.map.
-
-Kerntypes is an objectfile whose sole purpose in life
-is to provide stabs debug info to lcrash, to do this
-Kerntypes is built from kerntypes.c which just includes the most commonly
-referenced header files used when debugging, lcrash can then read the
-.stabs section of this file.
-
-Debugging a live system it uses /dev/mem
-alternatively for post mortem debugging it uses the data 
-collected by dumptool.
-
-
-
 SysRq
 =====
 This is now supported by linux for s/390 & z/Architecture.
@@ -2531,5 +2497,5 @@ Special Thanks
 ==============
 Special thanks to Neale Ferguson who maintains a much
 prettier HTML version of this page at
-http://penguinvm.princeton.edu/notes.html#Debug390
+http://linuxvm.org/penguinvm/
 Bob Grainger Stefan Bader & others for reporting bugs

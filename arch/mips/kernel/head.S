@@ -16,25 +16,16 @@
 #include <linux/init.h>
 #include <linux/threads.h>
 
+#include <asm/addrspace.h>
 #include <asm/asm.h>
 #include <asm/asmmacro.h>
 #include <asm/irqflags.h>
 #include <asm/regdef.h>
-#include <asm/page.h>
+#include <asm/pgtable-bits.h>
 #include <asm/mipsregs.h>
 #include <asm/stackframe.h>
 
 #include <kernel-entry-init.h>
-
-	.macro	ARC64_TWIDDLE_PC
-#if defined(CONFIG_ARC64) || defined(CONFIG_MAPPED_KERNEL)
-	/* We get launched at a XKPHYS address but the kernel is linked to
-	   run at a KSEG0 address, so jump there.  */
-	PTR_LA	t0, \@f
-	jr	t0
-\@:
-#endif
-	.endm
 
 	/*
 	 * inputs are the text nasid in t1, data nasid in t2.
@@ -129,24 +120,27 @@
 #endif
 	.endm
 
+#ifndef CONFIG_NO_EXCEPT_FILL
 	/*
 	 * Reserved space for exception handlers.
 	 * Necessary for machines which link their kernels at KSEG0.
 	 */
 	.fill	0x400
+#endif
 
-EXPORT(stext)					# used for profiling
 EXPORT(_stext)
 
-#ifdef CONFIG_MIPS_SIM
+#ifdef CONFIG_BOOT_RAW
 	/*
 	 * Give us a fighting chance of running if execution beings at the
 	 * kernel load address.  This is needed because this platform does
 	 * not have a ELF loader yet.
 	 */
+FEXPORT(__kernel_entry)
 	j	kernel_entry
 #endif
-	__INIT
+
+	__REF
 
 NESTED(kernel_entry, 16, sp)			# kernel entry point
 
@@ -154,7 +148,11 @@ NESTED(kernel_entry, 16, sp)			# kernel entry point
 
 	setup_c0_status_pri
 
-	ARC64_TWIDDLE_PC
+	/* We might not get launched at the address the kernel is linked to,
+	   so we jump there.  */
+	PTR_LA	t0, 0f
+	jr	t0
+0:
 
 #ifdef CONFIG_MIPS_MT_SMTC
 	/*
@@ -189,17 +187,17 @@ NESTED(kernel_entry, 16, sp)			# kernel entry point
 
 	MTC0		zero, CP0_CONTEXT	# clear context register
 	PTR_LA		$28, init_thread_union
-	PTR_LI		sp, _THREAD_SIZE - 32
+	/* Set the SP after an empty pt_regs.  */
+	PTR_LI		sp, _THREAD_SIZE - 32 - PT_SIZE
 	PTR_ADDU	sp, $28
+	back_to_back_c0_hazard
 	set_saved_sp	sp, t0, t1
 	PTR_SUBU	sp, 4 * SZREG		# init stack pointer
 
 	j		start_kernel
 	END(kernel_entry)
 
-#ifdef CONFIG_QEMU
-	__INIT
-#endif
+	__CPUINIT
 
 #ifdef CONFIG_SMP
 /*

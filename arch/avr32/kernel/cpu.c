@@ -6,13 +6,14 @@
  * published by the Free Software Foundation.
  */
 #include <linux/init.h>
-#include <linux/sysdev.h>
+#include <linux/device.h>
 #include <linux/seq_file.h>
 #include <linux/cpu.h>
 #include <linux/module.h>
 #include <linux/percpu.h>
 #include <linux/param.h>
 #include <linux/errno.h>
+#include <linux/clk.h>
 
 #include <asm/setup.h>
 #include <asm/sysreg.h>
@@ -25,14 +26,16 @@ static DEFINE_PER_CPU(struct cpu, cpu_devices);
  * XXX: If/when a SMP-capable implementation of AVR32 will ever be
  * made, we must make sure that the code executes on the correct CPU.
  */
-static ssize_t show_pc0event(struct sys_device *dev, char *buf)
+static ssize_t show_pc0event(struct device *dev,
+			struct device_attribute *attr, char *buf)
 {
 	unsigned long pccr;
 
 	pccr = sysreg_read(PCCR);
 	return sprintf(buf, "0x%lx\n", (pccr >> 12) & 0x3f);
 }
-static ssize_t store_pc0event(struct sys_device *dev, const char *buf,
+static ssize_t store_pc0event(struct device *dev,
+			struct device_attribute *attr, const char *buf,
 			      size_t count)
 {
 	unsigned long val;
@@ -45,15 +48,17 @@ static ssize_t store_pc0event(struct sys_device *dev, const char *buf,
 	sysreg_write(PCCR, val);
 	return count;
 }
-static ssize_t show_pc0count(struct sys_device *dev, char *buf)
+static ssize_t show_pc0count(struct device *dev,
+			struct device_attribute *attr, char *buf)
 {
 	unsigned long pcnt0;
 
 	pcnt0 = sysreg_read(PCNT0);
 	return sprintf(buf, "%lu\n", pcnt0);
 }
-static ssize_t store_pc0count(struct sys_device *dev, const char *buf,
-			      size_t count)
+static ssize_t store_pc0count(struct device *dev,
+				struct device_attribute *attr,
+				const char *buf, size_t count)
 {
 	unsigned long val;
 	char *endp;
@@ -66,14 +71,16 @@ static ssize_t store_pc0count(struct sys_device *dev, const char *buf,
 	return count;
 }
 
-static ssize_t show_pc1event(struct sys_device *dev, char *buf)
+static ssize_t show_pc1event(struct device *dev,
+				struct device_attribute *attr, char *buf)
 {
 	unsigned long pccr;
 
 	pccr = sysreg_read(PCCR);
 	return sprintf(buf, "0x%lx\n", (pccr >> 18) & 0x3f);
 }
-static ssize_t store_pc1event(struct sys_device *dev, const char *buf,
+static ssize_t store_pc1event(struct device *dev,
+			      struct device_attribute *attr, const char *buf,
 			      size_t count)
 {
 	unsigned long val;
@@ -86,14 +93,16 @@ static ssize_t store_pc1event(struct sys_device *dev, const char *buf,
 	sysreg_write(PCCR, val);
 	return count;
 }
-static ssize_t show_pc1count(struct sys_device *dev, char *buf)
+static ssize_t show_pc1count(struct device *dev,
+				struct device_attribute *attr, char *buf)
 {
 	unsigned long pcnt1;
 
 	pcnt1 = sysreg_read(PCNT1);
 	return sprintf(buf, "%lu\n", pcnt1);
 }
-static ssize_t store_pc1count(struct sys_device *dev, const char *buf,
+static ssize_t store_pc1count(struct device *dev,
+				struct device_attribute *attr, const char *buf,
 			      size_t count)
 {
 	unsigned long val;
@@ -107,14 +116,16 @@ static ssize_t store_pc1count(struct sys_device *dev, const char *buf,
 	return count;
 }
 
-static ssize_t show_pccycles(struct sys_device *dev, char *buf)
+static ssize_t show_pccycles(struct device *dev,
+				struct device_attribute *attr, char *buf)
 {
 	unsigned long pccnt;
 
 	pccnt = sysreg_read(PCCNT);
 	return sprintf(buf, "%lu\n", pccnt);
 }
-static ssize_t store_pccycles(struct sys_device *dev, const char *buf,
+static ssize_t store_pccycles(struct device *dev,
+				struct device_attribute *attr, const char *buf,
 			      size_t count)
 {
 	unsigned long val;
@@ -128,14 +139,16 @@ static ssize_t store_pccycles(struct sys_device *dev, const char *buf,
 	return count;
 }
 
-static ssize_t show_pcenable(struct sys_device *dev, char *buf)
+static ssize_t show_pcenable(struct device *dev,
+			struct device_attribute *attr, char *buf)
 {
 	unsigned long pccr;
 
 	pccr = sysreg_read(PCCR);
 	return sprintf(buf, "%c\n", (pccr & 1)?'1':'0');
 }
-static ssize_t store_pcenable(struct sys_device *dev, const char *buf,
+static ssize_t store_pcenable(struct device *dev,
+			      struct device_attribute *attr, const char *buf,
 			      size_t count)
 {
 	unsigned long pccr, val;
@@ -154,12 +167,12 @@ static ssize_t store_pcenable(struct sys_device *dev, const char *buf,
 	return count;
 }
 
-static SYSDEV_ATTR(pc0event, 0600, show_pc0event, store_pc0event);
-static SYSDEV_ATTR(pc0count, 0600, show_pc0count, store_pc0count);
-static SYSDEV_ATTR(pc1event, 0600, show_pc1event, store_pc1event);
-static SYSDEV_ATTR(pc1count, 0600, show_pc1count, store_pc1count);
-static SYSDEV_ATTR(pccycles, 0600, show_pccycles, store_pccycles);
-static SYSDEV_ATTR(pcenable, 0600, show_pcenable, store_pcenable);
+static DEVICE_ATTR(pc0event, 0600, show_pc0event, store_pc0event);
+static DEVICE_ATTR(pc0count, 0600, show_pc0count, store_pc0count);
+static DEVICE_ATTR(pc1event, 0600, show_pc1event, store_pc1event);
+static DEVICE_ATTR(pc1count, 0600, show_pc1count, store_pc1count);
+static DEVICE_ATTR(pccycles, 0600, show_pccycles, store_pccycles);
+static DEVICE_ATTR(pcenable, 0600, show_pcenable, store_pcenable);
 
 #endif /* CONFIG_PERFORMANCE_COUNTERS */
 
@@ -173,12 +186,12 @@ static int __init topology_init(void)
 		register_cpu(c, cpu);
 
 #ifdef CONFIG_PERFORMANCE_COUNTERS
-		sysdev_create_file(&c->sysdev, &attr_pc0event);
-		sysdev_create_file(&c->sysdev, &attr_pc0count);
-		sysdev_create_file(&c->sysdev, &attr_pc1event);
-		sysdev_create_file(&c->sysdev, &attr_pc1count);
-		sysdev_create_file(&c->sysdev, &attr_pccycles);
-		sysdev_create_file(&c->sysdev, &attr_pcenable);
+		device_create_file(&c->dev, &dev_attr_pc0event);
+		device_create_file(&c->dev, &dev_attr_pc0count);
+		device_create_file(&c->dev, &dev_attr_pc1event);
+		device_create_file(&c->dev, &dev_attr_pc1count);
+		device_create_file(&c->dev, &dev_attr_pccycles);
+		device_create_file(&c->dev, &dev_attr_pcenable);
 #endif
 	}
 
@@ -187,9 +200,20 @@ static int __init topology_init(void)
 
 subsys_initcall(topology_init);
 
+struct chip_id_map {
+	u16	mid;
+	u16	pn;
+	const char *name;
+};
+
+static const struct chip_id_map chip_names[] = {
+	{ .mid = 0x1f, .pn = 0x1e82, .name = "AT32AP700x" },
+};
+#define NR_CHIP_NAMES ARRAY_SIZE(chip_names)
+
 static const char *cpu_names[] = {
 	"Morgan",
-	"AP7000",
+	"AP7",
 };
 #define NR_CPU_NAMES ARRAY_SIZE(cpu_names)
 
@@ -206,12 +230,32 @@ static const char *mmu_types[] = {
 	"MPU"
 };
 
+static const char *cpu_feature_flags[] = {
+	"rmw", "dsp", "simd", "ocd", "perfctr", "java", "fpu",
+};
+
+static const char *get_chip_name(struct avr32_cpuinfo *cpu)
+{
+	unsigned int i;
+	unsigned int mid = avr32_get_manufacturer_id(cpu);
+	unsigned int pn = avr32_get_product_number(cpu);
+
+	for (i = 0; i < NR_CHIP_NAMES; i++) {
+		if (chip_names[i].mid == mid && chip_names[i].pn == pn)
+			return chip_names[i].name;
+	}
+
+	return "(unknown)";
+}
+
 void __init setup_processor(void)
 {
 	unsigned long config0, config1;
 	unsigned long features;
 	unsigned cpu_id, cpu_rev, arch_id, arch_rev, mmu_type;
+	unsigned device_id;
 	unsigned tmp;
+	unsigned i;
 
 	config0 = sysreg_read(CONFIG0);
 	config1 = sysreg_read(CONFIG1);
@@ -221,11 +265,14 @@ void __init setup_processor(void)
 	arch_rev = SYSREG_BFEXT(AR, config0);
 	mmu_type = SYSREG_BFEXT(MMUT, config0);
 
+	device_id = ocd_read(DID);
+
 	boot_cpu_data.arch_type = arch_id;
 	boot_cpu_data.cpu_type = cpu_id;
 	boot_cpu_data.arch_revision = arch_rev;
 	boot_cpu_data.cpu_revision = cpu_rev;
 	boot_cpu_data.tlb_config = mmu_type;
+	boot_cpu_data.device_id = device_id;
 
 	tmp = SYSREG_BFEXT(ILSZ, config1);
 	if (tmp) {
@@ -247,41 +294,34 @@ void __init setup_processor(void)
 		return;
 	}
 
-	printk ("CPU: %s [%02x] revision %d (%s revision %d)\n",
+	printk ("CPU: %s chip revision %c\n", get_chip_name(&boot_cpu_data),
+			avr32_get_chip_revision(&boot_cpu_data) + 'A');
+	printk ("CPU: %s [%02x] core revision %d (%s arch revision %d)\n",
 		cpu_names[cpu_id], cpu_id, cpu_rev,
 		arch_names[arch_id], arch_rev);
 	printk ("CPU: MMU configuration: %s\n", mmu_types[mmu_type]);
 
 	printk ("CPU: features:");
 	features = 0;
-	if (config0 & SYSREG_BIT(CONFIG0_R)) {
+	if (config0 & SYSREG_BIT(CONFIG0_R))
 		features |= AVR32_FEATURE_RMW;
-		printk(" rmw");
-	}
-	if (config0 & SYSREG_BIT(CONFIG0_D)) {
+	if (config0 & SYSREG_BIT(CONFIG0_D))
 		features |= AVR32_FEATURE_DSP;
-		printk(" dsp");
-	}
-	if (config0 & SYSREG_BIT(CONFIG0_S)) {
+	if (config0 & SYSREG_BIT(CONFIG0_S))
 		features |= AVR32_FEATURE_SIMD;
-		printk(" simd");
-	}
-	if (config0 & SYSREG_BIT(CONFIG0_O)) {
+	if (config0 & SYSREG_BIT(CONFIG0_O))
 		features |= AVR32_FEATURE_OCD;
-		printk(" ocd");
-	}
-	if (config0 & SYSREG_BIT(CONFIG0_P)) {
+	if (config0 & SYSREG_BIT(CONFIG0_P))
 		features |= AVR32_FEATURE_PCTR;
-		printk(" perfctr");
-	}
-	if (config0 & SYSREG_BIT(CONFIG0_J)) {
+	if (config0 & SYSREG_BIT(CONFIG0_J))
 		features |= AVR32_FEATURE_JAVA;
-		printk(" java");
-	}
-	if (config0 & SYSREG_BIT(CONFIG0_F)) {
+	if (config0 & SYSREG_BIT(CONFIG0_F))
 		features |= AVR32_FEATURE_FPU;
-		printk(" fpu");
-	}
+
+	for (i = 0; i < ARRAY_SIZE(cpu_feature_flags); i++)
+		if (features & (1 << i))
+			printk(" %s", cpu_feature_flags[i]);
+
 	printk("\n");
 	boot_cpu_data.features = features;
 }
@@ -291,6 +331,8 @@ static int c_show(struct seq_file *m, void *v)
 {
 	unsigned int icache_size, dcache_size;
 	unsigned int cpu = smp_processor_id();
+	unsigned int freq;
+	unsigned int i;
 
 	icache_size = boot_cpu_data.icache.ways *
 		boot_cpu_data.icache.sets *
@@ -301,14 +343,20 @@ static int c_show(struct seq_file *m, void *v)
 
 	seq_printf(m, "processor\t: %d\n", cpu);
 
+	seq_printf(m, "chip type\t: %s revision %c\n",
+			get_chip_name(&boot_cpu_data),
+			avr32_get_chip_revision(&boot_cpu_data) + 'A');
 	if (boot_cpu_data.arch_type < NR_ARCH_NAMES)
-		seq_printf(m, "cpu family\t: %s revision %d\n",
+		seq_printf(m, "cpu arch\t: %s revision %d\n",
 			   arch_names[boot_cpu_data.arch_type],
 			   boot_cpu_data.arch_revision);
 	if (boot_cpu_data.cpu_type < NR_CPU_NAMES)
-		seq_printf(m, "cpu type\t: %s revision %d\n",
+		seq_printf(m, "cpu core\t: %s revision %d\n",
 			   cpu_names[boot_cpu_data.cpu_type],
 			   boot_cpu_data.cpu_revision);
+
+	freq = (clk_get_rate(boot_cpu_data.clk) + 500) / 1000;
+	seq_printf(m, "cpu MHz\t\t: %u.%03u\n", freq / 1000, freq % 1000);
 
 	seq_printf(m, "i-cache\t\t: %dK (%u ways x %u sets x %u)\n",
 		   icache_size >> 10,
@@ -320,7 +368,13 @@ static int c_show(struct seq_file *m, void *v)
 		   boot_cpu_data.dcache.ways,
 		   boot_cpu_data.dcache.sets,
 		   boot_cpu_data.dcache.linesz);
-	seq_printf(m, "bogomips\t: %lu.%02lu\n",
+
+	seq_printf(m, "features\t:");
+	for (i = 0; i < ARRAY_SIZE(cpu_feature_flags); i++)
+		if (boot_cpu_data.features & (1 << i))
+			seq_printf(m, " %s", cpu_feature_flags[i]);
+
+	seq_printf(m, "\nbogomips\t: %lu.%02lu\n",
 		   boot_cpu_data.loops_per_jiffy / (500000/HZ),
 		   (boot_cpu_data.loops_per_jiffy / (5000/HZ)) % 100);
 
@@ -343,7 +397,7 @@ static void c_stop(struct seq_file *m, void *v)
 
 }
 
-struct seq_operations cpuinfo_op = {
+const struct seq_operations cpuinfo_op = {
 	.start	= c_start,
 	.next	= c_next,
 	.stop	= c_stop,

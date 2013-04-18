@@ -9,18 +9,22 @@
 #include <linux/module.h>
 #include <linux/kallsyms.h>
 #include <linux/fs.h>
+#include <linux/pm.h>
 #include <linux/ptrace.h>
+#include <linux/slab.h>
 #include <linux/reboot.h>
+#include <linux/tick.h>
 #include <linux/uaccess.h>
 #include <linux/unistd.h>
 
 #include <asm/sysreg.h>
 #include <asm/ocd.h>
+#include <asm/syscalls.h>
 
-void (*pm_power_off)(void) = NULL;
+#include <mach/pm.h>
+
+void (*pm_power_off)(void);
 EXPORT_SYMBOL(pm_power_off);
-
-extern void cpu_idle_sleep(void);
 
 /*
  * This file handles the architecture-dependent parts of process handling..
@@ -30,11 +34,13 @@ void cpu_idle(void)
 {
 	/* endless idle loop with no priority at all */
 	while (1) {
+		tick_nohz_idle_enter();
+		rcu_idle_enter();
 		while (!need_resched())
 			cpu_idle_sleep();
-		preempt_enable_no_resched();
-		schedule();
-		preempt_disable();
+		rcu_idle_exit();
+		tick_nohz_idle_exit();
+		schedule_preempt_disabled();
 	}
 }
 
@@ -51,59 +57,23 @@ void machine_halt(void)
 
 void machine_power_off(void)
 {
+	if (pm_power_off)
+		pm_power_off();
 }
 
 void machine_restart(char *cmd)
 {
-	__mtdr(DBGREG_DC, DC_DBE);
-	__mtdr(DBGREG_DC, DC_RES);
+	ocd_write(DC, (1 << OCD_DC_DBE_BIT));
+	ocd_write(DC, (1 << OCD_DC_RES_BIT));
 	while (1) ;
 }
-
-/*
- * PC is actually discarded when returning from a system call -- the
- * return address must be stored in LR. This function will make sure
- * LR points to do_exit before starting the thread.
- *
- * Also, when returning from fork(), r12 is 0, so we must copy the
- * argument as well.
- *
- *  r0 : The argument to the main thread function
- *  r1 : The address of do_exit
- *  r2 : The address of the main thread function
- */
-asmlinkage extern void kernel_thread_helper(void);
-__asm__("	.type	kernel_thread_helper, @function\n"
-	"kernel_thread_helper:\n"
-	"	mov	r12, r0\n"
-	"	mov	lr, r2\n"
-	"	mov	pc, r1\n"
-	"	.size	kernel_thread_helper, . - kernel_thread_helper");
-
-int kernel_thread(int (*fn)(void *), void *arg, unsigned long flags)
-{
-	struct pt_regs regs;
-
-	memset(&regs, 0, sizeof(regs));
-
-	regs.r0 = (unsigned long)arg;
-	regs.r1 = (unsigned long)fn;
-	regs.r2 = (unsigned long)do_exit;
-	regs.lr = (unsigned long)kernel_thread_helper;
-	regs.pc = (unsigned long)kernel_thread_helper;
-	regs.sr = MODE_SUPERVISOR;
-
-	return do_fork(flags | CLONE_VM | CLONE_UNTRACED,
-		       0, &regs, 0, NULL, NULL);
-}
-EXPORT_SYMBOL(kernel_thread);
 
 /*
  * Free current thread data structures etc
  */
 void exit_thread(void)
 {
-	/* nothing to do */
+	ocd_disable(current);
 }
 
 void flush_thread(void)
@@ -287,10 +257,11 @@ void show_regs_log_lvl(struct pt_regs *regs, const char *log_lvl)
 	       regs->sr & SR_N ? 'N' : 'n',
 	       regs->sr & SR_Z ? 'Z' : 'z',
 	       regs->sr & SR_C ? 'C' : 'c');
-	printk("%sMode bits: %c%c%c%c%c%c%c%c%c\n", log_lvl,
+	printk("%sMode bits: %c%c%c%c%c%c%c%c%c%c\n", log_lvl,
 	       regs->sr & SR_H ? 'H' : 'h',
-	       regs->sr & SR_R ? 'R' : 'r',
 	       regs->sr & SR_J ? 'J' : 'j',
+	       regs->sr & SR_DM ? 'M' : 'm',
+	       regs->sr & SR_D ? 'D' : 'd',
 	       regs->sr & SR_EM ? 'E' : 'e',
 	       regs->sr & SR_I3M ? '3' : '.',
 	       regs->sr & SR_I2M ? '2' : '.',
@@ -323,73 +294,39 @@ int dump_fpu(struct pt_regs *regs, elf_fpregset_t *fpu)
 }
 
 asmlinkage void ret_from_fork(void);
+asmlinkage void ret_from_kernel_thread(void);
+asmlinkage void syscall_return(void);
 
-int copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
-		unsigned long unused,
-		struct task_struct *p, struct pt_regs *regs)
+int copy_thread(unsigned long clone_flags, unsigned long usp,
+		unsigned long arg,
+		struct task_struct *p)
 {
-	struct pt_regs *childregs;
+	struct pt_regs *childregs = task_pt_regs(p);
 
-	childregs = ((struct pt_regs *)(THREAD_SIZE + (unsigned long)task_stack_page(p))) - 1;
-	*childregs = *regs;
-
-	if (user_mode(regs))
-		childregs->sp = usp;
-	else
-		childregs->sp = (unsigned long)task_stack_page(p) + THREAD_SIZE;
-
-	childregs->r12 = 0; /* Set return value for child */
+	if (unlikely(p->flags & PF_KTHREAD)) {
+		memset(childregs, 0, sizeof(struct pt_regs));
+		p->thread.cpu_context.r0 = arg;
+		p->thread.cpu_context.r1 = usp; /* fn */
+		p->thread.cpu_context.r2 = syscall_return;
+		p->thread.cpu_context.pc = (unsigned long)ret_from_kernel_thread;
+		childregs->sr = MODE_SUPERVISOR;
+	} else {
+		*childregs = *current_pt_regs();
+		if (usp)
+			childregs->sp = usp;
+		childregs->r12 = 0; /* Set return value for child */
+		p->thread.cpu_context.pc = (unsigned long)ret_from_fork;
+	}
 
 	p->thread.cpu_context.sr = MODE_SUPERVISOR | SR_GM;
 	p->thread.cpu_context.ksp = (unsigned long)childregs;
-	p->thread.cpu_context.pc = (unsigned long)ret_from_fork;
+
+	clear_tsk_thread_flag(p, TIF_DEBUG);
+	if ((clone_flags & CLONE_PTRACE) && test_thread_flag(TIF_DEBUG))
+		ocd_enable(p);
 
 	return 0;
 }
-
-/* r12-r8 are dummy parameters to force the compiler to use the stack */
-asmlinkage int sys_fork(struct pt_regs *regs)
-{
-	return do_fork(SIGCHLD, regs->sp, regs, 0, NULL, NULL);
-}
-
-asmlinkage int sys_clone(unsigned long clone_flags, unsigned long newsp,
-			 unsigned long parent_tidptr,
-			 unsigned long child_tidptr, struct pt_regs *regs)
-{
-	if (!newsp)
-		newsp = regs->sp;
-	return do_fork(clone_flags, newsp, regs, 0,
-		       (int __user *)parent_tidptr,
-		       (int __user *)child_tidptr);
-}
-
-asmlinkage int sys_vfork(struct pt_regs *regs)
-{
-	return do_fork(CLONE_VFORK | CLONE_VM | SIGCHLD, regs->sp, regs,
-		       0, NULL, NULL);
-}
-
-asmlinkage int sys_execve(char __user *ufilename, char __user *__user *uargv,
-			  char __user *__user *uenvp, struct pt_regs *regs)
-{
-	int error;
-	char *filename;
-
-	filename = getname(ufilename);
-	error = PTR_ERR(filename);
-	if (IS_ERR(filename))
-		goto out;
-
-	error = do_execve(filename, uargv, uenvp, regs);
-	if (error == 0)
-		current->ptrace &= ~PT_DTRACE;
-	putname(filename);
-
-out:
-	return error;
-}
-
 
 /*
  * This function is supposed to answer the question "who called

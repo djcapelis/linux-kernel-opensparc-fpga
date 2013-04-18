@@ -3,13 +3,14 @@
  * not configured or static.
  */
 
+#include <linux/export.h>
 #include <net/ipv6.h>
 
 #define IPV6_ADDR_SCOPE_TYPE(scope)	((scope) << 16)
 
-static inline unsigned ipv6_addr_scope2type(unsigned scope)
+static inline unsigned int ipv6_addr_scope2type(unsigned int scope)
 {
-	switch(scope) {
+	switch (scope) {
 	case IPV6_ADDR_SCOPE_NODELOCAL:
 		return (IPV6_ADDR_SCOPE_TYPE(IPV6_ADDR_SCOPE_NODELOCAL) |
 			IPV6_ADDR_LOOPBACK);
@@ -50,6 +51,9 @@ int __ipv6_addr_type(const struct in6_addr *addr)
 	if ((st & htonl(0xFFC00000)) == htonl(0xFEC00000))
 		return (IPV6_ADDR_SITELOCAL | IPV6_ADDR_UNICAST |
 			IPV6_ADDR_SCOPE_TYPE(IPV6_ADDR_SCOPE_SITELOCAL));		/* addr-select 3.1 */
+	if ((st & htonl(0xFE000000)) == htonl(0xFC000000))
+		return (IPV6_ADDR_UNICAST |
+			IPV6_ADDR_SCOPE_TYPE(IPV6_ADDR_SCOPE_GLOBAL));			/* RFC 4193 */
 
 	if ((addr->s6_addr32[0] | addr->s6_addr32[1]) == 0) {
 		if (addr->s6_addr32[2] == 0) {
@@ -69,7 +73,7 @@ int __ipv6_addr_type(const struct in6_addr *addr)
 				IPV6_ADDR_SCOPE_TYPE(IPV6_ADDR_SCOPE_GLOBAL));	/* addr-select 3.3 */
 	}
 
-	return (IPV6_ADDR_RESERVED |
+	return (IPV6_ADDR_UNICAST |
 		IPV6_ADDR_SCOPE_TYPE(IPV6_ADDR_SCOPE_GLOBAL));	/* addr-select 3.4 */
 }
 EXPORT_SYMBOL(__ipv6_addr_type);

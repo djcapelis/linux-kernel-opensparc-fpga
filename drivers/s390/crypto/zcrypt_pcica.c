@@ -1,9 +1,7 @@
 /*
- *  linux/drivers/s390/crypto/zcrypt_pcica.c
- *
  *  zcrypt 2.1.0
  *
- *  Copyright (C)  2001, 2006 IBM Corporation
+ *  Copyright IBM Corp. 2001, 2006
  *  Author(s): Robert Burroughs
  *	       Eric Rossman (edrossma@us.ibm.com)
  *
@@ -27,9 +25,10 @@
  */
 
 #include <linux/module.h>
+#include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/err.h>
-#include <asm/atomic.h>
+#include <linux/atomic.h>
 #include <asm/uaccess.h>
 
 #include "ap_bus.h"
@@ -52,13 +51,11 @@ static struct ap_device_id zcrypt_pcica_ids[] = {
 	{ /* end of list */ },
 };
 
-#ifndef CONFIG_ZCRYPT_MONOLITHIC
 MODULE_DEVICE_TABLE(ap, zcrypt_pcica_ids);
 MODULE_AUTHOR("IBM Corporation");
 MODULE_DESCRIPTION("PCICA Cryptographic Coprocessor device driver, "
-		   "Copyright 2001, 2006 IBM Corporation");
+		   "Copyright IBM Corp. 2001, 2006");
 MODULE_LICENSE("GPL");
-#endif
 
 static int zcrypt_pcica_probe(struct ap_device *ap_dev);
 static void zcrypt_pcica_remove(struct ap_device *ap_dev);
@@ -68,8 +65,8 @@ static void zcrypt_pcica_receive(struct ap_device *, struct ap_message *,
 static struct ap_driver zcrypt_pcica_driver = {
 	.probe = zcrypt_pcica_probe,
 	.remove = zcrypt_pcica_remove,
-	.receive = zcrypt_pcica_receive,
 	.ids = zcrypt_pcica_ids,
+	.request_timeout = PCICA_CLEANUP_TIME,
 };
 
 /**
@@ -225,9 +222,6 @@ static int convert_response(struct zcrypt_device *zdev,
 		return convert_type84(zdev, reply,
 				      outputdata, outputdatalength);
 	default: /* Unknown response type, this should NEVER EVER happen */
-		PRINTK("Unrecognized Message Header: %08x%08x\n",
-		       *(unsigned int *) reply->message,
-		       *(unsigned int *) (reply->message+4));
 		zdev->online = 0;
 		return -EAGAIN;	/* repeat the request on a different device. */
 	}
@@ -249,17 +243,21 @@ static void zcrypt_pcica_receive(struct ap_device *ap_dev,
 		.type = TYPE82_RSP_CODE,
 		.reply_code = REP82_ERROR_MACHINE_FAILURE,
 	};
-	struct type84_hdr *t84h = reply->message;
+	struct type84_hdr *t84h;
 	int length;
 
 	/* Copy the reply message to the request message buffer. */
-	if (IS_ERR(reply))
+	if (IS_ERR(reply)) {
 		memcpy(msg->message, &error_reply, sizeof(error_reply));
-	else if (t84h->code == TYPE84_RSP_CODE) {
+		goto out;
+	}
+	t84h = reply->message;
+	if (t84h->code == TYPE84_RSP_CODE) {
 		length = min(PCICA_MAX_RESPONSE_SIZE, (int) t84h->len);
 		memcpy(msg->message, reply->message, length);
 	} else
 		memcpy(msg->message, reply->message, sizeof error_reply);
+out:
 	complete((struct completion *) msg->private);
 }
 
@@ -279,9 +277,11 @@ static long zcrypt_pcica_modexpo(struct zcrypt_device *zdev,
 	struct completion work;
 	int rc;
 
+	ap_init_message(&ap_msg);
 	ap_msg.message = kmalloc(PCICA_MAX_MESSAGE_SIZE, GFP_KERNEL);
 	if (!ap_msg.message)
 		return -ENOMEM;
+	ap_msg.receive = zcrypt_pcica_receive;
 	ap_msg.psmid = (((unsigned long long) current->pid) << 32) +
 				atomic_inc_return(&zcrypt_step);
 	ap_msg.private = &work;
@@ -290,18 +290,13 @@ static long zcrypt_pcica_modexpo(struct zcrypt_device *zdev,
 		goto out_free;
 	init_completion(&work);
 	ap_queue_message(zdev->ap_dev, &ap_msg);
-	rc = wait_for_completion_interruptible_timeout(
-				&work, PCICA_CLEANUP_TIME);
-	if (rc > 0)
+	rc = wait_for_completion_interruptible(&work);
+	if (rc == 0)
 		rc = convert_response(zdev, &ap_msg, mex->outputdata,
 				      mex->outputdatalength);
-	else {
-		/* Signal pending or message timed out. */
+	else
+		/* Signal pending. */
 		ap_cancel_message(zdev->ap_dev, &ap_msg);
-		if (rc == 0)
-			/* Message timed out. */
-			rc = -ETIME;
-	}
 out_free:
 	kfree(ap_msg.message);
 	return rc;
@@ -321,9 +316,11 @@ static long zcrypt_pcica_modexpo_crt(struct zcrypt_device *zdev,
 	struct completion work;
 	int rc;
 
+	ap_init_message(&ap_msg);
 	ap_msg.message = kmalloc(PCICA_MAX_MESSAGE_SIZE, GFP_KERNEL);
 	if (!ap_msg.message)
 		return -ENOMEM;
+	ap_msg.receive = zcrypt_pcica_receive;
 	ap_msg.psmid = (((unsigned long long) current->pid) << 32) +
 				atomic_inc_return(&zcrypt_step);
 	ap_msg.private = &work;
@@ -332,18 +329,13 @@ static long zcrypt_pcica_modexpo_crt(struct zcrypt_device *zdev,
 		goto out_free;
 	init_completion(&work);
 	ap_queue_message(zdev->ap_dev, &ap_msg);
-	rc = wait_for_completion_interruptible_timeout(
-				&work, PCICA_CLEANUP_TIME);
-	if (rc > 0)
+	rc = wait_for_completion_interruptible(&work);
+	if (rc == 0)
 		rc = convert_response(zdev, &ap_msg, crt->outputdata,
 				      crt->outputdatalength);
-	else {
-		/* Signal pending or message timed out. */
+	else
+		/* Signal pending. */
 		ap_cancel_message(zdev->ap_dev, &ap_msg);
-		if (rc == 0)
-			/* Message timed out. */
-			rc = -ETIME;
-	}
 out_free:
 	kfree(ap_msg.message);
 	return rc;
@@ -378,6 +370,7 @@ static int zcrypt_pcica_probe(struct ap_device *ap_dev)
 	zdev->min_mod_size = PCICA_MIN_MOD_SIZE;
 	zdev->max_mod_size = PCICA_MAX_MOD_SIZE;
 	zdev->speed_rating = PCICA_SPEED_RATING;
+	zdev->max_exp_bit_length = PCICA_MAX_MOD_SIZE;
 	ap_dev->reply = &zdev->reply;
 	ap_dev->private = zdev;
 	rc = zcrypt_device_register(zdev);
@@ -412,7 +405,5 @@ void zcrypt_pcica_exit(void)
 	ap_driver_unregister(&zcrypt_pcica_driver);
 }
 
-#ifndef CONFIG_ZCRYPT_MONOLITHIC
 module_init(zcrypt_pcica_init);
 module_exit(zcrypt_pcica_exit);
-#endif

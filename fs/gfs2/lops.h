@@ -1,6 +1,6 @@
 /*
  * Copyright (C) Sistina Software, Inc.  1997-2003 All rights reserved.
- * Copyright (C) 2004-2006 Red Hat, Inc.  All rights reserved.
+ * Copyright (C) 2004-2008 Red Hat, Inc.  All rights reserved.
  *
  * This copyrighted material is made available to anyone wishing to use,
  * modify, copy, or redistribute it subject to the terms and conditions
@@ -13,6 +13,13 @@
 #include <linux/list.h>
 #include "incore.h"
 
+#define BUF_OFFSET \
+	((sizeof(struct gfs2_log_descriptor) + sizeof(__be64) - 1) & \
+	 ~(sizeof(__be64) - 1))
+#define DATABUF_OFFSET \
+	((sizeof(struct gfs2_log_descriptor) + (2 * sizeof(__be64) - 1)) & \
+	 ~(2 * sizeof(__be64) - 1))
+
 extern const struct gfs2_log_operations gfs2_glock_lops;
 extern const struct gfs2_log_operations gfs2_buf_lops;
 extern const struct gfs2_log_operations gfs2_revoke_lops;
@@ -20,27 +27,36 @@ extern const struct gfs2_log_operations gfs2_rg_lops;
 extern const struct gfs2_log_operations gfs2_databuf_lops;
 
 extern const struct gfs2_log_operations *gfs2_log_ops[];
+extern void gfs2_log_write_page(struct gfs2_sbd *sdp, struct page *page);
+extern void gfs2_log_flush_bio(struct gfs2_sbd *sdp, int rw);
 
-static inline void lops_init_le(struct gfs2_log_element *le,
+static inline unsigned int buf_limit(struct gfs2_sbd *sdp)
+{
+	unsigned int limit;
+
+	limit = (sdp->sd_sb.sb_bsize - BUF_OFFSET) / sizeof(__be64);
+	return limit;
+}
+
+static inline unsigned int databuf_limit(struct gfs2_sbd *sdp)
+{
+	unsigned int limit;
+
+	limit = (sdp->sd_sb.sb_bsize - DATABUF_OFFSET) / (2 * sizeof(__be64));
+	return limit;
+}
+
+static inline void lops_init_le(struct gfs2_bufdata *bd,
 				const struct gfs2_log_operations *lops)
 {
-	INIT_LIST_HEAD(&le->le_list);
-	le->le_ops = lops;
+	INIT_LIST_HEAD(&bd->bd_list);
+	bd->bd_ops = lops;
 }
 
-static inline void lops_add(struct gfs2_sbd *sdp, struct gfs2_log_element *le)
+static inline void lops_add(struct gfs2_sbd *sdp, struct gfs2_bufdata *bd)
 {
-	if (le->le_ops->lo_add)
-		le->le_ops->lo_add(sdp, le);
-}
-
-static inline void lops_incore_commit(struct gfs2_sbd *sdp,
-				      struct gfs2_trans *tr)
-{
-	int x;
-	for (x = 0; gfs2_log_ops[x]; x++)
-		if (gfs2_log_ops[x]->lo_incore_commit)
-			gfs2_log_ops[x]->lo_incore_commit(sdp, tr);
+	if (bd->bd_ops->lo_add)
+		bd->bd_ops->lo_add(sdp, bd);
 }
 
 static inline void lops_before_commit(struct gfs2_sbd *sdp)

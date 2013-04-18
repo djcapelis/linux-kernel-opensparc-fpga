@@ -5,8 +5,6 @@
  *
  * Author: Arjan Van De Ven <arjanv@redhat.com>
  * Loosly based on i82365.c from the pcmcia-cs package
- *
- * $Id: i82092aa.c,v 1.2 2001/10/23 14:43:34 arjanv Exp $
  */
 
 #include <linux/kernel.h>
@@ -17,11 +15,8 @@
 #include <linux/interrupt.h>
 #include <linux/device.h>
 
-#include <pcmcia/cs_types.h>
 #include <pcmcia/ss.h>
-#include <pcmcia/cs.h>
 
-#include <asm/system.h>
 #include <asm/io.h>
 
 #include "i82092aa.h"
@@ -30,38 +25,17 @@
 MODULE_LICENSE("GPL");
 
 /* PCI core routines */
-static struct pci_device_id i82092aa_pci_ids[] = {
-	{
-	      .vendor = PCI_VENDOR_ID_INTEL,
-	      .device = PCI_DEVICE_ID_INTEL_82092AA_0,
-	      .subvendor = PCI_ANY_ID,
-	      .subdevice = PCI_ANY_ID,
-	 },
-	 {} 
+static DEFINE_PCI_DEVICE_TABLE(i82092aa_pci_ids) = {
+	{ PCI_DEVICE(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82092AA_0) },
+	{ }
 };
 MODULE_DEVICE_TABLE(pci, i82092aa_pci_ids);
 
-#ifdef CONFIG_PM
-static int i82092aa_socket_suspend (struct pci_dev *dev, pm_message_t state)
-{
-	return pcmcia_socket_dev_suspend(&dev->dev, state);
-}
-
-static int i82092aa_socket_resume (struct pci_dev *dev)
-{
-	return pcmcia_socket_dev_resume(&dev->dev);
-}
-#endif
-
-static struct pci_driver i82092aa_pci_drv = {
+static struct pci_driver i82092aa_pci_driver = {
 	.name           = "i82092aa",
 	.id_table       = i82092aa_pci_ids,
 	.probe          = i82092aa_pci_probe,
-	.remove         = __devexit_p(i82092aa_pci_remove),
-#ifdef CONFIG_PM
-	.suspend        = i82092aa_socket_suspend,
-	.resume         = i82092aa_socket_resume,
-#endif
+	.remove         = i82092aa_pci_remove,
 };
 
 
@@ -74,7 +48,7 @@ static struct pccard_operations i82092aa_operations = {
 	.set_mem_map		= i82092aa_set_mem_map,
 };
 
-/* The card can do upto 4 sockets, allocate a structure for each of them */
+/* The card can do up to 4 sockets, allocate a structure for each of them */
 
 struct socket_info {
 	int	number;
@@ -82,7 +56,7 @@ struct socket_info {
 				    1 = empty socket, 
 				    2 = card but not initialized,
 				    3 = operational card */
-	kio_addr_t io_base; 	/* base io address of the socket */
+	unsigned int io_base; 	/* base io address of the socket */
 	
 	struct pcmcia_socket socket;
 	struct pci_dev *dev;	/* The PCI device for the socket */
@@ -93,7 +67,7 @@ static struct socket_info sockets[MAX_SOCKETS];
 static int socket_count;  /* shortcut */                                  	                                	
 
 
-static int __devinit i82092aa_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
+static int i82092aa_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 {
 	unsigned char configbyte;
 	int i, ret;
@@ -135,6 +109,7 @@ static int __devinit i82092aa_pci_probe(struct pci_dev *dev, const struct pci_de
 		sockets[i].socket.map_size = 0x1000;
 		sockets[i].socket.irq_mask = 0;
 		sockets[i].socket.pci_irq  = dev->irq;
+		sockets[i].socket.cb_dev  = dev;
 		sockets[i].socket.owner = THIS_MODULE;
 
 		sockets[i].number = i;
@@ -187,7 +162,7 @@ err_out_disable:
 	return ret;			
 }
 
-static void __devexit i82092aa_pci_remove(struct pci_dev *dev)
+static void i82092aa_pci_remove(struct pci_dev *dev)
 {
 	struct pcmcia_socket *socket = pci_get_drvdata(dev);
 
@@ -647,7 +622,12 @@ static int i82092aa_set_mem_map(struct pcmcia_socket *socket, struct pccard_mem_
 	if ( (mem->card_start > 0x3ffffff) || (region.start > region.end) ||
 	     (mem->speed > 1000) ) {
 		leave("i82092aa_set_mem_map: invalid address / speed");
-		printk("invalid mem map for socket %i : %lx to %lx with a start of %x \n",sock,region.start, region.end, mem->card_start);
+		printk("invalid mem map for socket %i: %llx to %llx with a "
+			"start of %x\n",
+			sock,
+			(unsigned long long)region.start,
+			(unsigned long long)region.end,
+			mem->card_start);
 		return -EINVAL;
 	}
 	
@@ -709,13 +689,13 @@ static int i82092aa_set_mem_map(struct pcmcia_socket *socket, struct pccard_mem_
 
 static int i82092aa_module_init(void)
 {
-	return pci_register_driver(&i82092aa_pci_drv);
+	return pci_register_driver(&i82092aa_pci_driver);
 }
 
 static void i82092aa_module_exit(void)
 {
 	enter("i82092aa_module_exit");
-	pci_unregister_driver(&i82092aa_pci_drv);
+	pci_unregister_driver(&i82092aa_pci_driver);
 	if (sockets[0].io_base>0)
 			 release_region(sockets[0].io_base, 2);
 	leave("i82092aa_module_exit");

@@ -27,12 +27,6 @@
 #include <sound/hwdep.h>
 #include <linux/interrupt.h>
 
-#if defined(CONFIG_FW_LOADER) || defined(CONFIG_FW_LOADER_MODULE)
-#if !defined(CONFIG_USE_VXLOADER) && !defined(CONFIG_SND_VX_LIB) /* built-in kernel */
-#define SND_VX_FW_LOADER	/* use the standard firmware loader */
-#endif
-#endif
-
 struct firmware;
 struct device;
 
@@ -235,37 +229,31 @@ irqreturn_t snd_vx_irq_handler(int irq, void *dev);
  */
 static inline int vx_test_and_ack(struct vx_core *chip)
 {
-	snd_assert(chip->ops->test_and_ack, return -ENXIO);
 	return chip->ops->test_and_ack(chip);
 }
 
 static inline void vx_validate_irq(struct vx_core *chip, int enable)
 {
-	snd_assert(chip->ops->validate_irq, return);
 	chip->ops->validate_irq(chip, enable);
 }
 
 static inline unsigned char snd_vx_inb(struct vx_core *chip, int reg)
 {
-	snd_assert(chip->ops->in8, return 0);
 	return chip->ops->in8(chip, reg);
 }
 
 static inline unsigned int snd_vx_inl(struct vx_core *chip, int reg)
 {
-	snd_assert(chip->ops->in32, return 0);
 	return chip->ops->in32(chip, reg);
 }
 
 static inline void snd_vx_outb(struct vx_core *chip, int reg, unsigned char val)
 {
-	snd_assert(chip->ops->out8, return);
 	chip->ops->out8(chip, reg, val);
 }
 
 static inline void snd_vx_outl(struct vx_core *chip, int reg, unsigned int val)
 {
-	snd_assert(chip->ops->out32, return);
 	chip->ops->out32(chip, reg, val);
 }
 
@@ -276,7 +264,6 @@ static inline void snd_vx_outl(struct vx_core *chip, int reg, unsigned int val)
 
 static inline void vx_reset_dsp(struct vx_core *chip)
 {
-	snd_assert(chip->ops->reset_dsp, return);
 	chip->ops->reset_dsp(chip);
 }
 
@@ -304,14 +291,12 @@ int snd_vx_check_reg_bit(struct vx_core *chip, int reg, int mask, int bit, int t
 static inline void vx_pseudo_dma_write(struct vx_core *chip, struct snd_pcm_runtime *runtime,
 				       struct vx_pipe *pipe, int count)
 {
-	snd_assert(chip->ops->dma_write, return);
 	chip->ops->dma_write(chip, runtime, pipe, count);
 }
 
 static inline void vx_pseudo_dma_read(struct vx_core *chip, struct snd_pcm_runtime *runtime,
 				      struct vx_pipe *pipe, int count)
 {
-	snd_assert(chip->ops->dma_read, return);
 	chip->ops->dma_read(chip, runtime, pipe, count);
 }
 
@@ -350,7 +335,7 @@ int vx_change_frequency(struct vx_core *chip);
 /*
  * PM
  */
-int snd_vx_suspend(struct vx_core *card, pm_message_t state);
+int snd_vx_suspend(struct vx_core *card);
 int snd_vx_resume(struct vx_core *card);
 
 /*

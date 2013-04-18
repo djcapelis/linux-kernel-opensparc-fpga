@@ -1,4 +1,3 @@
-// $Id: vmax301.c,v 1.32 2005/11/07 11:14:29 gleixner Exp $
 /* ######################################################################
 
    Tempustech VMAX SBC301 MTD Driver.
@@ -17,7 +16,6 @@
    ##################################################################### */
 
 #include <linux/module.h>
-#include <linux/slab.h>
 #include <linux/ioport.h>
 #include <linux/init.h>
 #include <linux/spinlock.h>
@@ -140,14 +138,14 @@ static void __exit cleanup_vmax301(void)
 
 	for (i=0; i<2; i++) {
 		if (vmax_mtd[i]) {
-			del_mtd_device(vmax_mtd[i]);
+			mtd_device_unregister(vmax_mtd[i]);
 			map_destroy(vmax_mtd[i]);
 		}
 	}
 	iounmap((void *)vmax_map[0].map_priv_1 - WINDOW_START);
 }
 
-int __init init_vmax301(void)
+static int __init init_vmax301(void)
 {
 	int i;
 	unsigned long iomapadr;
@@ -178,7 +176,7 @@ int __init init_vmax301(void)
 			vmax_mtd[i] = do_map_probe("map_rom", &vmax_map[i]);
 		if (vmax_mtd[i]) {
 			vmax_mtd[i]->owner = THIS_MODULE;
-			add_mtd_device(vmax_mtd[i]);
+			mtd_device_register(vmax_mtd[i], NULL, 0);
 		}
 	}
 

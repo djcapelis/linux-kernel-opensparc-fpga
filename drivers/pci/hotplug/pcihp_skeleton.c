@@ -59,7 +59,7 @@ static LIST_HEAD(slot_list);
 #define warn(format, arg...) printk(KERN_WARNING "%s: " format "\n", MY_NAME , ## arg)
 
 /* local variables */
-static int debug;
+static bool debug;
 static int num_slots;
 
 #define DRIVER_VERSION	"0.3"
@@ -82,7 +82,6 @@ static int get_latch_status	(struct hotplug_slot *slot, u8 *value);
 static int get_adapter_status	(struct hotplug_slot *slot, u8 *value);
 
 static struct hotplug_slot_ops skel_hotplug_slot_ops = {
-	.owner =		THIS_MODULE,
 	.enable_slot =		enable_slot,
 	.disable_slot =		disable_slot,
 	.set_attention_status =	set_attention_status,
@@ -98,7 +97,7 @@ static int enable_slot(struct hotplug_slot *hotplug_slot)
 	struct slot *slot = hotplug_slot->private;
 	int retval = 0;
 
-	dbg("%s - physical_slot = %s\n", __FUNCTION__, hotplug_slot->name);
+	dbg("%s - physical_slot = %s\n", __func__, hotplug_slot->name);
 
 	/*
 	 * Fill in code here to enable the specified slot
@@ -112,7 +111,7 @@ static int disable_slot(struct hotplug_slot *hotplug_slot)
 	struct slot *slot = hotplug_slot->private;
 	int retval = 0;
 
-	dbg("%s - physical_slot = %s\n", __FUNCTION__, hotplug_slot->name);
+	dbg("%s - physical_slot = %s\n", __func__, hotplug_slot->name);
 
 	/*
 	 * Fill in code here to disable the specified slot
@@ -126,7 +125,7 @@ static int set_attention_status(struct hotplug_slot *hotplug_slot, u8 status)
 	struct slot *slot = hotplug_slot->private;
 	int retval = 0;
 
-	dbg("%s - physical_slot = %s\n", __FUNCTION__, hotplug_slot->name);
+	dbg("%s - physical_slot = %s\n", __func__, hotplug_slot->name);
 
 	switch (status) {
 		case 0:
@@ -151,7 +150,7 @@ static int hardware_test(struct hotplug_slot *hotplug_slot, u32 value)
 	struct slot *slot = hotplug_slot->private;
 	int retval = 0;
 
-	dbg("%s - physical_slot = %s\n", __FUNCTION__, hotplug_slot->name);
+	dbg("%s - physical_slot = %s\n", __func__, hotplug_slot->name);
 
 	switch (value) {
 		case 0:
@@ -170,7 +169,7 @@ static int get_power_status(struct hotplug_slot *hotplug_slot, u8 *value)
 	struct slot *slot = hotplug_slot->private;
 	int retval = 0;
 
-	dbg("%s - physical_slot = %s\n", __FUNCTION__, hotplug_slot->name);
+	dbg("%s - physical_slot = %s\n", __func__, hotplug_slot->name);
 
 	/*
 	 * Fill in logic to get the current power status of the specific
@@ -185,7 +184,7 @@ static int get_attention_status(struct hotplug_slot *hotplug_slot, u8 *value)
 	struct slot *slot = hotplug_slot->private;
 	int retval = 0;
 
-	dbg("%s - physical_slot = %s\n", __FUNCTION__, hotplug_slot->name);
+	dbg("%s - physical_slot = %s\n", __func__, hotplug_slot->name);
 
 	/*
 	 * Fill in logic to get the current attention status of the specific
@@ -200,7 +199,7 @@ static int get_latch_status(struct hotplug_slot *hotplug_slot, u8 *value)
 	struct slot *slot = hotplug_slot->private;
 	int retval = 0;
 
-	dbg("%s - physical_slot = %s\n", __FUNCTION__, hotplug_slot->name);
+	dbg("%s - physical_slot = %s\n", __func__, hotplug_slot->name);
 
 	/*
 	 * Fill in logic to get the current latch status of the specific
@@ -215,7 +214,7 @@ static int get_adapter_status(struct hotplug_slot *hotplug_slot, u8 *value)
 	struct slot *slot = hotplug_slot->private;
 	int retval = 0;
 
-	dbg("%s - physical_slot = %s\n", __FUNCTION__, hotplug_slot->name);
+	dbg("%s - physical_slot = %s\n", __func__, hotplug_slot->name);
 
 	/*
 	 * Fill in logic to get the current adapter status of the specific
@@ -229,7 +228,7 @@ static void release_slot(struct hotplug_slot *hotplug_slot)
 {
 	struct slot *slot = hotplug_slot->private;
 
-	dbg("%s - physical_slot = %s\n", __FUNCTION__, hotplug_slot->name);
+	dbg("%s - physical_slot = %s\n", __func__, hotplug_slot->name);
 	kfree(slot->hotplug_slot->info);
 	kfree(slot->hotplug_slot);
 	kfree(slot);
@@ -253,7 +252,7 @@ static int __init init_slots(void)
 	struct slot *slot;
 	struct hotplug_slot *hotplug_slot;
 	struct hotplug_slot_info *info;
-	int retval = -ENOMEM;
+	int retval;
 	int i;
 
 	/*
@@ -262,17 +261,23 @@ static int __init init_slots(void)
 	 */
 	for (i = 0; i < num_slots; ++i) {
 		slot = kzalloc(sizeof(*slot), GFP_KERNEL);
-		if (!slot)
+		if (!slot) {
+			retval = -ENOMEM;
 			goto error;
+		}
 
 		hotplug_slot = kzalloc(sizeof(*hotplug_slot), GFP_KERNEL);
-		if (!hotplug_slot)
+		if (!hotplug_slot) {
+			retval = -ENOMEM;
 			goto error_slot;
+		}
 		slot->hotplug_slot = hotplug_slot;
 
 		info = kzalloc(sizeof(*info), GFP_KERNEL);
-		if (!info)
+		if (!info) {
+			retval = -ENOMEM;
 			goto error_hpslot;
+		}
 		hotplug_slot->info = info;
 
 		slot->number = i;

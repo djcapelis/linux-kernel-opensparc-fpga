@@ -1,92 +1,79 @@
-# arch/arm/plat-s3c24xx/Kconfig
-#
 # Copyright 2007 Simtec Electronics
 #
 # Licensed under GPLv2
 
 config PLAT_S3C24XX
 	bool
-	depends on ARCH_S3C2410
-	default y if ARCH_S3C2410
+	depends on ARCH_S3C24XX
+	default y
+	select ARCH_REQUIRE_GPIOLIB
 	select NO_IOPORT
+	select S3C_DEV_NAND
 	help
-	  Base platform code for any Samsung S3C device
+	  Base platform code for any Samsung S3C24XX device
 
 if PLAT_S3C24XX
 
-config CPU_S3C244X
+# low-level serial option nodes
+
+config CPU_LLSERIAL_S3C2410_ONLY
 	bool
-	depends on ARCH_S3C2410 && (CPU_S3C2440 || CPU_S3C2442)
-	help
-	  Support for S3C2440 and S3C2442 Samsung Mobile CPU based systems.
+	default y if CPU_LLSERIAL_S3C2410 && !CPU_LLSERIAL_S3C2440
 
-config PM_SIMTEC
+config CPU_LLSERIAL_S3C2440_ONLY
+	bool
+	default y if CPU_LLSERIAL_S3C2440 && !CPU_LLSERIAL_S3C2410
+
+config CPU_LLSERIAL_S3C2410
 	bool
 	help
-	  Common power management code for systems that are
-	  compatible with the Simtec style of power management
+	  Selected if there is an S3C2410 (or register compatible) serial
+	  low-level implementation needed
 
-config S3C2410_BOOT_WATCHDOG
-	bool "S3C2410 Initialisation watchdog"
-	depends on ARCH_S3C2410 && S3C2410_WATCHDOG
+config CPU_LLSERIAL_S3C2440
+	bool
 	help
-	  Say y to enable the watchdog during the kernel decompression
-	  stage. If the kernel fails to uncompress, then the watchdog
-	  will trigger a reset and the system should restart.
+	  Selected if there is an S3C2440 (or register compatible) serial
+	  low-level implementation needed
 
-config S3C2410_BOOT_ERROR_RESET
-	bool "S3C2410 Reboot on decompression error"
-	depends on ARCH_S3C2410
+# code that is shared between a number of the s3c24xx implementations
+
+config S3C2410_CLOCK
+	bool
 	help
-	  Say y here to use the watchdog to reset the system if the
-	  kernel decompressor detects an error during decompression.
+	  Clock code for the S3C2410, and similar processors which
+	  is currently includes the S3C2410, S3C2440, S3C2442.
 
-config S3C2410_PM_DEBUG
-	bool "S3C2410 PM Suspend debug"
-	depends on ARCH_S3C2410 && PM
+config S3C24XX_DCLK
+	bool
 	help
-	  Say Y here if you want verbose debugging from the PM Suspend and
-	  Resume code. See <file:Documentation/arm/Samsung-S3C24XX/Suspend.txt>
-	  for more information.
+	  Clock code for supporting DCLK/CLKOUT on S3C24XX architectures
 
-config S3C2410_PM_CHECK
-	bool "S3C2410 PM Suspend Memory CRC"
-	depends on ARCH_S3C2410 && PM && CRC32
-	help
- 	  Enable the PM code's memory area checksum over sleep. This option
-	  will generate CRCs of all blocks of memory, and store them before
-	  going to sleep. The blocks are then checked on resume for any
-	  errors.
+# gpio configurations
 
-	  Note, this can take several seconds depending on memory size
-	  and CPU speed.
-
-	  See <file:Documentation/arm/Samsung-S3C24XX/Suspend.txt>
-
-config S3C2410_PM_CHECK_CHUNKSIZE
-	int "S3C2410 PM Suspend CRC Chunksize (KiB)"
-	depends on ARCH_S3C2410 && PM && S3C2410_PM_CHECK
-	default 64
-	help
-	  Set the chunksize in Kilobytes of the CRC for checking memory
-	  corruption over suspend and resume. A smaller value will mean that
-	  the CRC data block will take more memory, but wil identify any
-	  faults with better precision.
-
-	  See <file:Documentation/arm/Samsung-S3C24XX/Suspend.txt>
-
-config S3C2410_LOWLEVEL_UART_PORT
-	int "S3C2410 UART to use for low-level messages"
+config S3C24XX_GPIO_EXTRA
+	int
+	default 128 if S3C24XX_GPIO_EXTRA128
+	default 64 if S3C24XX_GPIO_EXTRA64
+	default 16 if ARCH_H1940
 	default 0
-	help
-	  Choice of which UART port to use for the low-level messages,
-	  such as the `Uncompressing...` at start time. The value of
-	  this configuration should be between zero and two. The port
-	  must have been initialised by the boot-loader before use.
 
-config S3C2410_DMA
+config S3C24XX_GPIO_EXTRA64
+	bool
+	help
+	  Add an extra 64 gpio numbers to the available GPIO pool. This is
+	  available for boards that need extra gpios for external devices.
+
+config S3C24XX_GPIO_EXTRA128
+	bool
+	help
+	  Add an extra 128 gpio numbers to the available GPIO pool. This is
+	  available for boards that need extra gpios for external devices.
+
+config S3C24XX_DMA
 	bool "S3C2410 DMA support"
-	depends on ARCH_S3C2410
+	depends on ARCH_S3C24XX
+	select S3C_DMA
 	help
 	  S3C2410 DMA support. This is needed for drivers like sound which
 	  use the S3C2410's DMA system to move data to and from the
@@ -94,14 +81,36 @@ config S3C2410_DMA
 
 config S3C2410_DMA_DEBUG
 	bool "S3C2410 DMA support debug"
-	depends on ARCH_S3C2410 && S3C2410_DMA
+	depends on ARCH_S3C24XX && S3C2410_DMA
 	help
 	  Enable debugging output for the DMA code. This option sends info
 	  to the kernel log, at priority KERN_DEBUG.
 
-config MACH_SMDK
+# common code for s3c24xx based machines, such as the SMDKs.
+
+# cpu frequency items common between s3c2410 and s3c2440/s3c2442
+
+config S3C2410_IOTIMING
 	bool
+	depends on CPU_FREQ_S3C24XX
 	help
-	  Common machine code for SMDK2410 and SMDK2440
+	  Internal node to select io timing code that is common to the s3c2410
+	  and s3c2440/s3c2442 cpu frequency support.
+
+config S3C2410_CPUFREQ_UTILS
+	bool
+	depends on CPU_FREQ_S3C24XX
+	help
+	  Internal node to select timing code that is common to the s3c2410
+	  and s3c2440/s3c244 cpu frequency support.
+
+# cpu frequency support common to s3c2412, s3c2413 and s3c2442
+
+config S3C2412_IOTIMING
+	bool
+	depends on CPU_FREQ_S3C24XX && (CPU_S3C2412 || CPU_S3C2443)
+	help
+	  Intel node to select io timing code that is common to the s3c2412
+	  and the s3c2443.
 
 endif

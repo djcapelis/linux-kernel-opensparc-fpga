@@ -1,18 +1,16 @@
 /*
- * linux/fs/nfsd/nfs3acl.c
- *
  * Process version 3 NFSACL requests.
  *
  * Copyright (C) 2002-2003 Andreas Gruenbacher <agruen@suse.de>
  */
 
-#include <linux/sunrpc/svc.h>
-#include <linux/nfs3.h>
-#include <linux/nfsd/nfsd.h>
-#include <linux/nfsd/cache.h>
-#include <linux/nfsd/xdr3.h>
-#include <linux/posix_acl.h>
+#include "nfsd.h"
+/* FIXME: nfsacl.h is a broken header */
 #include <linux/nfsacl.h>
+#include <linux/gfp.h>
+#include "cache.h"
+#include "xdr3.h"
+#include "vfs.h"
 
 #define RETURN_STATUS(st)	{ resp->status = (st); return (st); }
 
@@ -36,8 +34,9 @@ static __be32 nfsd3_proc_getacl(struct svc_rqst * rqstp,
 	__be32 nfserr = 0;
 
 	fh = fh_copy(&resp->fh, &argp->fh);
-	if ((nfserr = fh_verify(rqstp, &resp->fh, 0, MAY_NOP)))
-		RETURN_STATUS(nfserr_inval);
+	nfserr = fh_verify(rqstp, &resp->fh, 0, NFSD_MAY_NOP);
+	if (nfserr)
+		RETURN_STATUS(nfserr);
 
 	if (argp->mask & ~(NFS_ACL|NFS_ACLCNT|NFS_DFACL|NFS_DFACLCNT))
 		RETURN_STATUS(nfserr_inval);
@@ -101,7 +100,7 @@ static __be32 nfsd3_proc_setacl(struct svc_rqst * rqstp,
 	__be32 nfserr = 0;
 
 	fh = fh_copy(&resp->fh, &argp->fh);
-	nfserr = fh_verify(rqstp, &resp->fh, 0, MAY_SATTR);
+	nfserr = fh_verify(rqstp, &resp->fh, 0, NFSD_MAY_SATTR);
 
 	if (!nfserr) {
 		nfserr = nfserrno( nfsd_set_posix_acl(
@@ -185,7 +184,7 @@ static int nfs3svc_encode_getaclres(struct svc_rqst *rqstp, __be32 *p,
 			(resp->mask & NFS_ACL)   ? resp->acl_access  : NULL,
 			(resp->mask & NFS_DFACL) ? resp->acl_default : NULL);
 		while (w > 0) {
-			if (!rqstp->rq_respages[rqstp->rq_resused++])
+			if (!*(rqstp->rq_next_page++))
 				return 0;
 			w -= PAGE_SIZE;
 		}
@@ -263,6 +262,6 @@ struct svc_version	nfsd_acl_version3 = {
 		.vs_proc	= nfsd_acl_procedures3,
 		.vs_dispatch	= nfsd_dispatch,
 		.vs_xdrsize	= NFS3_SVC_XDRSIZE,
-		.vs_hidden	= 1,
+		.vs_hidden	= 0,
 };
 

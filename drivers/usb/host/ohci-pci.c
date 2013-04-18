@@ -18,6 +18,10 @@
 #error "This file is PCI bus glue.  CONFIG_PCI must be defined."
 #endif
 
+#include <linux/pci.h>
+#include <linux/io.h>
+
+
 /*-------------------------------------------------------------------------*/
 
 static int broken_suspend(struct usb_hcd *hcd)
@@ -84,7 +88,7 @@ static int ohci_quirk_zfmicro(struct usb_hcd *hcd)
 	struct ohci_hcd	*ohci = hcd_to_ohci (hcd);
 
 	ohci->flags |= OHCI_QUIRK_ZFMICRO;
-	ohci_dbg (ohci, "enabled Compaq ZFMicro chipset quirk\n");
+	ohci_dbg(ohci, "enabled Compaq ZFMicro chipset quirks\n");
 
 	return 0;
 }
@@ -111,6 +115,79 @@ static int ohci_quirk_toshiba_scc(struct usb_hcd *hcd)
 #endif
 }
 
+/* Check for NEC chip and apply quirk for allegedly lost interrupts.
+ */
+
+static void ohci_quirk_nec_worker(struct work_struct *work)
+{
+	struct ohci_hcd *ohci = container_of(work, struct ohci_hcd, nec_work);
+	int status;
+
+	status = ohci_init(ohci);
+	if (status != 0) {
+		ohci_err(ohci, "Restarting NEC controller failed in %s, %d\n",
+			 "ohci_init", status);
+		return;
+	}
+
+	status = ohci_restart(ohci);
+	if (status != 0)
+		ohci_err(ohci, "Restarting NEC controller failed in %s, %d\n",
+			 "ohci_restart", status);
+}
+
+static int ohci_quirk_nec(struct usb_hcd *hcd)
+{
+	struct ohci_hcd	*ohci = hcd_to_ohci (hcd);
+
+	ohci->flags |= OHCI_QUIRK_NEC;
+	INIT_WORK(&ohci->nec_work, ohci_quirk_nec_worker);
+	ohci_dbg (ohci, "enabled NEC chipset lost interrupt quirk\n");
+
+	return 0;
+}
+
+static int ohci_quirk_amd700(struct usb_hcd *hcd)
+{
+	struct ohci_hcd *ohci = hcd_to_ohci(hcd);
+	struct pci_dev *amd_smbus_dev;
+	u8 rev;
+
+	if (usb_amd_find_chipset_info())
+		ohci->flags |= OHCI_QUIRK_AMD_PLL;
+
+	amd_smbus_dev = pci_get_device(PCI_VENDOR_ID_ATI,
+			PCI_DEVICE_ID_ATI_SBX00_SMBUS, NULL);
+	if (!amd_smbus_dev)
+		return 0;
+
+	rev = amd_smbus_dev->revision;
+
+	/* SB800 needs pre-fetch fix */
+	if ((rev >= 0x40) && (rev <= 0x4f)) {
+		ohci->flags |= OHCI_QUIRK_AMD_PREFETCH;
+		ohci_dbg(ohci, "enabled AMD prefetch quirk\n");
+	}
+
+	pci_dev_put(amd_smbus_dev);
+	amd_smbus_dev = NULL;
+
+	return 0;
+}
+
+static void sb800_prefetch(struct ohci_hcd *ohci, int on)
+{
+	struct pci_dev *pdev;
+	u16 misc;
+
+	pdev = to_pci_dev(ohci_to_hcd(ohci)->self.controller);
+	pci_read_config_word(pdev, 0x50, &misc);
+	if (on == 0)
+		pci_write_config_word(pdev, 0x50, misc & 0xfcff);
+	else
+		pci_write_config_word(pdev, 0x50, misc | 0x0300);
+}
+
 /* List of quirks for OHCI */
 static const struct pci_device_id ohci_pci_quirks[] = {
 	{
@@ -134,6 +211,10 @@ static const struct pci_device_id ohci_pci_quirks[] = {
 		.driver_data = (unsigned long)ohci_quirk_toshiba_scc,
 	},
 	{
+		PCI_DEVICE(PCI_VENDOR_ID_NEC, PCI_DEVICE_ID_NEC_USB),
+		.driver_data = (unsigned long)ohci_quirk_nec,
+	},
+	{
 		/* Toshiba portege 4000 */
 		.vendor		= PCI_VENDOR_ID_AL,
 		.device		= 0x5237,
@@ -145,6 +226,19 @@ static const struct pci_device_id ohci_pci_quirks[] = {
 		PCI_DEVICE(PCI_VENDOR_ID_ITE, 0x8152),
 		.driver_data = (unsigned long) broken_suspend,
 	},
+	{
+		PCI_DEVICE(PCI_VENDOR_ID_ATI, 0x4397),
+		.driver_data = (unsigned long)ohci_quirk_amd700,
+	},
+	{
+		PCI_DEVICE(PCI_VENDOR_ID_ATI, 0x4398),
+		.driver_data = (unsigned long)ohci_quirk_amd700,
+	},
+	{
+		PCI_DEVICE(PCI_VENDOR_ID_ATI, 0x4399),
+		.driver_data = (unsigned long)ohci_quirk_amd700,
+	},
+
 	/* FIXME for some of the early AMD 760 southbridges, OHCI
 	 * won't work at all.  blacklist them.
 	 */
@@ -176,7 +270,7 @@ static int ohci_pci_reset (struct usb_hcd *hcd)
 }
 
 
-static int __devinit ohci_pci_start (struct usb_hcd *hcd)
+static int ohci_pci_start (struct usb_hcd *hcd)
 {
 	struct ohci_hcd	*ohci = hcd_to_ohci (hcd);
 	int		ret;
@@ -187,9 +281,9 @@ static int __devinit ohci_pci_start (struct usb_hcd *hcd)
 
 		/* RWC may not be set for add-in PCI cards, since boot
 		 * firmware probably ignored them.  This transfers PCI
-		 * PM wakeup capabilities (once the PCI layer is fixed).
+		 * PM wakeup capabilities.
 		 */
-		if (device_may_wakeup(&pdev->dev))
+		if (device_can_wakeup(&pdev->dev))
 			ohci->hc_control |= OHCI_CTRL_RWC;
 	}
 #endif /* CONFIG_PM */
@@ -201,51 +295,6 @@ static int __devinit ohci_pci_start (struct usb_hcd *hcd)
 	}
 	return ret;
 }
-
-#ifdef	CONFIG_PM
-
-static int ohci_pci_suspend (struct usb_hcd *hcd, pm_message_t message)
-{
-	struct ohci_hcd	*ohci = hcd_to_ohci (hcd);
-	unsigned long	flags;
-	int		rc = 0;
-
-	/* Root hub was already suspended. Disable irq emission and
-	 * mark HW unaccessible, bail out if RH has been resumed. Use
-	 * the spinlock to properly synchronize with possible pending
-	 * RH suspend or resume activity.
-	 *
-	 * This is still racy as hcd->state is manipulated outside of
-	 * any locks =P But that will be a different fix.
-	 */
-	spin_lock_irqsave (&ohci->lock, flags);
-	if (hcd->state != HC_STATE_SUSPENDED) {
-		rc = -EINVAL;
-		goto bail;
-	}
-	ohci_writel(ohci, OHCI_INTR_MIE, &ohci->regs->intrdisable);
-	(void)ohci_readl(ohci, &ohci->regs->intrdisable);
-
-	/* make sure snapshot being resumed re-enumerates everything */
-	if (message.event == PM_EVENT_PRETHAW)
-		ohci_usb_reset(ohci);
-
-	clear_bit(HCD_FLAG_HW_ACCESSIBLE, &hcd->flags);
- bail:
-	spin_unlock_irqrestore (&ohci->lock, flags);
-
-	return rc;
-}
-
-
-static int ohci_pci_resume (struct usb_hcd *hcd)
-{
-	set_bit(HCD_FLAG_HW_ACCESSIBLE, &hcd->flags);
-	usb_hcd_resume_root_hub(hcd);
-	return 0;
-}
-
-#endif	/* CONFIG_PM */
 
 
 /*-------------------------------------------------------------------------*/
@@ -270,9 +319,8 @@ static const struct hc_driver ohci_pci_hc_driver = {
 	.shutdown =		ohci_shutdown,
 
 #ifdef	CONFIG_PM
-	/* these suspend/resume entries are for upstream PCI glue ONLY */
-	.suspend =		ohci_pci_suspend,
-	.resume =		ohci_pci_resume,
+	.pci_suspend =		ohci_suspend,
+	.pci_resume =		ohci_resume,
 #endif
 
 	/*
@@ -292,7 +340,6 @@ static const struct hc_driver ohci_pci_hc_driver = {
 	 */
 	.hub_status_data =	ohci_hub_status_data,
 	.hub_control =		ohci_hub_control,
-	.hub_irq_enable =	ohci_rhsc_enable,
 #ifdef	CONFIG_PM
 	.bus_suspend =		ohci_bus_suspend,
 	.bus_resume =		ohci_bus_resume,
@@ -307,6 +354,10 @@ static const struct pci_device_id pci_ids [] = { {
 	/* handle any USB OHCI controller */
 	PCI_DEVICE_CLASS(PCI_CLASS_SERIAL_USB_OHCI, ~0),
 	.driver_data =	(unsigned long) &ohci_pci_hc_driver,
+	}, {
+	/* The device in the ConneXT I/O hub has no class reg */
+	PCI_VDEVICE(STMICRO, PCI_DEVICE_ID_STMICRO_USB_OHCI),
+	.driver_data =	(unsigned long) &ohci_pci_hc_driver,
 	}, { /* end: all zeroes */ }
 };
 MODULE_DEVICE_TABLE (pci, pci_ids);
@@ -318,12 +369,11 @@ static struct pci_driver ohci_pci_driver = {
 
 	.probe =	usb_hcd_pci_probe,
 	.remove =	usb_hcd_pci_remove,
-
-#ifdef	CONFIG_PM
-	.suspend =	usb_hcd_pci_suspend,
-	.resume =	usb_hcd_pci_resume,
-#endif
-
 	.shutdown =	usb_hcd_pci_shutdown,
-};
 
+#ifdef CONFIG_PM_SLEEP
+	.driver =	{
+		.pm =	&usb_hcd_pci_pm_ops
+	},
+#endif
+};

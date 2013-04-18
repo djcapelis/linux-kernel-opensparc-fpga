@@ -1,10 +1,10 @@
 /*
- * Interface between low level (hardware) drivers and 
+ * Interface between low level (hardware) drivers and
  * HiSax protocol stack
  *
  * Author       Kai Germaschewski
  * Copyright    2001 by Kai Germaschewski  <kai.germaschewski@gmx.de>
- * 
+ *
  * This software may be used and distributed according to the terms
  * of the GNU General Public License, incorporated herein by reference.
  *
@@ -56,7 +56,7 @@ struct hisax_d_if {
 	struct IsdnCardState *cs;
 	struct hisax_b_if *b_if[2];
 	struct sk_buff_head erq;
-	long ph_state;
+	unsigned long ph_state;
 };
 
 int hisax_register(struct hisax_d_if *hisax_if, struct hisax_b_if *b_if[],

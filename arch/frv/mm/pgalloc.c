@@ -10,7 +10,7 @@
  */
 
 #include <linux/sched.h>
-#include <linux/slab.h>
+#include <linux/gfp.h>
 #include <linux/mm.h>
 #include <linux/highmem.h>
 #include <linux/quicklist.h>
@@ -28,7 +28,7 @@ pte_t *pte_alloc_one_kernel(struct mm_struct *mm, unsigned long address)
 	return pte;
 }
 
-struct page *pte_alloc_one(struct mm_struct *mm, unsigned long address)
+pgtable_t pte_alloc_one(struct mm_struct *mm, unsigned long address)
 {
 	struct page *page;
 
@@ -37,9 +37,11 @@ struct page *pte_alloc_one(struct mm_struct *mm, unsigned long address)
 #else
 	page = alloc_pages(GFP_KERNEL|__GFP_REPEAT, 0);
 #endif
-	if (page)
+	if (page) {
 		clear_highpage(page);
-	flush_dcache_page(page);
+		pgtable_page_ctor(page);
+		flush_dcache_page(page);
+	}
 	return page;
 }
 
@@ -75,7 +77,7 @@ void __set_pmd(pmd_t *pmdptr, unsigned long pmd)
  * checks at dup_mmap(), exec(), and other mmlist addition points
  * could be used. The locking scheme was chosen on the basis of
  * manfred's recommendations and having no core impact whatsoever.
- * -- wli
+ * -- nyc
  */
 DEFINE_SPINLOCK(pgd_lock);
 struct page *pgd_list;
@@ -131,16 +133,10 @@ void pgd_dtor(void *pgd)
 
 pgd_t *pgd_alloc(struct mm_struct *mm)
 {
-	pgd_t *pgd;
-
-	pgd = quicklist_alloc(0, GFP_KERNEL, pgd_ctor);
-	if (!pgd)
-		return pgd;
-
-	return pgd;
+	return quicklist_alloc(0, GFP_KERNEL, pgd_ctor);
 }
 
-void pgd_free(pgd_t *pgd)
+void pgd_free(struct mm_struct *mm, pgd_t *pgd)
 {
 	/* in the non-PAE case, clear_page_tables() clears user pgd entries */
  	quicklist_free(0, pgd_dtor, pgd);

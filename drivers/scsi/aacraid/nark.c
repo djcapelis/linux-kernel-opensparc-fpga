@@ -1,11 +1,11 @@
 /*
  *	Adaptec AAC series RAID controller driver
- *	(c) Copyright 2001 Red Hat Inc.	<alan@redhat.com>
  *
  * based on the old aacraid driver that is..
  * Adaptec aacraid device driver for Linux.
  *
- * Copyright (c) 2000 Adaptec, Inc. (aacraid@adaptec.com)
+ * Copyright (c) 2000-2010 Adaptec, Inc.
+ *               2010 PMC-Sierra, Inc. (aacraid@pmc-sierra.com)
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -49,14 +49,14 @@ static int aac_nark_ioremap(struct aac_dev * dev, u32 size)
 		dev->base = NULL;
 		return 0;
 	}
-	dev->scsi_host_ptr->base = pci_resource_start(dev->pdev, 2);
+	dev->base_start = pci_resource_start(dev->pdev, 2);
 	dev->regs.rx = ioremap((u64)pci_resource_start(dev->pdev, 0) |
 	  ((u64)pci_resource_start(dev->pdev, 1) << 32),
 	  sizeof(struct rx_registers) - sizeof(struct rx_inbound));
 	dev->base = NULL;
 	if (dev->regs.rx == NULL)
 		return -1;
-	dev->base = ioremap(dev->scsi_host_ptr->base, size);
+	dev->base = ioremap(dev->base_start, size);
 	if (dev->base == NULL) {
 		iounmap(dev->regs.rx);
 		dev->regs.rx = NULL;

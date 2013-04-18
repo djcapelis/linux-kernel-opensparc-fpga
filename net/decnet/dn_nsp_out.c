@@ -1,4 +1,3 @@
-
 /*
  * DECnet       An implementation of the DECnet protocol suite for the LINUX
  *              operating system.  DECnet is implemented using the  BSD Socket
@@ -50,8 +49,8 @@
 #include <linux/netdevice.h>
 #include <linux/inet.h>
 #include <linux/route.h>
+#include <linux/slab.h>
 #include <net/sock.h>
-#include <asm/system.h>
 #include <linux/fcntl.h>
 #include <linux/mm.h>
 #include <linux/termios.h>
@@ -77,7 +76,7 @@ static void dn_nsp_send(struct sk_buff *skb)
 	struct sock *sk = skb->sk;
 	struct dn_scp *scp = DN_SK(sk);
 	struct dst_entry *dst;
-	struct flowi fl;
+	struct flowidn fld;
 
 	skb_reset_transport_header(skb);
 	scp->stamp = jiffies;
@@ -85,18 +84,18 @@ static void dn_nsp_send(struct sk_buff *skb)
 	dst = sk_dst_check(sk, 0);
 	if (dst) {
 try_again:
-		skb->dst = dst;
+		skb_dst_set(skb, dst);
 		dst_output(skb);
 		return;
 	}
 
-	memset(&fl, 0, sizeof(fl));
-	fl.oif = sk->sk_bound_dev_if;
-	fl.fld_src = dn_saddr2dn(&scp->addr);
-	fl.fld_dst = dn_saddr2dn(&scp->peer);
-	dn_sk_ports_copy(&fl, scp);
-	fl.proto = DNPROTO_NSP;
-	if (dn_route_output_sock(&sk->sk_dst_cache, &fl, sk, 0) == 0) {
+	memset(&fld, 0, sizeof(fld));
+	fld.flowidn_oif = sk->sk_bound_dev_if;
+	fld.saddr = dn_saddr2dn(&scp->addr);
+	fld.daddr = dn_saddr2dn(&scp->peer);
+	dn_sk_ports_copy(&fld, scp);
+	fld.flowidn_proto = DNPROTO_NSP;
+	if (dn_route_output_sock(&sk->sk_dst_cache, &fld, sk, 0) == 0) {
 		dst = sk_dst_get(sk);
 		sk->sk_route_caps = dst->dev->features;
 		goto try_again;
@@ -124,7 +123,7 @@ struct sk_buff *dn_alloc_skb(struct sock *sk, int size, gfp_t pri)
 	if ((skb = alloc_skb(size + hdr, pri)) == NULL)
 		return NULL;
 
-	skb->protocol = __constant_htons(ETH_P_DNA_RT);
+	skb->protocol = htons(ETH_P_DNA_RT);
 	skb->pkt_type = PACKET_OUTGOING;
 
 	if (sk)
@@ -209,7 +208,7 @@ static void dn_nsp_rtt(struct sock *sk, long rtt)
  *
  * Returns: The number of times the packet has been sent previously
  */
-static inline unsigned dn_nsp_clone_and_send(struct sk_buff *skb,
+static inline unsigned int dn_nsp_clone_and_send(struct sk_buff *skb,
 					     gfp_t gfp)
 {
 	struct dn_skb_cb *cb = DN_SKB_CB(skb);
@@ -230,7 +229,6 @@ static inline unsigned dn_nsp_clone_and_send(struct sk_buff *skb,
 /**
  * dn_nsp_output - Try and send something from socket queues
  * @sk: The socket whose queues are to be investigated
- * @gfp: The memory allocation flags
  *
  * Try and send the packet on the end of the data and other data queues.
  * Other data gets priority over data, and if we retransmit a packet we
@@ -241,7 +239,7 @@ void dn_nsp_output(struct sock *sk)
 {
 	struct dn_scp *scp = DN_SK(sk);
 	struct sk_buff *skb;
-	unsigned reduce_win = 0;
+	unsigned int reduce_win = 0;
 
 	/*
 	 * First we check for otherdata/linkservice messages
@@ -324,10 +322,10 @@ static __le16 *dn_mk_ack_header(struct sock *sk, struct sk_buff *skb, unsigned c
 	/* Set "cross subchannel" bit in ackcrs */
 	ackcrs |= 0x2000;
 
-	ptr = (__le16 *)dn_mk_common_header(scp, skb, msgflag, hlen);
+	ptr = dn_mk_common_header(scp, skb, msgflag, hlen);
 
-	*ptr++ = dn_htons(acknum);
-	*ptr++ = dn_htons(ackcrs);
+	*ptr++ = cpu_to_le16(acknum);
+	*ptr++ = cpu_to_le16(ackcrs);
 
 	return ptr;
 }
@@ -345,7 +343,7 @@ static __le16 *dn_nsp_mk_data_header(struct sock *sk, struct sk_buff *skb, int o
 		cb->segnum = scp->numdat;
 		seq_add(&scp->numdat, 1);
 	}
-	*(ptr++) = dn_htons(cb->segnum);
+	*(ptr++) = cpu_to_le16(cb->segnum);
 
 	return ptr;
 }
@@ -383,7 +381,7 @@ int dn_nsp_check_xmit_queue(struct sock *sk, struct sk_buff *skb, struct sk_buff
 {
 	struct dn_skb_cb *cb = DN_SKB_CB(skb);
 	struct dn_scp *scp = DN_SK(sk);
-	struct sk_buff *skb2, *list, *ack = NULL;
+	struct sk_buff *skb2, *n, *ack = NULL;
 	int wakeup = 0;
 	int try_retrans = 0;
 	unsigned long reftime = cb->stamp;
@@ -391,17 +389,13 @@ int dn_nsp_check_xmit_queue(struct sock *sk, struct sk_buff *skb, struct sk_buff
 	unsigned short xmit_count;
 	unsigned short segnum;
 
-	skb2 = q->next;
-	list = (struct sk_buff *)q;
-	while(list != skb2) {
+	skb_queue_walk_safe(q, skb2, n) {
 		struct dn_skb_cb *cb2 = DN_SKB_CB(skb2);
 
 		if (dn_before_or_equal(cb2->segnum, acknum))
 			ack = skb2;
 
 		/* printk(KERN_DEBUG "ack: %s %04x %04x\n", ack ? "ACK" : "SKIP", (int)cb2->segnum, (int)acknum); */
-
-		skb2 = skb2->next;
 
 		if (ack == NULL)
 			continue;
@@ -523,7 +517,7 @@ void dn_send_conn_conf(struct sock *sk, gfp_t gfp)
 	struct dn_scp *scp = DN_SK(sk);
 	struct sk_buff *skb = NULL;
 	struct nsp_conn_init_msg *msg;
-	__u8 len = (__u8)dn_ntohs(scp->conndata_out.opt_optl);
+	__u8 len = (__u8)le16_to_cpu(scp->conndata_out.opt_optl);
 
 	if ((skb = dn_alloc_skb(sk, 50 + len, gfp)) == NULL)
 		return;
@@ -534,7 +528,7 @@ void dn_send_conn_conf(struct sock *sk, gfp_t gfp)
 	msg->srcaddr = scp->addrloc;
 	msg->services = scp->services_loc;
 	msg->info = scp->info_loc;
-	msg->segsize = dn_htons(scp->segsize_loc);
+	msg->segsize = cpu_to_le16(scp->segsize_loc);
 
 	*skb_put(skb,1) = len;
 
@@ -559,8 +553,8 @@ static __inline__ void dn_nsp_do_disc(struct sock *sk, unsigned char msgflg,
 	unsigned char *msg;
 
 	if ((dst == NULL) || (rem == 0)) {
-		if (net_ratelimit())
-			printk(KERN_DEBUG "DECnet: dn_nsp_do_disc: BUG! Please report this to SteveW@ACM.org rem=%u dst=%p\n", dn_ntohs(rem), dst);
+		net_dbg_ratelimited("DECnet: dn_nsp_do_disc: BUG! Please report this to SteveW@ACM.org rem=%u dst=%p\n",
+				    le16_to_cpu(rem), dst);
 		return;
 	}
 
@@ -573,7 +567,7 @@ static __inline__ void dn_nsp_do_disc(struct sock *sk, unsigned char msgflg,
 	msg += 2;
 	*(__le16 *)msg = loc;
 	msg += 2;
-	*(__le16 *)msg = dn_htons(reason);
+	*(__le16 *)msg = cpu_to_le16(reason);
 	msg += 2;
 	if (msgflg == NSP_DISCINIT)
 		*msg++ = ddl;
@@ -587,7 +581,7 @@ static __inline__ void dn_nsp_do_disc(struct sock *sk, unsigned char msgflg,
 	 * to be able to send disc packets out which have no socket
 	 * associations.
 	 */
-	skb->dst = dst_clone(dst);
+	skb_dst_set(skb, dst_clone(dst));
 	dst_output(skb);
 }
 
@@ -599,10 +593,10 @@ void dn_nsp_send_disc(struct sock *sk, unsigned char msgflg,
 	int ddl = 0;
 
 	if (msgflg == NSP_DISCINIT)
-		ddl = dn_ntohs(scp->discdata_out.opt_optl);
+		ddl = le16_to_cpu(scp->discdata_out.opt_optl);
 
 	if (reason == 0)
-		reason = dn_ntohs(scp->discdata_out.opt_status);
+		reason = le16_to_cpu(scp->discdata_out.opt_status);
 
 	dn_nsp_do_disc(sk, msgflg, reason, gfp, sk->sk_dst_cache, ddl,
 		scp->discdata_out.opt_data, scp->addrrem, scp->addrloc);
@@ -616,7 +610,7 @@ void dn_nsp_return_disc(struct sk_buff *skb, unsigned char msgflg,
 	int ddl = 0;
 	gfp_t gfp = GFP_ATOMIC;
 
-	dn_nsp_do_disc(NULL, msgflg, reason, gfp, skb->dst, ddl,
+	dn_nsp_do_disc(NULL, msgflg, reason, gfp, skb_dst(skb), ddl,
 			NULL, cb->src_port, cb->dst_port);
 }
 
@@ -676,7 +670,7 @@ void dn_nsp_send_conninit(struct sock *sk, unsigned char msgflg)
 	msg->srcaddr	= scp->addrloc;
 	msg->services	= scp->services_loc;	/* Requested flow control    */
 	msg->info	= scp->info_loc;	/* Version Number            */
-	msg->segsize	= dn_htons(scp->segsize_loc);	/* Max segment size  */
+	msg->segsize	= cpu_to_le16(scp->segsize_loc);	/* Max segment size  */
 
 	if (scp->peer.sdn_objnum)
 		type = 0;
@@ -697,22 +691,22 @@ void dn_nsp_send_conninit(struct sock *sk, unsigned char msgflg)
 	aux = scp->accessdata.acc_userl;
 	*skb_put(skb, 1) = aux;
 	if (aux > 0)
-	memcpy(skb_put(skb, aux), scp->accessdata.acc_user, aux);
+		memcpy(skb_put(skb, aux), scp->accessdata.acc_user, aux);
 
 	aux = scp->accessdata.acc_passl;
 	*skb_put(skb, 1) = aux;
 	if (aux > 0)
-	memcpy(skb_put(skb, aux), scp->accessdata.acc_pass, aux);
+		memcpy(skb_put(skb, aux), scp->accessdata.acc_pass, aux);
 
 	aux = scp->accessdata.acc_accl;
 	*skb_put(skb, 1) = aux;
 	if (aux > 0)
-	memcpy(skb_put(skb, aux), scp->accessdata.acc_acc, aux);
+		memcpy(skb_put(skb, aux), scp->accessdata.acc_acc, aux);
 
-	aux = (__u8)dn_ntohs(scp->conndata_out.opt_optl);
+	aux = (__u8)le16_to_cpu(scp->conndata_out.opt_optl);
 	*skb_put(skb, 1) = aux;
 	if (aux > 0)
-	memcpy(skb_put(skb,aux), scp->conndata_out.opt_data, aux);
+		memcpy(skb_put(skb, aux), scp->conndata_out.opt_data, aux);
 
 	scp->persist = dn_nsp_persist(sk);
 	scp->persist_fxn = dn_nsp_retrans_conninit;

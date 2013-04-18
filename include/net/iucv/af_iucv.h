@@ -14,6 +14,7 @@
 #include <linux/list.h>
 #include <linux/poll.h>
 #include <linux/socket.h>
+#include <net/iucv/iucv.h>
 
 #ifndef AF_IUCV
 #define AF_IUCV		32
@@ -26,13 +27,13 @@ enum {
 	IUCV_OPEN,
 	IUCV_BOUND,
 	IUCV_LISTEN,
-	IUCV_SEVERED,
 	IUCV_DISCONN,
 	IUCV_CLOSING,
 	IUCV_CLOSED
 };
 
 #define IUCV_QUEUELEN_DEFAULT	65535
+#define IUCV_HIPER_MSGLIM_DEFAULT	128
 #define IUCV_CONN_TIMEOUT	(HZ * 40)
 #define IUCV_DISCONN_TIMEOUT	(HZ * 2)
 #define IUCV_CONN_IDLE_TIMEOUT	(HZ * 60)
@@ -50,8 +51,58 @@ struct sockaddr_iucv {
 
 
 /* Common socket structures and functions */
+struct sock_msg_q {
+	struct iucv_path	*path;
+	struct iucv_message	msg;
+	struct list_head	list;
+	spinlock_t		lock;
+};
+
+#define AF_IUCV_FLAG_ACK 0x1
+#define AF_IUCV_FLAG_SYN 0x2
+#define AF_IUCV_FLAG_FIN 0x4
+#define AF_IUCV_FLAG_WIN 0x8
+#define AF_IUCV_FLAG_SHT 0x10
+
+struct af_iucv_trans_hdr {
+	u16 magic;
+	u8 version;
+	u8 flags;
+	u16 window;
+	char destNodeID[8];
+	char destUserID[8];
+	char destAppName[16];
+	char srcNodeID[8];
+	char srcUserID[8];
+	char srcAppName[16];             /* => 70 bytes */
+	struct iucv_message iucv_hdr;    /* => 33 bytes */
+	u8 pad;                          /* total 104 bytes */
+} __packed;
+
+enum iucv_tx_notify {
+	/* transmission of skb is completed and was successful */
+	TX_NOTIFY_OK = 0,
+	/* target is unreachable */
+	TX_NOTIFY_UNREACHABLE = 1,
+	/* transfer pending queue full */
+	TX_NOTIFY_TPQFULL = 2,
+	/* general error */
+	TX_NOTIFY_GENERALERROR = 3,
+	/* transmission of skb is pending - may interleave
+	 * with TX_NOTIFY_DELAYED_* */
+	TX_NOTIFY_PENDING = 4,
+	/* transmission of skb was done successfully (delayed) */
+	TX_NOTIFY_DELAYED_OK = 5,
+	/* target unreachable (detected delayed) */
+	TX_NOTIFY_DELAYED_UNREACHABLE = 6,
+	/* general error (detected delayed) */
+	TX_NOTIFY_DELAYED_GENERALERROR = 7,
+};
 
 #define iucv_sk(__sk) ((struct iucv_sock *) __sk)
+
+#define AF_IUCV_TRANS_IUCV 0
+#define AF_IUCV_TRANS_HIPER 1
 
 struct iucv_sock {
 	struct sock		sk;
@@ -60,12 +111,32 @@ struct iucv_sock {
 	char			dst_user_id[8];
 	char			dst_name[8];
 	struct list_head	accept_q;
+	spinlock_t		accept_q_lock;
 	struct sock		*parent;
 	struct iucv_path	*path;
+	struct net_device	*hs_dev;
 	struct sk_buff_head	send_skb_q;
 	struct sk_buff_head	backlog_skb_q;
+	struct sock_msg_q	message_q;
 	unsigned int		send_tag;
+	u8			flags;
+	u16			msglimit;
+	u16			msglimit_peer;
+	atomic_t		msg_sent;
+	atomic_t		msg_recv;
+	atomic_t		pendings;
+	int			transport;
+	void                    (*sk_txnotify)(struct sk_buff *skb,
+					       enum iucv_tx_notify n);
 };
+
+/* iucv socket options (SOL_IUCV) */
+#define SO_IPRMDATA_MSG	0x0080		/* send/recv IPRM_DATA msgs */
+#define SO_MSGLIMIT	0x1000		/* get/set IUCV MSGLIMIT */
+#define SO_MSGSIZE	0x0800		/* get maximum msgsize */
+
+/* iucv related control messages (scm) */
+#define SCM_IUCV_TRGCLS	0x0001		/* target class control message */
 
 struct iucv_sock_list {
 	struct hlist_head head;
@@ -73,34 +144,10 @@ struct iucv_sock_list {
 	atomic_t	  autobind_name;
 };
 
-static void iucv_sock_destruct(struct sock *sk);
-static void iucv_sock_cleanup_listen(struct sock *parent);
-static void iucv_sock_kill(struct sock *sk);
-static void iucv_sock_close(struct sock *sk);
-static int  iucv_sock_create(struct socket *sock, int proto);
-static int  iucv_sock_bind(struct socket *sock, struct sockaddr *addr,
-			int addr_len);
-static int  iucv_sock_connect(struct socket *sock, struct sockaddr *addr,
-			      int alen, int flags);
-static int  iucv_sock_listen(struct socket *sock, int backlog);
-static int  iucv_sock_accept(struct socket *sock, struct socket *newsock,
-			     int flags);
-static int  iucv_sock_getname(struct socket *sock, struct sockaddr *addr,
-			      int *len, int peer);
-static int  iucv_sock_sendmsg(struct kiocb *iocb, struct socket *sock,
-			      struct msghdr *msg, size_t len);
-static int  iucv_sock_recvmsg(struct kiocb *iocb, struct socket *sock,
-			      struct msghdr *msg, size_t len, int flags);
 unsigned int iucv_sock_poll(struct file *file, struct socket *sock,
 			    poll_table *wait);
-static int iucv_sock_release(struct socket *sock);
-static int iucv_sock_shutdown(struct socket *sock, int how);
-
 void iucv_sock_link(struct iucv_sock_list *l, struct sock *s);
 void iucv_sock_unlink(struct iucv_sock_list *l, struct sock *s);
-int  iucv_sock_wait_state(struct sock *sk, int state, int state2,
-			  unsigned long timeo);
-int  iucv_sock_wait_cnt(struct sock *sk, unsigned long timeo);
 void iucv_accept_enqueue(struct sock *parent, struct sock *sk);
 void iucv_accept_unlink(struct sock *sk);
 struct sock *iucv_accept_dequeue(struct sock *parent, struct socket *newsock);

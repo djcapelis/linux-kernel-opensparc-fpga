@@ -1,6 +1,4 @@
 /*
- * $Id: dbox2-flash.c,v 1.14 2005/11/07 11:14:26 gleixner Exp $
- *
  * D-Box 2 flash driver
  */
 
@@ -71,7 +69,7 @@ struct map_info dbox2_flash_map = {
 	.phys		= WINDOW_ADDR,
 };
 
-int __init init_dbox2_flash(void)
+static int __init init_dbox2_flash(void)
 {
        	printk(KERN_NOTICE "D-Box 2 flash driver (size->0x%X mem->0x%X)\n", WINDOW_SIZE, WINDOW_ADDR);
 	dbox2_flash_map.virt = ioremap(WINDOW_ADDR, WINDOW_SIZE);
@@ -95,7 +93,7 @@ int __init init_dbox2_flash(void)
 		mymtd->owner = THIS_MODULE;
 
                 /* Create MTD devices for each partition. */
-	        add_mtd_partitions(mymtd, partition_info, NUM_PARTITIONS);
+		mtd_device_register(mymtd, partition_info, NUM_PARTITIONS);
 
 		return 0;
 	}
@@ -107,7 +105,7 @@ int __init init_dbox2_flash(void)
 static void __exit cleanup_dbox2_flash(void)
 {
 	if (mymtd) {
-		del_mtd_partitions(mymtd);
+		mtd_device_unregister(mymtd);
 		map_destroy(mymtd);
 	}
 	if (dbox2_flash_map.virt) {

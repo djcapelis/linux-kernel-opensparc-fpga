@@ -9,6 +9,7 @@
  * 2 of the License, or (at your option) any later version.
  */
 
+#include <linux/slab.h>
 #include <net/sock.h>
 #include <net/af_rxrpc.h>
 #include <rxrpc/packet.h>
@@ -99,6 +100,7 @@ int afs_open_socket(void)
 	ret = kernel_bind(socket, (struct sockaddr *) &srx, sizeof(srx));
 	if (ret < 0) {
 		sock_release(socket);
+		destroy_workqueue(afs_async_calls);
 		_leave(" = %d [bind]", ret);
 		return ret;
 	}
@@ -239,7 +241,8 @@ void afs_flat_call_destructor(struct afs_call *call)
 /*
  * attach the data from a bunch of pages on an inode to a call
  */
-int afs_send_pages(struct afs_call *call, struct msghdr *msg, struct kvec *iov)
+static int afs_send_pages(struct afs_call *call, struct msghdr *msg,
+			  struct kvec *iov)
 {
 	struct page *pages[8];
 	unsigned count, n, loop, offset, to;
@@ -311,6 +314,7 @@ int afs_make_call(struct in_addr *addr, struct afs_call *call, gfp_t gfp,
 	struct msghdr msg;
 	struct kvec iov[1];
 	int ret;
+	struct sk_buff *skb;
 
 	_enter("%x,{%d},", addr->s_addr, ntohs(call->port));
 
@@ -377,6 +381,8 @@ int afs_make_call(struct in_addr *addr, struct afs_call *call, gfp_t gfp,
 
 error_do_abort:
 	rxrpc_kernel_abort_call(rxcall, RX_USER_ABORT);
+	while ((skb = skb_dequeue(&call->rx_queue)))
+		afs_free_skb(skb);
 	rxrpc_kernel_end_call(rxcall);
 	call->rxcall = NULL;
 error_kill_call:
@@ -407,7 +413,7 @@ static void afs_rx_interceptor(struct sock *sk, unsigned long user_call_ID,
 	if (!call) {
 		/* its an incoming call for our callback service */
 		skb_queue_tail(&afs_incoming_calls, skb);
-		schedule_work(&afs_collect_incoming_call_work);
+		queue_work(afs_wq, &afs_collect_incoming_call_work);
 	} else {
 		/* route the messages directly to the appropriate call */
 		skb_queue_tail(&call->rx_queue, skb);
@@ -792,6 +798,7 @@ void afs_send_simple_reply(struct afs_call *call, const void *buf, size_t len)
 {
 	struct msghdr msg;
 	struct iovec iov[1];
+	int n;
 
 	_enter("");
 
@@ -806,22 +813,20 @@ void afs_send_simple_reply(struct afs_call *call, const void *buf, size_t len)
 	msg.msg_flags		= 0;
 
 	call->state = AFS_CALL_AWAIT_ACK;
-	switch (rxrpc_kernel_send_data(call->rxcall, &msg, len)) {
-	case 0:
+	n = rxrpc_kernel_send_data(call->rxcall, &msg, len);
+	if (n >= 0) {
 		_leave(" [replied]");
 		return;
-
-	case -ENOMEM:
+	}
+	if (n == -ENOMEM) {
 		_debug("oom");
 		rxrpc_kernel_abort_call(call->rxcall, RX_USER_ABORT);
-	default:
-		rxrpc_kernel_end_call(call->rxcall);
-		call->rxcall = NULL;
-		call->type->destructor(call);
-		afs_free_call(call);
-		_leave(" [error]");
-		return;
 	}
+	rxrpc_kernel_end_call(call->rxcall);
+	call->rxcall = NULL;
+	call->type->destructor(call);
+	afs_free_call(call);
+	_leave(" [error]");
 }
 
 /*

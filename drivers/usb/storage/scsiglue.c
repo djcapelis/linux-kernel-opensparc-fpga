@@ -1,8 +1,6 @@
 /* Driver for USB Mass Storage compliant devices
  * SCSI layer glue code
  *
- * $Id: scsiglue.c,v 1.26 2002/04/22 03:39:43 mdharm Exp $
- *
  * Current development and maintenance by:
  *   (c) 1999-2002 Matthew Dharm (mdharm-usb@one-eyed-alien.net)
  *
@@ -45,7 +43,6 @@
  * 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
-#include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 
@@ -61,19 +58,26 @@
 #include "transport.h"
 #include "protocol.h"
 
+/* Vendor IDs for companies that seem to include the READ CAPACITY bug
+ * in all their devices
+ */
+#define VENDOR_ID_NOKIA		0x0421
+#define VENDOR_ID_NIKON		0x04b0
+#define VENDOR_ID_PENTAX	0x0a17
+#define VENDOR_ID_MOTOROLA	0x22b8
+
 /***********************************************************************
  * Host functions 
  ***********************************************************************/
 
 static const char* host_info(struct Scsi_Host *host)
 {
-	return "SCSI emulation for USB Mass Storage devices";
+	struct us_data *us = host_to_us(host);
+	return us->scsi_name;
 }
 
 static int slave_alloc (struct scsi_device *sdev)
 {
-	struct us_data *us = host_to_us(sdev->host);
-
 	/*
 	 * Set the INQUIRY transfer length to 36.  We don't use any of
 	 * the extra data and many devices choke if asked for more or
@@ -81,17 +85,22 @@ static int slave_alloc (struct scsi_device *sdev)
 	 */
 	sdev->inquiry_len = 36;
 
-	/*
-	 * The UFI spec treates the Peripheral Qualifier bits in an
-	 * INQUIRY result as reserved and requires devices to set them
-	 * to 0.  However the SCSI spec requires these bits to be set
-	 * to 3 to indicate when a LUN is not present.
+	/* USB has unusual DMA-alignment requirements: Although the
+	 * starting address of each scatter-gather element doesn't matter,
+	 * the length of each element except the last must be divisible
+	 * by the Bulk maxpacket value.  There's currently no way to
+	 * express this by block-layer constraints, so we'll cop out
+	 * and simply require addresses to be aligned at 512-byte
+	 * boundaries.  This is okay since most block I/O involves
+	 * hardware sectors that are multiples of 512 bytes in length,
+	 * and since host controllers up through USB 2.0 have maxpacket
+	 * values no larger than 512.
 	 *
-	 * Let the scanning code know if this target merely sets
-	 * Peripheral Device Type to 0x1f to indicate no LUN.
+	 * But it doesn't suffice for Wireless USB, where Bulk maxpacket
+	 * values can be as large as 2048.  To make that work properly
+	 * will require changes to the block layer.
 	 */
-	if (us->subclass == US_SC_UFI)
-		sdev->sdev_target->pdt_1f_for_no_lun = 1;
+	blk_queue_update_dma_alignment(sdev->request_queue, (512 - 1));
 
 	return 0;
 }
@@ -100,33 +109,60 @@ static int slave_configure(struct scsi_device *sdev)
 {
 	struct us_data *us = host_to_us(sdev->host);
 
-	/* Scatter-gather buffers (all but the last) must have a length
-	 * divisible by the bulk maxpacket size.  Otherwise a data packet
-	 * would end up being short, causing a premature end to the data
-	 * transfer.  Since high-speed bulk pipes have a maxpacket size
-	 * of 512, we'll use that as the scsi device queue's DMA alignment
-	 * mask.  Guaranteeing proper alignment of the first buffer will
-	 * have the desired effect because, except at the beginning and
-	 * the end, scatter-gather buffers follow page boundaries. */
-	blk_queue_dma_alignment(sdev->request_queue, (512 - 1));
-
-	/* Many devices have trouble transfering more than 32KB at a time,
+	/* Many devices have trouble transferring more than 32KB at a time,
 	 * while others have trouble with more than 64K. At this time we
 	 * are limiting both to 32K (64 sectores).
 	 */
-	if ((us->flags & US_FL_MAX_SECTORS_64) &&
-			sdev->request_queue->max_sectors > 64)
-		blk_queue_max_sectors(sdev->request_queue, 64);
+	if (us->fflags & (US_FL_MAX_SECTORS_64 | US_FL_MAX_SECTORS_MIN)) {
+		unsigned int max_sectors = 64;
+
+		if (us->fflags & US_FL_MAX_SECTORS_MIN)
+			max_sectors = PAGE_CACHE_SIZE >> 9;
+		if (queue_max_hw_sectors(sdev->request_queue) > max_sectors)
+			blk_queue_max_hw_sectors(sdev->request_queue,
+					      max_sectors);
+	} else if (sdev->type == TYPE_TAPE) {
+		/* Tapes need much higher max_sector limits, so just
+		 * raise it to the maximum possible (4 GB / 512) and
+		 * let the queue segment size sort out the real limit.
+		 */
+		blk_queue_max_hw_sectors(sdev->request_queue, 0x7FFFFF);
+	}
+
+	/* Some USB host controllers can't do DMA; they have to use PIO.
+	 * They indicate this by setting their dma_mask to NULL.  For
+	 * such controllers we need to make sure the block layer sets
+	 * up bounce buffers in addressable memory.
+	 */
+	if (!us->pusb_dev->bus->controller->dma_mask)
+		blk_queue_bounce_limit(sdev->request_queue, BLK_BOUNCE_HIGH);
 
 	/* We can't put these settings in slave_alloc() because that gets
 	 * called before the device type is known.  Consequently these
 	 * settings can't be overridden via the scsi devinfo mechanism. */
 	if (sdev->type == TYPE_DISK) {
 
+		/* Some vendors seem to put the READ CAPACITY bug into
+		 * all their devices -- primarily makers of cell phones
+		 * and digital cameras.  Since these devices always use
+		 * flash media and can be expected to have an even number
+		 * of sectors, we will always enable the CAPACITY_HEURISTICS
+		 * flag unless told otherwise. */
+		switch (le16_to_cpu(us->pusb_dev->descriptor.idVendor)) {
+		case VENDOR_ID_NOKIA:
+		case VENDOR_ID_NIKON:
+		case VENDOR_ID_PENTAX:
+		case VENDOR_ID_MOTOROLA:
+			if (!(us->fflags & (US_FL_FIX_CAPACITY |
+					US_FL_CAPACITY_OK)))
+				us->fflags |= US_FL_CAPACITY_HEURISTICS;
+			break;
+		}
+
 		/* Disk-type devices use MODE SENSE(6) if the protocol
 		 * (SubClass) is Transparent SCSI, otherwise they use
 		 * MODE SENSE(10). */
-		if (us->subclass != US_SC_SCSI)
+		if (us->subclass != USB_SC_SCSI && us->subclass != USB_SC_CYP_ATACB)
 			sdev->use_10_for_ms = 1;
 
 		/* Many disks only accept MODE SENSE transfer lengths of
@@ -140,34 +176,47 @@ static int slave_configure(struct scsi_device *sdev)
 		 * majority of devices work fine, but a few still can't
 		 * handle it.  The sd driver will simply assume those
 		 * devices are write-enabled. */
-		if (us->flags & US_FL_NO_WP_DETECT)
+		if (us->fflags & US_FL_NO_WP_DETECT)
 			sdev->skip_ms_page_3f = 1;
 
 		/* A number of devices have problems with MODE SENSE for
 		 * page x08, so we will skip it. */
 		sdev->skip_ms_page_8 = 1;
 
+		/* Some devices don't handle VPD pages correctly */
+		sdev->skip_vpd_pages = 1;
+
+		/* Do not attempt to use REPORT SUPPORTED OPERATION CODES */
+		sdev->no_report_opcodes = 1;
+
+		/* Do not attempt to use WRITE SAME */
+		sdev->no_write_same = 1;
+
 		/* Some disks return the total number of blocks in response
 		 * to READ CAPACITY rather than the highest block number.
 		 * If this device makes that mistake, tell the sd driver. */
-		if (us->flags & US_FL_FIX_CAPACITY)
+		if (us->fflags & US_FL_FIX_CAPACITY)
 			sdev->fix_capacity = 1;
 
 		/* A few disks have two indistinguishable version, one of
 		 * which reports the correct capacity and the other does not.
 		 * The sd driver has to guess which is the case. */
-		if (us->flags & US_FL_CAPACITY_HEURISTICS)
+		if (us->fflags & US_FL_CAPACITY_HEURISTICS)
 			sdev->guess_capacity = 1;
 
-		/* Some devices report a SCSI revision level above 2 but are
-		 * unable to handle the REPORT LUNS command (for which
-		 * support is mandatory at level 3).  Since we already have
-		 * a Get-Max-LUN request, we won't lose much by setting the
-		 * revision level down to 2.  The only devices that would be
-		 * affected are those with sparse LUNs. */
-		if (sdev->scsi_level > SCSI_2)
-			sdev->sdev_target->scsi_level =
-					sdev->scsi_level = SCSI_2;
+		/* Some devices cannot handle READ_CAPACITY_16 */
+		if (us->fflags & US_FL_NO_READ_CAPACITY_16)
+			sdev->no_read_capacity_16 = 1;
+
+		/*
+		 * Many devices do not respond properly to READ_CAPACITY_16.
+		 * Tell the SCSI layer to try READ_CAPACITY_10 first.
+		 */
+		sdev->try_rc_10_first = 1;
+
+		/* assume SPC3 or latter devices support sense size > 18 */
+		if (sdev->scsi_level > SCSI_SPC_2)
+			us->fflags |= US_FL_SANE_SENSE;
 
 		/* USB-IDE bridges tend to report SK = 0x04 (Non-recoverable
 		 * Hardware Error) when any low-level error occurs,
@@ -177,12 +226,37 @@ static int slave_configure(struct scsi_device *sdev)
 		 * is an occasional series of retries that will all fail. */
 		sdev->retry_hwerror = 1;
 
+		/* USB disks should allow restart.  Some drives spin down
+		 * automatically, requiring a START-STOP UNIT command. */
+		sdev->allow_restart = 1;
+
+		/* Some USB cardreaders have trouble reading an sdcard's last
+		 * sector in a larger then 1 sector read, since the performance
+		 * impact is negible we set this flag for all USB disks */
+		sdev->last_sector_bug = 1;
+
+		/* Enable last-sector hacks for single-target devices using
+		 * the Bulk-only transport, unless we already know the
+		 * capacity will be decremented or is correct. */
+		if (!(us->fflags & (US_FL_FIX_CAPACITY | US_FL_CAPACITY_OK |
+					US_FL_SCM_MULT_TARG)) &&
+				us->protocol == USB_PR_BULK)
+			us->use_last_sector_hacks = 1;
+
+		/* Check if write cache default on flag is set or not */
+		if (us->fflags & US_FL_WRITE_CACHE)
+			sdev->wce_default_on = 1;
+
 	} else {
 
 		/* Non-disk-type devices don't need to blacklist any pages
 		 * or to force 192-byte transfer lengths for MODE SENSE.
 		 * But they do need to use MODE SENSE(10). */
 		sdev->use_10_for_ms = 1;
+
+		/* Some (fake) usb cdrom devices don't like READ_DISC_INFO */
+		if (us->fflags & US_FL_NO_READ_DISC_INFO)
+			sdev->no_read_disc_info = 1;
 	}
 
 	/* The CB and CBI transports have no way to pass LUN values
@@ -191,13 +265,13 @@ static int slave_configure(struct scsi_device *sdev)
 	 * scsi_level == 0 (UNKNOWN).  Hence such devices must necessarily
 	 * be single-LUN.
 	 */
-	if ((us->protocol == US_PR_CB || us->protocol == US_PR_CBI) &&
+	if ((us->protocol == USB_PR_CB || us->protocol == USB_PR_CBI) &&
 			sdev->scsi_level == SCSI_UNKNOWN)
 		us->max_lun = 0;
 
 	/* Some devices choke when they receive a PREVENT-ALLOW MEDIUM
 	 * REMOVAL command, so suppress those commands. */
-	if (us->flags & US_FL_NOT_LOCKABLE)
+	if (us->fflags & US_FL_NOT_LOCKABLE)
 		sdev->lockable = 0;
 
 	/* this is to satisfy the compiler, tho I don't think the 
@@ -205,24 +279,51 @@ static int slave_configure(struct scsi_device *sdev)
 	return 0;
 }
 
+static int target_alloc(struct scsi_target *starget)
+{
+	struct us_data *us = host_to_us(dev_to_shost(starget->dev.parent));
+
+	/*
+	 * Some USB drives don't support REPORT LUNS, even though they
+	 * report a SCSI revision level above 2.  Tell the SCSI layer
+	 * not to issue that command; it will perform a normal sequential
+	 * scan instead.
+	 */
+	starget->no_report_luns = 1;
+
+	/*
+	 * The UFI spec treats the Peripheral Qualifier bits in an
+	 * INQUIRY result as reserved and requires devices to set them
+	 * to 0.  However the SCSI spec requires these bits to be set
+	 * to 3 to indicate when a LUN is not present.
+	 *
+	 * Let the scanning code know if this target merely sets
+	 * Peripheral Device Type to 0x1f to indicate no LUN.
+	 */
+	if (us->subclass == USB_SC_UFI)
+		starget->pdt_1f_for_no_lun = 1;
+
+	return 0;
+}
+
 /* queue a command */
 /* This is always called with scsi_lock(host) held */
-static int queuecommand(struct scsi_cmnd *srb,
+static int queuecommand_lck(struct scsi_cmnd *srb,
 			void (*done)(struct scsi_cmnd *))
 {
 	struct us_data *us = host_to_us(srb->device->host);
 
-	US_DEBUGP("%s called\n", __FUNCTION__);
+	US_DEBUGP("%s called\n", __func__);
 
 	/* check for state-transition errors */
 	if (us->srb != NULL) {
 		printk(KERN_ERR USB_STORAGE "Error in %s: us->srb = %p\n",
-			__FUNCTION__, us->srb);
+			__func__, us->srb);
 		return SCSI_MLQUEUE_HOST_BUSY;
 	}
 
 	/* fail the command if we are disconnecting */
-	if (test_bit(US_FLIDX_DISCONNECTING, &us->flags)) {
+	if (test_bit(US_FLIDX_DISCONNECTING, &us->dflags)) {
 		US_DEBUGP("Fail command during disconnect\n");
 		srb->result = DID_NO_CONNECT << 16;
 		done(srb);
@@ -232,10 +333,12 @@ static int queuecommand(struct scsi_cmnd *srb,
 	/* enqueue the command and wake up the control thread */
 	srb->scsi_done = done;
 	us->srb = srb;
-	up(&(us->sema));
+	complete(&us->cmnd_ready);
 
 	return 0;
 }
+
+static DEF_SCSI_QCMD(queuecommand)
 
 /***********************************************************************
  * Error handling functions
@@ -246,7 +349,7 @@ static int command_abort(struct scsi_cmnd *srb)
 {
 	struct us_data *us = host_to_us(srb->device->host);
 
-	US_DEBUGP("%s called\n", __FUNCTION__);
+	US_DEBUGP("%s called\n", __func__);
 
 	/* us->srb together with the TIMED_OUT, RESETTING, and ABORTING
 	 * bits are protected by the host lock. */
@@ -264,9 +367,9 @@ static int command_abort(struct scsi_cmnd *srb)
 	 * with the reset).  Note that we must retain the host lock while
 	 * calling usb_stor_stop_transport(); otherwise it might interfere
 	 * with an auto-reset that begins as soon as we release the lock. */
-	set_bit(US_FLIDX_TIMED_OUT, &us->flags);
-	if (!test_bit(US_FLIDX_RESETTING, &us->flags)) {
-		set_bit(US_FLIDX_ABORTING, &us->flags);
+	set_bit(US_FLIDX_TIMED_OUT, &us->dflags);
+	if (!test_bit(US_FLIDX_RESETTING, &us->dflags)) {
+		set_bit(US_FLIDX_ABORTING, &us->dflags);
 		usb_stor_stop_transport(us);
 	}
 	scsi_unlock(us_to_host(us));
@@ -283,7 +386,7 @@ static int device_reset(struct scsi_cmnd *srb)
 	struct us_data *us = host_to_us(srb->device->host);
 	int result;
 
-	US_DEBUGP("%s called\n", __FUNCTION__);
+	US_DEBUGP("%s called\n", __func__);
 
 	/* lock the device pointers and do the reset */
 	mutex_lock(&(us->dev_mutex));
@@ -299,7 +402,7 @@ static int bus_reset(struct scsi_cmnd *srb)
 	struct us_data *us = host_to_us(srb->device->host);
 	int result;
 
-	US_DEBUGP("%s called\n", __FUNCTION__);
+	US_DEBUGP("%s called\n", __func__);
 	result = usb_stor_port_reset(us);
 	return result < 0 ? FAILED : SUCCESS;
 }
@@ -313,7 +416,7 @@ void usb_stor_report_device_reset(struct us_data *us)
 	struct Scsi_Host *host = us_to_host(us);
 
 	scsi_report_device_reset(host, 0, 0);
-	if (us->flags & US_FL_SCM_MULT_TARG) {
+	if (us->fflags & US_FL_SCM_MULT_TARG) {
 		for (i = 1; i < host->max_id; ++i)
 			scsi_report_device_reset(host, 0, i);
 	}
@@ -321,10 +424,14 @@ void usb_stor_report_device_reset(struct us_data *us)
 
 /* Report a driver-initiated bus reset to the SCSI layer.
  * Calling this for a SCSI-initiated reset is unnecessary but harmless.
- * The caller must own the SCSI host lock. */
+ * The caller must not own the SCSI host lock. */
 void usb_stor_report_bus_reset(struct us_data *us)
 {
-	scsi_report_bus_reset(us_to_host(us), 0);
+	struct Scsi_Host *host = us_to_host(us);
+
+	scsi_lock(host);
+	scsi_report_bus_reset(host, 0);
+	scsi_unlock(host);
 }
 
 /***********************************************************************
@@ -380,7 +487,7 @@ static int proc_info (struct Scsi_Host *host, char *buffer,
 		pos += sprintf(pos, "       Quirks:");
 
 #define US_FLAG(name, value) \
-	if (us->flags & value) pos += sprintf(pos, " " #name);
+	if (us->fflags & value) pos += sprintf(pos, " " #name);
 US_DO_ALL_FLAGS
 #undef US_FLAG
 
@@ -409,7 +516,7 @@ static ssize_t show_max_sectors(struct device *dev, struct device_attribute *att
 {
 	struct scsi_device *sdev = to_scsi_device(dev);
 
-	return sprintf(buf, "%u\n", sdev->request_queue->max_sectors);
+	return sprintf(buf, "%u\n", queue_max_hw_sectors(sdev->request_queue));
 }
 
 /* Input routine for the sysfs max_sectors file */
@@ -419,9 +526,9 @@ static ssize_t store_max_sectors(struct device *dev, struct device_attribute *at
 	struct scsi_device *sdev = to_scsi_device(dev);
 	unsigned short ms;
 
-	if (sscanf(buf, "%hu", &ms) > 0 && ms <= SCSI_DEFAULT_MAX_SECTORS) {
-		blk_queue_max_sectors(sdev->request_queue, ms);
-		return strlen(buf);
+	if (sscanf(buf, "%hu", &ms) > 0) {
+		blk_queue_max_hw_sectors(sdev->request_queue, ms);
+		return count;
 	}
 	return -EINVAL;	
 }
@@ -462,9 +569,10 @@ struct scsi_host_template usb_stor_host_template = {
 
 	.slave_alloc =			slave_alloc,
 	.slave_configure =		slave_configure,
+	.target_alloc =			target_alloc,
 
 	/* lots of sg segments can be handled */
-	.sg_tablesize =			SG_ALL,
+	.sg_tablesize =			SCSI_MAX_SG_CHAIN_SEGMENTS,
 
 	/* limit the total size of a transfer to 120 KB */
 	.max_sectors =                  240,
@@ -495,4 +603,4 @@ unsigned char usb_stor_sense_invalidCDB[18] = {
 	[7]	= 0x0a,			    /* additional length */
 	[12]	= 0x24			    /* Invalid Field in CDB */
 };
-
+EXPORT_SYMBOL_GPL(usb_stor_sense_invalidCDB);

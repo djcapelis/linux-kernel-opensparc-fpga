@@ -10,7 +10,7 @@ kernel to userspace interfaces.  The kernel to userspace interface is
 the one that application programs use, the syscall interface.  That
 interface is _very_ stable over time, and will not break.  I have old
 programs that were built on a pre 0.9something kernel that still work
-just fine on the latest 2.6 kernel release.  This interface is the one
+just fine on the latest 2.6 kernel release.  That interface is the one
 that users and application programmers can count on being stable.
 
 
@@ -122,7 +122,7 @@ operating system to suffer.
 
 In both of these instances, all developers agreed that these were
 important changes that needed to be made, and they were made, with
-relatively little pain.  If Linux had to ensure that it preserve a
+relatively little pain.  If Linux had to ensure that it will preserve a
 stable source interface, a new interface would have been created, and
 the older, broken one would have had to be maintained over time, leading
 to extra work for the USB developers.  Since all Linux USB developers do

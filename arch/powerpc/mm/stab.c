@@ -12,14 +12,14 @@
  *      2 of the License, or (at your option) any later version.
  */
 
+#include <linux/memblock.h>
+
 #include <asm/pgtable.h>
 #include <asm/mmu.h>
 #include <asm/mmu_context.h>
 #include <asm/paca.h>
 #include <asm/cputable.h>
-#include <asm/lmb.h>
-#include <asm/abs_addr.h>
-#include <asm/firmware.h>
+#include <asm/prom.h>
 
 struct stab_entry {
 	unsigned long esid_data;
@@ -27,8 +27,8 @@ struct stab_entry {
 };
 
 #define NR_STAB_CACHE_ENTRIES 8
-DEFINE_PER_CPU(long, stab_cache_ptr);
-DEFINE_PER_CPU(long, stab_cache[NR_STAB_CACHE_ENTRIES]);
+static DEFINE_PER_CPU(long, stab_cache_ptr);
+static DEFINE_PER_CPU(long [NR_STAB_CACHE_ENTRIES], stab_cache);
 
 /*
  * Create a segment table entry for the given esid/vsid pair.
@@ -55,7 +55,7 @@ static int make_ste(unsigned long stab, unsigned long esid, unsigned long vsid)
 		for (entry = 0; entry < 8; entry++, ste++) {
 			if (!(ste->esid_data & STE_ESID_V)) {
 				ste->vsid_data = vsid_data;
-				asm volatile("eieio":::"memory");
+				eieio();
 				ste->esid_data = esid_data;
 				return (global_entry | entry);
 			}
@@ -101,7 +101,7 @@ static int make_ste(unsigned long stab, unsigned long esid, unsigned long vsid)
 	asm volatile("sync" : : : "memory");    /* Order update */
 
 	castout_ste->vsid_data = vsid_data;
-	asm volatile("eieio" : : : "memory");   /* Order update */
+	eieio();				/* Order update */
 	castout_ste->esid_data = esid_data;
 
 	asm volatile("slbie  %0" : : "r" (old_esid << SID_SHIFT));
@@ -122,12 +122,12 @@ static int __ste_allocate(unsigned long ea, struct mm_struct *mm)
 
 	/* Kernel or user address? */
 	if (is_kernel_addr(ea)) {
-		vsid = get_kernel_vsid(ea);
+		vsid = get_kernel_vsid(ea, MMU_SEGSIZE_256M);
 	} else {
 		if ((ea >= TASK_SIZE_USER64) || (! mm))
 			return 1;
 
-		vsid = get_vsid(mm->context.id, ea);
+		vsid = get_vsid(mm->context.id, ea, MMU_SEGSIZE_256M);
 	}
 
 	stab_entry = make_ste(get_paca()->stab_addr, GET_ESID(ea), vsid);
@@ -161,7 +161,7 @@ void switch_stab(struct task_struct *tsk, struct mm_struct *mm)
 {
 	struct stab_entry *stab = (struct stab_entry *) get_paca()->stab_addr;
 	struct stab_entry *ste;
-	unsigned long offset = __get_cpu_var(stab_cache_ptr);
+	unsigned long offset;
 	unsigned long pc = KSTK_EIP(tsk);
 	unsigned long stack = KSTK_ESP(tsk);
 	unsigned long unmapped_base;
@@ -169,6 +169,15 @@ void switch_stab(struct task_struct *tsk, struct mm_struct *mm)
 	/* Force previous translations to complete. DRENG */
 	asm volatile("isync" : : : "memory");
 
+	/*
+	 * We need interrupts hard-disabled here, not just soft-disabled,
+	 * so that a PMU interrupt can't occur, which might try to access
+	 * user memory (to get a stack trace) and possible cause an STAB miss
+	 * which would update the stab_cache/stab_cache_ptr per-cpu variables.
+	 */
+	hard_irq_disable();
+
+	offset = __get_cpu_var(stab_cache_ptr);
 	if (offset <= NR_STAB_CACHE_ENTRIES) {
 		int i;
 
@@ -231,7 +240,7 @@ void __init stabs_alloc(void)
 {
 	int cpu;
 
-	if (cpu_has_feature(CPU_FTR_SLB))
+	if (mmu_has_feature(MMU_FTR_SLB))
 		return;
 
 	for_each_possible_cpu(cpu) {
@@ -240,16 +249,16 @@ void __init stabs_alloc(void)
 		if (cpu == 0)
 			continue; /* stab for CPU 0 is statically allocated */
 
-		newstab = lmb_alloc_base(HW_PAGE_SIZE, HW_PAGE_SIZE,
+		newstab = memblock_alloc_base(HW_PAGE_SIZE, HW_PAGE_SIZE,
 					 1<<SID_SHIFT);
 		newstab = (unsigned long)__va(newstab);
 
 		memset((void *)newstab, 0, HW_PAGE_SIZE);
 
 		paca[cpu].stab_addr = newstab;
-		paca[cpu].stab_real = virt_to_abs(newstab);
-		printk(KERN_INFO "Segment table for CPU %d at 0x%lx "
-		       "virtual, 0x%lx absolute\n",
+		paca[cpu].stab_real = __pa(newstab);
+		printk(KERN_INFO "Segment table for CPU %d at 0x%llx "
+		       "virtual, 0x%llx absolute\n",
 		       cpu, paca[cpu].stab_addr, paca[cpu].stab_real);
 	}
 }
@@ -261,7 +270,7 @@ void __init stabs_alloc(void)
  */
 void stab_initialize(unsigned long stab)
 {
-	unsigned long vsid = get_kernel_vsid(PAGE_OFFSET);
+	unsigned long vsid = get_kernel_vsid(PAGE_OFFSET, MMU_SEGSIZE_256M);
 	unsigned long stabreal;
 
 	asm volatile("isync; slbia; isync":::"memory");
@@ -272,13 +281,6 @@ void stab_initialize(unsigned long stab)
 
 	/* Set ASR */
 	stabreal = get_paca()->stab_real | 0x1ul;
-
-#ifdef CONFIG_PPC_ISERIES
-	if (firmware_has_feature(FW_FEATURE_ISERIES)) {
-		HvCall1(HvCallBaseSetASR, stabreal);
-		return;
-	}
-#endif /* CONFIG_PPC_ISERIES */
 
 	mtspr(SPRN_ASR, stabreal);
 }

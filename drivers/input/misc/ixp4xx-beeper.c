@@ -20,11 +20,12 @@
 #include <linux/delay.h>
 #include <linux/platform_device.h>
 #include <linux/interrupt.h>
-#include <asm/hardware.h>
+#include <mach/hardware.h>
 
 MODULE_AUTHOR("Alessandro Zummo <a.zummo@towertech.it>");
 MODULE_DESCRIPTION("ixp4xx beeper driver");
 MODULE_LICENSE("GPL");
+MODULE_ALIAS("platform:ixp4xx-beeper");
 
 static DEFINE_SPINLOCK(beep_lock);
 
@@ -68,11 +69,7 @@ static int ixp4xx_spkr_event(struct input_dev *dev, unsigned int type, unsigned 
 	}
 
 	if (value > 20 && value < 32767)
-#ifndef FREQ
-		count = (ixp4xx_get_board_tick_rate() / (value * 4)) - 1;
-#else
-		count = (FREQ / (value * 4)) - 1;
-#endif
+		count = (IXP4XX_TIMER_FREQ / (value * 4)) - 1;
 
 	ixp4xx_spkr_control(pin, count);
 
@@ -90,7 +87,7 @@ static irqreturn_t ixp4xx_spkr_interrupt(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
-static int __devinit ixp4xx_spkr_probe(struct platform_device *dev)
+static int ixp4xx_spkr_probe(struct platform_device *dev)
 {
 	struct input_dev *input_dev;
 	int err;
@@ -109,12 +106,13 @@ static int __devinit ixp4xx_spkr_probe(struct platform_device *dev)
 	input_dev->id.version = 0x0100;
 	input_dev->dev.parent = &dev->dev;
 
-	input_dev->evbit[0] = BIT(EV_SND);
-	input_dev->sndbit[0] = BIT(SND_BELL) | BIT(SND_TONE);
+	input_dev->evbit[0] = BIT_MASK(EV_SND);
+	input_dev->sndbit[0] = BIT_MASK(SND_BELL) | BIT_MASK(SND_TONE);
 	input_dev->event = ixp4xx_spkr_event;
 
 	err = request_irq(IRQ_IXP4XX_TIMER2, &ixp4xx_spkr_interrupt,
-			  IRQF_DISABLED | IRQF_TIMER, "ixp4xx-beeper", (void *) dev->id);
+			  IRQF_NO_SUSPEND, "ixp4xx-beeper",
+			  (void *) dev->id);
 	if (err)
 		goto err_free_device;
 
@@ -134,7 +132,7 @@ static int __devinit ixp4xx_spkr_probe(struct platform_device *dev)
 	return err;
 }
 
-static int __devexit ixp4xx_spkr_remove(struct platform_device *dev)
+static int ixp4xx_spkr_remove(struct platform_device *dev)
 {
 	struct input_dev *input_dev = platform_get_drvdata(dev);
 	unsigned int pin = (unsigned int) input_get_drvdata(input_dev);
@@ -167,19 +165,8 @@ static struct platform_driver ixp4xx_spkr_platform_driver = {
 		.owner	= THIS_MODULE,
 	},
 	.probe		= ixp4xx_spkr_probe,
-	.remove		= __devexit_p(ixp4xx_spkr_remove),
+	.remove		= ixp4xx_spkr_remove,
 	.shutdown	= ixp4xx_spkr_shutdown,
 };
+module_platform_driver(ixp4xx_spkr_platform_driver);
 
-static int __init ixp4xx_spkr_init(void)
-{
-	return platform_driver_register(&ixp4xx_spkr_platform_driver);
-}
-
-static void __exit ixp4xx_spkr_exit(void)
-{
-	platform_driver_unregister(&ixp4xx_spkr_platform_driver);
-}
-
-module_init(ixp4xx_spkr_init);
-module_exit(ixp4xx_spkr_exit);

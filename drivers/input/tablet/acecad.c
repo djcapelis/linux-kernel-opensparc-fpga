@@ -51,6 +51,7 @@ struct usb_acecad {
 	char name[128];
 	char phys[64];
 	struct usb_device *usbdev;
+	struct usb_interface *intf;
 	struct input_dev *input;
 	struct urb *irq;
 
@@ -63,21 +64,24 @@ static void usb_acecad_irq(struct urb *urb)
 	struct usb_acecad *acecad = urb->context;
 	unsigned char *data = acecad->data;
 	struct input_dev *dev = acecad->input;
+	struct usb_interface *intf = acecad->intf;
 	int prox, status;
 
 	switch (urb->status) {
-		case 0:
-			/* success */
-			break;
-		case -ECONNRESET:
-		case -ENOENT:
-		case -ESHUTDOWN:
-			/* this urb is terminated, clean up */
-			dbg("%s - urb shutting down with status: %d", __FUNCTION__, urb->status);
-			return;
-		default:
-			dbg("%s - nonzero urb status received: %d", __FUNCTION__, urb->status);
-			goto resubmit;
+	case 0:
+		/* success */
+		break;
+	case -ECONNRESET:
+	case -ENOENT:
+	case -ESHUTDOWN:
+		/* this urb is terminated, clean up */
+		dev_dbg(&intf->dev, "%s - urb shutting down with status: %d\n",
+			__func__, urb->status);
+		return;
+	default:
+		dev_dbg(&intf->dev, "%s - nonzero urb status received: %d\n",
+			__func__, urb->status);
+		goto resubmit;
 	}
 
 	prox = (data[0] & 0x04) >> 2;
@@ -105,8 +109,10 @@ static void usb_acecad_irq(struct urb *urb)
 resubmit:
 	status = usb_submit_urb(urb, GFP_ATOMIC);
 	if (status)
-		err("can't resubmit intr, %s-%s/input0, status %d",
-			acecad->usbdev->bus->bus_name, acecad->usbdev->devpath, status);
+		dev_err(&intf->dev,
+			"can't resubmit intr, %s-%s/input0, status %d\n",
+			acecad->usbdev->bus->bus_name,
+			acecad->usbdev->devpath, status);
 }
 
 static int usb_acecad_open(struct input_dev *dev)
@@ -135,7 +141,7 @@ static int usb_acecad_probe(struct usb_interface *intf, const struct usb_device_
 	struct usb_acecad *acecad;
 	struct input_dev *input_dev;
 	int pipe, maxp;
-	int err = -ENOMEM;
+	int err;
 
 	if (interface->desc.bNumEndpoints != 1)
 		return -ENODEV;
@@ -155,7 +161,7 @@ static int usb_acecad_probe(struct usb_interface *intf, const struct usb_device_
 		goto fail1;
 	}
 
-	acecad->data = usb_buffer_alloc(dev, 8, GFP_KERNEL, &acecad->data_dma);
+	acecad->data = usb_alloc_coherent(dev, 8, GFP_KERNEL, &acecad->data_dma);
 	if (!acecad->data) {
 		err= -ENOMEM;
 		goto fail1;
@@ -168,6 +174,7 @@ static int usb_acecad_probe(struct usb_interface *intf, const struct usb_device_
 	}
 
 	acecad->usbdev = dev;
+	acecad->intf = intf;
 	acecad->input = input_dev;
 
 	if (dev->manufacturer)
@@ -192,36 +199,34 @@ static int usb_acecad_probe(struct usb_interface *intf, const struct usb_device_
 	input_dev->open = usb_acecad_open;
 	input_dev->close = usb_acecad_close;
 
-	input_dev->evbit[0] = BIT(EV_KEY) | BIT(EV_ABS);
-	input_dev->absbit[0] = BIT(ABS_X) | BIT(ABS_Y) | BIT(ABS_PRESSURE);
-	input_dev->keybit[LONG(BTN_LEFT)] = BIT(BTN_LEFT) | BIT(BTN_RIGHT) | BIT(BTN_MIDDLE);
-	input_dev->keybit[LONG(BTN_DIGI)] = BIT(BTN_TOOL_PEN) |BIT(BTN_TOUCH) | BIT(BTN_STYLUS) | BIT(BTN_STYLUS2);
+	input_dev->evbit[0] = BIT_MASK(EV_KEY) | BIT_MASK(EV_ABS);
+	input_dev->keybit[BIT_WORD(BTN_DIGI)] = BIT_MASK(BTN_TOOL_PEN) |
+		BIT_MASK(BTN_TOUCH) | BIT_MASK(BTN_STYLUS) |
+		BIT_MASK(BTN_STYLUS2);
 
 	switch (id->driver_info) {
-		case 0:
-			input_dev->absmax[ABS_X] = 5000;
-			input_dev->absmax[ABS_Y] = 3750;
-			input_dev->absmax[ABS_PRESSURE] = 512;
-			if (!strlen(acecad->name))
-				snprintf(acecad->name, sizeof(acecad->name),
-					"USB Acecad Flair Tablet %04x:%04x",
-					le16_to_cpu(dev->descriptor.idVendor),
-					le16_to_cpu(dev->descriptor.idProduct));
-			break;
-		case 1:
-			input_dev->absmax[ABS_X] = 3000;
-			input_dev->absmax[ABS_Y] = 2250;
-			input_dev->absmax[ABS_PRESSURE] = 1024;
-			if (!strlen(acecad->name))
-				snprintf(acecad->name, sizeof(acecad->name),
-					"USB Acecad 302 Tablet %04x:%04x",
-					le16_to_cpu(dev->descriptor.idVendor),
-					le16_to_cpu(dev->descriptor.idProduct));
-			break;
-	}
+	case 0:
+		input_set_abs_params(input_dev, ABS_X, 0, 5000, 4, 0);
+		input_set_abs_params(input_dev, ABS_Y, 0, 3750, 4, 0);
+		input_set_abs_params(input_dev, ABS_PRESSURE, 0, 512, 0, 0);
+		if (!strlen(acecad->name))
+			snprintf(acecad->name, sizeof(acecad->name),
+				"USB Acecad Flair Tablet %04x:%04x",
+				le16_to_cpu(dev->descriptor.idVendor),
+				le16_to_cpu(dev->descriptor.idProduct));
+		break;
 
-	input_dev->absfuzz[ABS_X] = 4;
-	input_dev->absfuzz[ABS_Y] = 4;
+	case 1:
+		input_set_abs_params(input_dev, ABS_X, 0, 53000, 4, 0);
+		input_set_abs_params(input_dev, ABS_Y, 0, 2250, 4, 0);
+		input_set_abs_params(input_dev, ABS_PRESSURE, 0, 1024, 0, 0);
+		if (!strlen(acecad->name))
+			snprintf(acecad->name, sizeof(acecad->name),
+				"USB Acecad 302 Tablet %04x:%04x",
+				le16_to_cpu(dev->descriptor.idVendor),
+				le16_to_cpu(dev->descriptor.idProduct));
+		break;
+	}
 
 	usb_fill_int_urb(acecad->irq, dev, pipe,
 			acecad->data, maxp > 8 ? 8 : maxp,
@@ -231,13 +236,14 @@ static int usb_acecad_probe(struct usb_interface *intf, const struct usb_device_
 
 	err = input_register_device(acecad->input);
 	if (err)
-		goto fail2;
+		goto fail3;
 
 	usb_set_intfdata(intf, acecad);
 
 	return 0;
 
- fail2:	usb_buffer_free(dev, 8, acecad->data, acecad->data_dma);
+ fail3:	usb_free_urb(acecad->irq);
+ fail2:	usb_free_coherent(dev, 8, acecad->data, acecad->data_dma);
  fail1: input_free_device(input_dev);
 	kfree(acecad);
 	return err;
@@ -248,13 +254,11 @@ static void usb_acecad_disconnect(struct usb_interface *intf)
 	struct usb_acecad *acecad = usb_get_intfdata(intf);
 
 	usb_set_intfdata(intf, NULL);
-	if (acecad) {
-		usb_kill_urb(acecad->irq);
-		input_unregister_device(acecad->input);
-		usb_free_urb(acecad->irq);
-		usb_buffer_free(interface_to_usbdev(intf), 10, acecad->data, acecad->data_dma);
-		kfree(acecad);
-	}
+
+	input_unregister_device(acecad->input);
+	usb_free_urb(acecad->irq);
+	usb_free_coherent(acecad->usbdev, 8, acecad->data, acecad->data_dma);
+	kfree(acecad);
 }
 
 static struct usb_device_id usb_acecad_id_table [] = {
@@ -272,18 +276,4 @@ static struct usb_driver usb_acecad_driver = {
 	.id_table =	usb_acecad_id_table,
 };
 
-static int __init usb_acecad_init(void)
-{
-	int result = usb_register(&usb_acecad_driver);
-	if (result == 0)
-		info(DRIVER_VERSION ":" DRIVER_DESC);
-	return result;
-}
-
-static void __exit usb_acecad_exit(void)
-{
-	usb_deregister(&usb_acecad_driver);
-}
-
-module_init(usb_acecad_init);
-module_exit(usb_acecad_exit);
+module_usb_driver(usb_acecad_driver);

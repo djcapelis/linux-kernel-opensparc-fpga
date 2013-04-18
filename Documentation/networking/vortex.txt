@@ -1,5 +1,5 @@
 Documentation/networking/vortex.txt
-Andrew Morton <andrewm@uow.edu.au>
+Andrew Morton
 30 April 2000
 
 
@@ -11,7 +11,7 @@ The driver was written by Donald Becker <becker@scyld.com>
 Don is no longer the prime maintainer of this version of the driver. 
 Please report problems to one or more of:
 
-  Andrew Morton <akpm@osdl.org>
+  Andrew Morton
   Netdev mailing list <netdev@vger.kernel.org>
   Linux kernel mailing list <linux-kernel@vger.kernel.org>
 
@@ -67,8 +67,8 @@ Module parameters
 =================
 
 There are several parameters which may be provided to the driver when
-its module is loaded.  These are usually placed in /etc/modprobe.conf
-(/etc/modules.conf in 2.4).  Example:
+its module is loaded.  These are usually placed in /etc/modprobe.d/*.conf
+configuretion files.  Example:
 
 options 3c59x debug=3 rx_copybreak=300
 
@@ -305,11 +305,6 @@ Donald's wake-on-LAN page:
 
 	ftp://ftp.3com.com/pub/nic/3c90x/3c90xx2.exe
 
-Driver updates and a detailed changelog for the modifications which
-were made for the 2.3/2,4 series kernel is available at
-
-     http://www.zip.com.au/~akpm/linux/#3c59x-bc
-
 
 Autonegotiation notes
 ---------------------
@@ -430,7 +425,7 @@ steps you should take:
       1) Increase the debug level.  Usually this is done via:
 
          a) modprobe driver debug=7
-         b) In /etc/modprobe.conf (or /etc/modules.conf for 2.4):
+         b) In /etc/modprobe.d/driver.conf:
             options driver debug=7
 
       2) Recreate the problem with the higher debug level,

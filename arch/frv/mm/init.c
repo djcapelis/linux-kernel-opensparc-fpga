@@ -19,6 +19,7 @@
 #include <linux/signal.h>
 #include <linux/sched.h>
 #include <linux/pagemap.h>
+#include <linux/gfp.h>
 #include <linux/swap.h>
 #include <linux/mm.h>
 #include <linux/kernel.h>
@@ -26,20 +27,18 @@
 #include <linux/types.h>
 #include <linux/bootmem.h>
 #include <linux/highmem.h>
+#include <linux/module.h>
 
 #include <asm/setup.h>
 #include <asm/segment.h>
 #include <asm/page.h>
 #include <asm/pgtable.h>
-#include <asm/system.h>
 #include <asm/mmu_context.h>
 #include <asm/virtconvert.h>
 #include <asm/sections.h>
 #include <asm/tlb.h>
 
 #undef DEBUG
-
-DEFINE_PER_CPU(struct mmu_gather, mmu_gathers);
 
 /*
  * BAD_PAGE is the page that is used for page faults when linux
@@ -56,38 +55,9 @@ DEFINE_PER_CPU(struct mmu_gather, mmu_gathers);
  */
 static unsigned long empty_bad_page_table;
 static unsigned long empty_bad_page;
+
 unsigned long empty_zero_page;
-
-/*****************************************************************************/
-/*
- *
- */
-void show_mem(void)
-{
-	unsigned long i;
-	int free = 0, total = 0, reserved = 0, shared = 0;
-
-	printk("\nMem-info:\n");
-	show_free_areas();
-	i = max_mapnr;
-	while (i-- > 0) {
-		struct page *page = &mem_map[i];
-
-		total++;
-		if (PageReserved(page))
-			reserved++;
-		else if (!page_count(page))
-			free++;
-		else
-			shared += page_count(page) - 1;
-	}
-
-	printk("%d pages of RAM\n",total);
-	printk("%d free pages\n",free);
-	printk("%d reserved pages\n",reserved);
-	printk("%d pages shared\n",shared);
-
-} /* end show_mem() */
+EXPORT_SYMBOL(empty_zero_page);
 
 /*****************************************************************************/
 /*
@@ -114,8 +84,6 @@ void __init paging_init(void)
 		pmd_t *pme;
 
 		pkmap_page_table = alloc_bootmem_pages(PAGE_SIZE);
-
-		memset(pkmap_page_table, 0, PAGE_SIZE);
 
 		pge = swapper_pg_dir + pgd_index_k(PKMAP_BASE);
 		pue = pud_offset(pge, PKMAP_BASE);
@@ -178,7 +146,7 @@ void __init mem_init(void)
 
 #else
 	codek = (_etext - _stext) >> 10;
-	datak = 0; //(_ebss - _sdata) >> 10;
+	datak = 0; //(__bss_stop - _sdata) >> 10;
 #endif
 
 	tmp = nr_free_pages() << PAGE_SHIFT;
@@ -197,7 +165,7 @@ void __init mem_init(void)
 /*
  * free the memory that was only required for initialisation
  */
-void __init free_initmem(void)
+void free_initmem(void)
 {
 #if defined(CONFIG_RAMKERNEL) && !defined(CONFIG_PROTECT_KERNEL)
 	unsigned long start, end, addr;

@@ -61,9 +61,10 @@ asmlinkage void do_page_fault(unsigned long ecr, struct pt_regs *regs)
 	const struct exception_table_entry *fixup;
 	unsigned long address;
 	unsigned long page;
-	int writeaccess;
 	long signr;
 	int code;
+	int fault;
+	unsigned int flags = FAULT_FLAG_ALLOW_RETRY | FAULT_FLAG_KILLABLE;
 
 	if (notify_page_fault(regs, ecr))
 		return;
@@ -85,6 +86,7 @@ asmlinkage void do_page_fault(unsigned long ecr, struct pt_regs *regs)
 
 	local_irq_enable();
 
+retry:
 	down_read(&mm->mmap_sem);
 
 	vma = find_vma(mm, address);
@@ -103,7 +105,6 @@ asmlinkage void do_page_fault(unsigned long ecr, struct pt_regs *regs)
 	 */
 good_area:
 	code = SEGV_ACCERR;
-	writeaccess = 0;
 
 	switch (ecr) {
 	case ECR_PROTECTION_X:
@@ -120,7 +121,7 @@ good_area:
 	case ECR_TLB_MISS_W:
 		if (!(vma->vm_flags & VM_WRITE))
 			goto bad_area;
-		writeaccess = 1;
+		flags |= FAULT_FLAG_WRITE;
 		break;
 	default:
 		panic("Unhandled case %lu in do_page_fault!", ecr);
@@ -131,20 +132,35 @@ good_area:
 	 * sure we exit gracefully rather than endlessly redo the
 	 * fault.
 	 */
-survive:
-	switch (handle_mm_fault(mm, vma, address, writeaccess)) {
-	case VM_FAULT_MINOR:
-		tsk->min_flt++;
-		break;
-	case VM_FAULT_MAJOR:
-		tsk->maj_flt++;
-		break;
-	case VM_FAULT_SIGBUS:
-		goto do_sigbus;
-	case VM_FAULT_OOM:
-		goto out_of_memory;
-	default:
+	fault = handle_mm_fault(mm, vma, address, flags);
+
+	if ((fault & VM_FAULT_RETRY) && fatal_signal_pending(current))
+		return;
+
+	if (unlikely(fault & VM_FAULT_ERROR)) {
+		if (fault & VM_FAULT_OOM)
+			goto out_of_memory;
+		else if (fault & VM_FAULT_SIGBUS)
+			goto do_sigbus;
 		BUG();
+	}
+
+	if (flags & FAULT_FLAG_ALLOW_RETRY) {
+		if (fault & VM_FAULT_MAJOR)
+			tsk->maj_flt++;
+		else
+			tsk->min_flt++;
+		if (fault & VM_FAULT_RETRY) {
+			flags &= ~FAULT_FLAG_ALLOW_RETRY;
+			flags |= FAULT_FLAG_TRIED;
+
+			/*
+			 * No need to up_read(&mm->mmap_sem) as we would have
+			 * already released it in __lock_page_or_retry() in
+			 * mm/filemap.c.
+			 */
+			goto retry;
+		}
 	}
 
 	up_read(&mm->mmap_sem);
@@ -161,7 +177,7 @@ bad_area:
 		if (exception_trace && printk_ratelimit())
 			printk("%s%s[%d]: segfault at %08lx pc %08lx "
 			       "sp %08lx ecr %lu\n",
-			       is_init(tsk) ? KERN_EMERG : KERN_INFO,
+			       is_global_init(tsk) ? KERN_EMERG : KERN_INFO,
 			       tsk->comm, tsk->pid, address, regs->pc,
 			       regs->sp, ecr);
 		_exception(SIGSEGV, regs, code, address);
@@ -190,6 +206,8 @@ no_context:
 
 	page = sysreg_read(PTBR);
 	printk(KERN_ALERT "ptbr = %08lx", page);
+	if (address >= TASK_SIZE)
+		page = (unsigned long)swapper_pg_dir;
 	if (page) {
 		page = ((unsigned long *)page)[address >> 22];
 		printk(" pgd = %08lx", page);
@@ -210,15 +228,10 @@ no_context:
 	 */
 out_of_memory:
 	up_read(&mm->mmap_sem);
-	if (is_init(current)) {
-		yield();
-		down_read(&mm->mmap_sem);
-		goto survive;
-	}
-	printk("VM: Killing process %s\n", tsk->comm);
-	if (user_mode(regs))
-		do_exit(SIGKILL);
-	goto no_context;
+	pagefault_out_of_memory();
+	if (!user_mode(regs))
+		goto no_context;
+	return;
 
 do_sigbus:
 	up_read(&mm->mmap_sem);
@@ -232,7 +245,7 @@ do_sigbus:
 	if (exception_trace)
 		printk("%s%s[%d]: bus error at %08lx pc %08lx "
 		       "sp %08lx ecr %lu\n",
-		       is_init(tsk) ? KERN_EMERG : KERN_INFO,
+		       is_global_init(tsk) ? KERN_EMERG : KERN_INFO,
 		       tsk->comm, tsk->pid, address, regs->pc,
 		       regs->sp, ecr);
 
@@ -249,21 +262,3 @@ asmlinkage void do_bus_error(unsigned long addr, int write_access,
 	dump_dtlb();
 	die("Bus Error", regs, SIGKILL);
 }
-
-/*
- * This functionality is currently not possible to implement because
- * we're using segmentation to ensure a fixed mapping of the kernel
- * virtual address space.
- *
- * It would be possible to implement this, but it would require us to
- * disable segmentation at startup and load the kernel mappings into
- * the TLB like any other pages. There will be lots of trickery to
- * avoid recursive invocation of the TLB miss handler, though...
- */
-#ifdef CONFIG_DEBUG_PAGEALLOC
-void kernel_map_pages(struct page *page, int numpages, int enable)
-{
-
-}
-EXPORT_SYMBOL(kernel_map_pages);
-#endif

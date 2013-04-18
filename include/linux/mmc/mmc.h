@@ -16,22 +16,22 @@
  * Based strongly on code by:
  *
  * Author: Yong-iL Joh <tolkien@mizi.com>
- * Date  : $Date: 2002/06/18 12:37:30 $
  *
  * Author:  Andrew Christian
  *          15 May 2002
  */
 
-#ifndef MMC_MMC_H
-#define MMC_MMC_H
+#ifndef LINUX_MMC_MMC_H
+#define LINUX_MMC_MMC_H
 
 /* Standard MMC commands (4.1)           type  argument     response */
    /* class 1 */
-#define	MMC_GO_IDLE_STATE         0   /* bc                          */
+#define MMC_GO_IDLE_STATE         0   /* bc                          */
 #define MMC_SEND_OP_COND          1   /* bcr  [31:0] OCR         R3  */
 #define MMC_ALL_SEND_CID          2   /* bcr                     R2  */
 #define MMC_SET_RELATIVE_ADDR     3   /* ac   [31:16] RCA        R1  */
 #define MMC_SET_DSR               4   /* bc   [31:16] RCA            */
+#define MMC_SLEEP_AWAKE		  5   /* ac   [31:16] RCA 15:flg R1b */
 #define MMC_SWITCH                6   /* ac   [31:0] See below   R1b */
 #define MMC_SELECT_CARD           7   /* ac   [31:16] RCA        R1  */
 #define MMC_SEND_EXT_CSD          8   /* adtc                    R1  */
@@ -39,13 +39,19 @@
 #define MMC_SEND_CID             10   /* ac   [31:16] RCA        R2  */
 #define MMC_READ_DAT_UNTIL_STOP  11   /* adtc [31:0] dadr        R1  */
 #define MMC_STOP_TRANSMISSION    12   /* ac                      R1b */
-#define MMC_SEND_STATUS	         13   /* ac   [31:16] RCA        R1  */
+#define MMC_SEND_STATUS          13   /* ac   [31:16] RCA        R1  */
+#define MMC_BUS_TEST_R           14   /* adtc                    R1  */
 #define MMC_GO_INACTIVE_STATE    15   /* ac   [31:16] RCA            */
+#define MMC_BUS_TEST_W           19   /* adtc                    R1  */
+#define MMC_SPI_READ_OCR         58   /* spi                  spi_R3 */
+#define MMC_SPI_CRC_ON_OFF       59   /* spi  [0:0] flag      spi_R1 */
 
   /* class 2 */
 #define MMC_SET_BLOCKLEN         16   /* ac   [31:0] block len   R1  */
 #define MMC_READ_SINGLE_BLOCK    17   /* adtc [31:0] data addr   R1  */
 #define MMC_READ_MULTIPLE_BLOCK  18   /* adtc [31:0] data addr   R1  */
+#define MMC_SEND_TUNING_BLOCK    19   /* adtc                    R1  */
+#define MMC_SEND_TUNING_BLOCK_HS200	21	/* adtc R1  */
 
   /* class 3 */
 #define MMC_WRITE_DAT_UNTIL_STOP 20   /* adtc [31:0] data addr   R1  */
@@ -78,6 +84,12 @@
 #define MMC_APP_CMD              55   /* ac   [31:16] RCA        R1  */
 #define MMC_GEN_CMD              56   /* adtc [0] RD/WR          R1  */
 
+static inline bool mmc_op_multi(u32 opcode)
+{
+	return opcode == MMC_WRITE_MULTIPLE_BLOCK ||
+	       opcode == MMC_READ_MULTIPLE_BLOCK;
+}
+
 /*
  * MMC_SWITCH argument format:
  *
@@ -90,15 +102,15 @@
  */
 
 /*
-  MMC status in R1
+  MMC status in R1, for native mode (SPI bits are different)
   Type
-  	e : error bit
+	e : error bit
 	s : status bit
 	r : detected and set for the actual command response
 	x : detected and set during command execution. the host must poll
             the card by sending status command in order to read these bits.
   Clear condition
-  	a : according to the card state
+	a : according to the card state
 	b : always related to the previous command. Reception of
             a valid command will clear it (with a delay of one command)
 	c : clear by read
@@ -124,9 +136,44 @@
 #define R1_CARD_ECC_DISABLED	(1 << 14)	/* sx, a */
 #define R1_ERASE_RESET		(1 << 13)	/* sr, c */
 #define R1_STATUS(x)            (x & 0xFFFFE000)
-#define R1_CURRENT_STATE(x)    	((x & 0x00001E00) >> 9)	/* sx, b (4 bits) */
+#define R1_CURRENT_STATE(x)	((x & 0x00001E00) >> 9)	/* sx, b (4 bits) */
 #define R1_READY_FOR_DATA	(1 << 8)	/* sx, a */
+#define R1_SWITCH_ERROR		(1 << 7)	/* sx, c */
+#define R1_EXCEPTION_EVENT	(1 << 6)	/* sx, a */
 #define R1_APP_CMD		(1 << 5)	/* sr, c */
+
+#define R1_STATE_IDLE	0
+#define R1_STATE_READY	1
+#define R1_STATE_IDENT	2
+#define R1_STATE_STBY	3
+#define R1_STATE_TRAN	4
+#define R1_STATE_DATA	5
+#define R1_STATE_RCV	6
+#define R1_STATE_PRG	7
+#define R1_STATE_DIS	8
+
+/*
+ * MMC/SD in SPI mode reports R1 status always, and R2 for SEND_STATUS
+ * R1 is the low order byte; R2 is the next highest byte, when present.
+ */
+#define R1_SPI_IDLE		(1 << 0)
+#define R1_SPI_ERASE_RESET	(1 << 1)
+#define R1_SPI_ILLEGAL_COMMAND	(1 << 2)
+#define R1_SPI_COM_CRC		(1 << 3)
+#define R1_SPI_ERASE_SEQ	(1 << 4)
+#define R1_SPI_ADDRESS		(1 << 5)
+#define R1_SPI_PARAMETER	(1 << 6)
+/* R1 bit 7 is always zero */
+#define R2_SPI_CARD_LOCKED	(1 << 8)
+#define R2_SPI_WP_ERASE_SKIP	(1 << 9)	/* or lock/unlock fail */
+#define R2_SPI_LOCK_UNLOCK_FAIL	R2_SPI_WP_ERASE_SKIP
+#define R2_SPI_ERROR		(1 << 10)
+#define R2_SPI_CC_ERROR		(1 << 11)
+#define R2_SPI_CARD_ECC_ERROR	(1 << 12)
+#define R2_SPI_WP_VIOLATION	(1 << 13)
+#define R2_SPI_ERASE_PARAM	(1 << 14)
+#define R2_SPI_OUT_OF_RANGE	(1 << 15)	/* or CSD overwrite */
+#define R2_SPI_CSD_OVERWRITE	R2_SPI_OUT_OF_RANGE
 
 /* These are unpacked versions of the actual responses */
 
@@ -182,6 +229,7 @@ struct _mmc_csd {
  */
 #define CCC_BASIC		(1<<0)	/* (0) Basic protocol functions */
 					/* (CMD0,1,2,3,4,7,9,10,12,13,15) */
+					/* (and for SPI, CMD58,59) */
 #define CCC_STREAM_READ		(1<<1)	/* (1) Stream read commands */
 					/* (CMD11) */
 #define CCC_BLOCK_READ		(1<<2)	/* (2) Block read commands */
@@ -224,14 +272,78 @@ struct _mmc_csd {
  * EXT_CSD fields
  */
 
-#define EXT_CSD_BUS_WIDTH	183	/* R/W */
-#define EXT_CSD_HS_TIMING	185	/* R/W */
-#define EXT_CSD_CARD_TYPE	196	/* RO */
-#define EXT_CSD_SEC_CNT		212	/* RO, 4 bytes */
+#define EXT_CSD_FLUSH_CACHE		32      /* W */
+#define EXT_CSD_CACHE_CTRL		33      /* R/W */
+#define EXT_CSD_POWER_OFF_NOTIFICATION	34	/* R/W */
+#define EXT_CSD_EXP_EVENTS_STATUS	54	/* RO */
+#define EXT_CSD_DATA_SECTOR_SIZE	61	/* R */
+#define EXT_CSD_GP_SIZE_MULT		143	/* R/W */
+#define EXT_CSD_PARTITION_ATTRIBUTE	156	/* R/W */
+#define EXT_CSD_PARTITION_SUPPORT	160	/* RO */
+#define EXT_CSD_HPI_MGMT		161	/* R/W */
+#define EXT_CSD_RST_N_FUNCTION		162	/* R/W */
+#define EXT_CSD_BKOPS_EN		163	/* R/W */
+#define EXT_CSD_BKOPS_START		164	/* W */
+#define EXT_CSD_SANITIZE_START		165     /* W */
+#define EXT_CSD_WR_REL_PARAM		166	/* RO */
+#define EXT_CSD_RPMB_MULT		168	/* RO */
+#define EXT_CSD_BOOT_WP			173	/* R/W */
+#define EXT_CSD_ERASE_GROUP_DEF		175	/* R/W */
+#define EXT_CSD_PART_CONFIG		179	/* R/W */
+#define EXT_CSD_ERASED_MEM_CONT		181	/* RO */
+#define EXT_CSD_BUS_WIDTH		183	/* R/W */
+#define EXT_CSD_HS_TIMING		185	/* R/W */
+#define EXT_CSD_POWER_CLASS		187	/* R/W */
+#define EXT_CSD_REV			192	/* RO */
+#define EXT_CSD_STRUCTURE		194	/* RO */
+#define EXT_CSD_CARD_TYPE		196	/* RO */
+#define EXT_CSD_OUT_OF_INTERRUPT_TIME	198	/* RO */
+#define EXT_CSD_PART_SWITCH_TIME        199     /* RO */
+#define EXT_CSD_PWR_CL_52_195		200	/* RO */
+#define EXT_CSD_PWR_CL_26_195		201	/* RO */
+#define EXT_CSD_PWR_CL_52_360		202	/* RO */
+#define EXT_CSD_PWR_CL_26_360		203	/* RO */
+#define EXT_CSD_SEC_CNT			212	/* RO, 4 bytes */
+#define EXT_CSD_S_A_TIMEOUT		217	/* RO */
+#define EXT_CSD_REL_WR_SEC_C		222	/* RO */
+#define EXT_CSD_HC_WP_GRP_SIZE		221	/* RO */
+#define EXT_CSD_ERASE_TIMEOUT_MULT	223	/* RO */
+#define EXT_CSD_HC_ERASE_GRP_SIZE	224	/* RO */
+#define EXT_CSD_BOOT_MULT		226	/* RO */
+#define EXT_CSD_SEC_TRIM_MULT		229	/* RO */
+#define EXT_CSD_SEC_ERASE_MULT		230	/* RO */
+#define EXT_CSD_SEC_FEATURE_SUPPORT	231	/* RO */
+#define EXT_CSD_TRIM_MULT		232	/* RO */
+#define EXT_CSD_PWR_CL_200_195		236	/* RO */
+#define EXT_CSD_PWR_CL_200_360		237	/* RO */
+#define EXT_CSD_PWR_CL_DDR_52_195	238	/* RO */
+#define EXT_CSD_PWR_CL_DDR_52_360	239	/* RO */
+#define EXT_CSD_BKOPS_STATUS		246	/* RO */
+#define EXT_CSD_POWER_OFF_LONG_TIME	247	/* RO */
+#define EXT_CSD_GENERIC_CMD6_TIME	248	/* RO */
+#define EXT_CSD_CACHE_SIZE		249	/* RO, 4 bytes */
+#define EXT_CSD_TAG_UNIT_SIZE		498	/* RO */
+#define EXT_CSD_DATA_TAG_SUPPORT	499	/* RO */
+#define EXT_CSD_BKOPS_SUPPORT		502	/* RO */
+#define EXT_CSD_HPI_FEATURES		503	/* RO */
 
 /*
  * EXT_CSD field definitions
  */
+
+#define EXT_CSD_WR_REL_PARAM_EN		(1<<2)
+
+#define EXT_CSD_BOOT_WP_B_PWR_WP_DIS	(0x40)
+#define EXT_CSD_BOOT_WP_B_PERM_WP_DIS	(0x10)
+#define EXT_CSD_BOOT_WP_B_PERM_WP_EN	(0x04)
+#define EXT_CSD_BOOT_WP_B_PWR_WP_EN	(0x01)
+
+#define EXT_CSD_PART_CONFIG_ACC_MASK	(0x7)
+#define EXT_CSD_PART_CONFIG_ACC_BOOT0	(0x1)
+#define EXT_CSD_PART_CONFIG_ACC_RPMB	(0x3)
+#define EXT_CSD_PART_CONFIG_ACC_GP0	(0x4)
+
+#define EXT_CSD_PART_SUPPORT_PART_EN	(0x1)
 
 #define EXT_CSD_CMD_SET_NORMAL		(1<<0)
 #define EXT_CSD_CMD_SET_SECURE		(1<<1)
@@ -239,10 +351,52 @@ struct _mmc_csd {
 
 #define EXT_CSD_CARD_TYPE_26	(1<<0)	/* Card can run at 26MHz */
 #define EXT_CSD_CARD_TYPE_52	(1<<1)	/* Card can run at 52MHz */
+#define EXT_CSD_CARD_TYPE_MASK	0x3F	/* Mask out reserved bits */
+#define EXT_CSD_CARD_TYPE_DDR_1_8V  (1<<2)   /* Card can run at 52MHz */
+					     /* DDR mode @1.8V or 3V I/O */
+#define EXT_CSD_CARD_TYPE_DDR_1_2V  (1<<3)   /* Card can run at 52MHz */
+					     /* DDR mode @1.2V I/O */
+#define EXT_CSD_CARD_TYPE_DDR_52       (EXT_CSD_CARD_TYPE_DDR_1_8V  \
+					| EXT_CSD_CARD_TYPE_DDR_1_2V)
+#define EXT_CSD_CARD_TYPE_SDR_1_8V	(1<<4)	/* Card can run at 200MHz */
+#define EXT_CSD_CARD_TYPE_SDR_1_2V	(1<<5)	/* Card can run at 200MHz */
+						/* SDR mode @1.2V I/O */
 
 #define EXT_CSD_BUS_WIDTH_1	0	/* Card is in 1 bit mode */
 #define EXT_CSD_BUS_WIDTH_4	1	/* Card is in 4 bit mode */
 #define EXT_CSD_BUS_WIDTH_8	2	/* Card is in 8 bit mode */
+#define EXT_CSD_DDR_BUS_WIDTH_4	5	/* Card is in 4 bit DDR mode */
+#define EXT_CSD_DDR_BUS_WIDTH_8	6	/* Card is in 8 bit DDR mode */
+
+#define EXT_CSD_SEC_ER_EN	BIT(0)
+#define EXT_CSD_SEC_BD_BLK_EN	BIT(2)
+#define EXT_CSD_SEC_GB_CL_EN	BIT(4)
+#define EXT_CSD_SEC_SANITIZE	BIT(6)  /* v4.5 only */
+
+#define EXT_CSD_RST_N_EN_MASK	0x3
+#define EXT_CSD_RST_N_ENABLED	1	/* RST_n is enabled on card */
+
+#define EXT_CSD_NO_POWER_NOTIFICATION	0
+#define EXT_CSD_POWER_ON		1
+#define EXT_CSD_POWER_OFF_SHORT		2
+#define EXT_CSD_POWER_OFF_LONG		3
+
+#define EXT_CSD_PWR_CL_8BIT_MASK	0xF0	/* 8 bit PWR CLS */
+#define EXT_CSD_PWR_CL_4BIT_MASK	0x0F	/* 8 bit PWR CLS */
+#define EXT_CSD_PWR_CL_8BIT_SHIFT	4
+#define EXT_CSD_PWR_CL_4BIT_SHIFT	0
+/*
+ * EXCEPTION_EVENT_STATUS field
+ */
+#define EXT_CSD_URGENT_BKOPS		BIT(0)
+#define EXT_CSD_DYNCAP_NEEDED		BIT(1)
+#define EXT_CSD_SYSPOOL_EXHAUSTED	BIT(2)
+#define EXT_CSD_PACKED_FAILURE		BIT(3)
+
+/*
+ * BKOPS status level
+ */
+#define EXT_CSD_BKOPS_LEVEL_2		0x2
 
 /*
  * MMC_SWITCH access modes
@@ -253,5 +407,4 @@ struct _mmc_csd {
 #define MMC_SWITCH_MODE_CLEAR_BITS	0x02	/* Clear bits which are 1 in value */
 #define MMC_SWITCH_MODE_WRITE_BYTE	0x03	/* Set target to value */
 
-#endif  /* MMC_MMC_PROTOCOL_H */
-
+#endif /* LINUX_MMC_MMC_H */

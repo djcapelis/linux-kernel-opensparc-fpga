@@ -35,7 +35,7 @@ static irqreturn_t sni_isa_irq_handler(int dummy, void *p)
 	if (unlikely(irq < 0))
 		return IRQ_NONE;
 
-	do_IRQ(irq);
+	generic_handle_irq(irq);
 	return IRQ_HANDLED;
 }
 

@@ -1,6 +1,4 @@
 /*
- * $Id: ixp2000.c,v 1.9 2005/11/07 11:14:27 gleixner Exp $
- *
  * drivers/mtd/maps/ixp2000.c
  *
  * Mapping for the Intel XScale IXP2000 based systems
@@ -32,7 +30,7 @@
 #include <linux/mtd/partitions.h>
 
 #include <asm/io.h>
-#include <asm/hardware.h>
+#include <mach/hardware.h>
 #include <asm/mach/flash.h>
 
 #include <linux/reboot.h>
@@ -40,7 +38,6 @@
 struct ixp2000_flash_info {
 	struct		mtd_info *mtd;
 	struct		map_info map;
-	struct		mtd_partition *partitions;
 	struct		resource *res;
 };
 
@@ -121,13 +118,11 @@ static int ixp2000_flash_remove(struct platform_device *dev)
 		return 0;
 
 	if (info->mtd) {
-		del_mtd_partitions(info->mtd);
+		mtd_device_unregister(info->mtd);
 		map_destroy(info->mtd);
 	}
 	if (info->map.map_priv_1)
 		iounmap((void *) info->map.map_priv_1);
-
-	kfree(info->partitions);
 
 	if (info->res) {
 		release_resource(info->res);
@@ -157,7 +152,7 @@ static int ixp2000_flash_probe(struct platform_device *dev)
 	if (!plat)
 		return -ENODEV;
 
-	window_size = dev->resource->end - dev->resource->start + 1;
+	window_size = resource_size(dev->resource);
 	dev_info(&dev->dev, "Probe of IXP2000 flash(%d banks x %dMiB)\n",
 		 ixp_data->nr_banks, ((u32)window_size >> 20));
 
@@ -167,12 +162,11 @@ static int ixp2000_flash_probe(struct platform_device *dev)
 		return -EIO;
 	}
 
-	info = kmalloc(sizeof(struct ixp2000_flash_info), GFP_KERNEL);
+	info = kzalloc(sizeof(struct ixp2000_flash_info), GFP_KERNEL);
 	if(!info) {
 		err = -ENOMEM;
 		goto Error;
 	}
-	memzero(info, sizeof(struct ixp2000_flash_info));
 
 	platform_set_drvdata(dev, info);
 
@@ -186,27 +180,28 @@ static int ixp2000_flash_probe(struct platform_device *dev)
 	info->map.bankwidth = 1;
 
 	/*
- 	 * map_priv_2 is used to store a ptr to to the bank_setup routine
+ 	 * map_priv_2 is used to store a ptr to the bank_setup routine
  	 */
 	info->map.map_priv_2 = (unsigned long) ixp_data->bank_setup;
 
-	info->map.name = dev->dev.bus_id;
+	info->map.name = dev_name(&dev->dev);
 	info->map.read = ixp2000_flash_read8;
 	info->map.write = ixp2000_flash_write8;
 	info->map.copy_from = ixp2000_flash_copy_from;
 	info->map.copy_to = ixp2000_flash_copy_to;
 
 	info->res = request_mem_region(dev->resource->start,
-			dev->resource->end - dev->resource->start + 1,
-			dev->dev.bus_id);
+				       resource_size(dev->resource),
+				       dev_name(&dev->dev));
 	if (!info->res) {
 		dev_err(&dev->dev, "Could not reserve memory region\n");
 		err = -ENOMEM;
 		goto Error;
 	}
 
-	info->map.map_priv_1 = (unsigned long) ioremap(dev->resource->start,
-			    	dev->resource->end - dev->resource->start + 1);
+	info->map.map_priv_1 =
+		(unsigned long)ioremap(dev->resource->start,
+				       resource_size(dev->resource));
 	if (!info->map.map_priv_1) {
 		dev_err(&dev->dev, "Failed to ioremap flash region\n");
 		err = -EIO;
@@ -231,13 +226,7 @@ static int ixp2000_flash_probe(struct platform_device *dev)
 	}
 	info->mtd->owner = THIS_MODULE;
 
-	err = parse_mtd_partitions(info->mtd, probes, &info->partitions, 0);
-	if (err > 0) {
-		err = add_mtd_partitions(info->mtd, info->partitions, err);
-		if(err)
-			dev_err(&dev->dev, "Could not parse partitions\n");
-	}
-
+	err = mtd_device_parse_register(info->mtd, probes, NULL, NULL, 0);
 	if (err)
 		goto Error;
 
@@ -253,21 +242,12 @@ static struct platform_driver ixp2000_flash_driver = {
 	.remove		= ixp2000_flash_remove,
 	.driver		= {
 		.name	= "IXP2000-Flash",
+		.owner	= THIS_MODULE,
 	},
 };
 
-static int __init ixp2000_flash_init(void)
-{
-	return platform_driver_register(&ixp2000_flash_driver);
-}
+module_platform_driver(ixp2000_flash_driver);
 
-static void __exit ixp2000_flash_exit(void)
-{
-	platform_driver_unregister(&ixp2000_flash_driver);
-}
-
-module_init(ixp2000_flash_init);
-module_exit(ixp2000_flash_exit);
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Deepak Saxena <dsaxena@plexity.net>");
-
+MODULE_ALIAS("platform:IXP2000-Flash");

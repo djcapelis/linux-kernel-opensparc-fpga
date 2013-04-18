@@ -3,7 +3,7 @@
 #
 
 config WAN_ROUTER
-	tristate "WAN router"
+	tristate "WAN router (DEPRECATED)"
 	depends on EXPERIMENTAL
 	---help---
 	  Wide Area Networks (WANs), such as X.25, frame relay and leased
@@ -20,8 +20,6 @@ config WAN_ROUTER
 	  wish to use your Linux box as a WAN router, say Y here and also to
 	  the WAN driver for your card, below.  You will then need the
 	  wan-tools package which is available from <ftp://ftp.sangoma.com/>.
-	  Read <file:Documentation/networking/wan-router.txt> for more
-	  information.
 
 	  To compile WAN routing support as a module, choose M here: the
 	  module will be called wanrouter.

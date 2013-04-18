@@ -14,6 +14,7 @@
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/poll.h>
+#include <linux/mutex.h>
 #include <asm/uaccess.h>
 
 #include "platform.h"
@@ -21,6 +22,7 @@
 #include "divasync.h"
 #include "debug_if.h"
 
+static DEFINE_MUTEX(maint_mutex);
 static char *main_revision = "$Revision: 1.32.6.10 $";
 
 static int major;
@@ -36,7 +38,7 @@ static unsigned long diva_dbg_mem = 0;
 module_param(diva_dbg_mem, ulong, 0);
 
 static char *DRIVERNAME =
-    "Eicon DIVA - MAINT module (http://www.melware.net)";
+	"Eicon DIVA - MAINT module (http://www.melware.net)";
 static char *DRIVERLNAME = "diva_mnt";
 static char *DEVNAME = "DivasMAINT";
 char *DRIVERRELEASE_MNT = "2.0";
@@ -84,7 +86,7 @@ int diva_os_copy_from_user(void *os_handle, void *dst, const void __user *src,
 /*
  * get time
  */
-void diva_os_get_time(dword * sec, dword * usec)
+void diva_os_get_time(dword *sec, dword *usec)
 {
 	struct timeval tv;
 
@@ -113,7 +115,7 @@ void diva_os_get_time(dword * sec, dword * usec)
 /*
  * device node operations
  */
-static unsigned int maint_poll(struct file *file, poll_table * wait)
+static unsigned int maint_poll(struct file *file, poll_table *wait)
 {
 	unsigned int mask = 0;
 
@@ -127,14 +129,19 @@ static unsigned int maint_poll(struct file *file, poll_table * wait)
 
 static int maint_open(struct inode *ino, struct file *filep)
 {
+	int ret;
+
+	mutex_lock(&maint_mutex);
 	/* only one open is allowed, so we test
 	   it atomically */
 	if (test_and_set_bit(0, &opened))
-		return (-EBUSY);
-
-	filep->private_data = NULL;
-
-	return nonseekable_open(ino, filep);
+		ret = -EBUSY;
+	else {
+		filep->private_data = NULL;
+		ret = nonseekable_open(ino, filep);
+	}
+	mutex_unlock(&maint_mutex);
+	return ret;
 }
 
 static int maint_close(struct inode *ino, struct file *filep)
@@ -146,18 +153,18 @@ static int maint_close(struct inode *ino, struct file *filep)
 
 	/* clear 'used' flag */
 	clear_bit(0, &opened);
-	
+
 	return (0);
 }
 
 static ssize_t divas_maint_write(struct file *file, const char __user *buf,
-				 size_t count, loff_t * ppos)
+				 size_t count, loff_t *ppos)
 {
 	return (maint_read_write((char __user *) buf, (int) count));
 }
 
 static ssize_t divas_maint_read(struct file *file, char __user *buf,
-				size_t count, loff_t * ppos)
+				size_t count, loff_t *ppos)
 {
 	return (maint_read_write(buf, (int) count));
 }
@@ -177,7 +184,7 @@ static void divas_maint_unregister_chrdev(void)
 	unregister_chrdev(major, DEVNAME);
 }
 
-static int DIVA_INIT_FUNCTION divas_maint_register_chrdev(void)
+static int __init divas_maint_register_chrdev(void)
 {
 	if ((major = register_chrdev(0, DEVNAME, &divas_maint_fops)) < 0)
 	{
@@ -200,7 +207,7 @@ void diva_maint_wakeup_read(void)
 /*
  *  Driver Load
  */
-static int DIVA_INIT_FUNCTION maint_init(void)
+static int __init maint_init(void)
 {
 	char tmprev[50];
 	int ret = 0;
@@ -231,14 +238,14 @@ static int DIVA_INIT_FUNCTION maint_init(void)
 	       DRIVERLNAME, buffer, (buffer_length / 1024),
 	       (diva_dbg_mem == 0) ? "internal" : "external", major);
 
-      out:
+out:
 	return (ret);
 }
 
 /*
 **  Driver Unload
 */
-static void DIVA_EXIT_FUNCTION maint_exit(void)
+static void __exit maint_exit(void)
 {
 	divas_maint_unregister_chrdev();
 	mntfunc_finit();
@@ -248,4 +255,3 @@ static void DIVA_EXIT_FUNCTION maint_exit(void)
 
 module_init(maint_init);
 module_exit(maint_exit);
-

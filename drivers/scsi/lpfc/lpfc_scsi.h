@@ -1,7 +1,7 @@
 /*******************************************************************
  * This file is part of the Emulex Linux Device Driver for         *
  * Fibre Channel Host Bus Adapters.                                *
- * Copyright (C) 2004-2005 Emulex.  All rights reserved.           *
+ * Copyright (C) 2004-2012 Emulex.  All rights reserved.           *
  * EMULEX and SLI are trademarks of Emulex.                        *
  * www.emulex.com                                                  *
  *                                                                 *
@@ -21,6 +21,7 @@
 #include <asm/byteorder.h>
 
 struct lpfc_hba;
+#define LPFC_FCP_CDB_LEN 16
 
 #define list_remove_head(list, entry, type, member)		\
 	do {							\
@@ -102,29 +103,35 @@ struct fcp_cmnd {
 #define  WRITE_DATA      0x01	/* Bit 0 */
 #define  READ_DATA       0x02	/* Bit 1 */
 
-	uint8_t fcpCdb[16];	/* SRB cdb field is copied here */
+	uint8_t fcpCdb[LPFC_FCP_CDB_LEN]; /* SRB cdb field is copied here */
 	uint32_t fcpDl;		/* Total transfer length */
 
+};
+
+struct lpfc_scsicmd_bkt {
+	uint32_t cmd_count;
 };
 
 struct lpfc_scsi_buf {
 	struct list_head list;
 	struct scsi_cmnd *pCmd;
-	struct lpfc_hba *scsi_hba;
 	struct lpfc_rport_data *rdata;
 
 	uint32_t timeout;
 
+	uint16_t exch_busy;     /* SLI4 hba reported XB on complete WCQE */
 	uint16_t status;	/* From IOCB Word 7- ulpStatus */
 	uint32_t result;	/* From IOCB Word 4. */
 
 	uint32_t   seg_cnt;	/* Number of scatter-gather segments returned by
 				 * dma_map_sg.  The driver needs this for calls
 				 * to dma_unmap_sg. */
+	uint32_t prot_seg_cnt;  /* seg_cnt's counterpart for protection data */
+
 	dma_addr_t nonsg_phys;	/* Non scatter-gather physical address. */
 
 	/*
-	 * data and dma_handle are the kernel virutal and bus address of the
+	 * data and dma_handle are the kernel virtual and bus address of the
 	 * dma-able buffer containing the fcp_cmd, fcp_rsp and a scatter
 	 * gather bde list that supports the sg_tablesize value.
 	 */
@@ -135,13 +142,26 @@ struct lpfc_scsi_buf {
 	struct fcp_rsp *fcp_rsp;
 	struct ulp_bde64 *fcp_bpl;
 
+	dma_addr_t dma_phys_bpl;
+
 	/* cur_iocbq has phys of the dma-able buffer.
 	 * Iotag is in here
 	 */
 	struct lpfc_iocbq cur_iocbq;
+	wait_queue_head_t *waitq;
+	unsigned long start_time;
+
+#ifdef CONFIG_SCSI_LPFC_DEBUG_FS
+	/* Used to restore any changes to protection data for error injection */
+	void *prot_data_segment;
+	uint32_t prot_data;
+	uint32_t prot_data_type;
+#define	LPFC_INJERR_REFTAG	1
+#define	LPFC_INJERR_APPTAG	2
+#define	LPFC_INJERR_GUARD	3
+#endif
 };
 
 #define LPFC_SCSI_DMA_EXT_SIZE 264
 #define LPFC_BPL_SIZE          1024
-
 #define MDAC_DIRECT_CMD                  0x22

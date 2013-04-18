@@ -21,6 +21,8 @@ ffff8000	ffffffff	copy_user_page / clear_user_page use.
 				For SA11xx and Xscale, this is used to
 				setup a minicache mapping.
 
+ffff4000	ffffffff	cache aliasing on ARMv6 and later CPUs.
+
 ffff1000	ffff7fff	Reserved.
 				Platforms must not use this address range.
 
@@ -29,28 +31,47 @@ ffff0000	ffff0fff	CPU vector page.
 				CPU supports vector relocation (control
 				register V bit.)
 
-ffc00000	fffeffff	DMA memory mapping region.  Memory returned
+fffe0000	fffeffff	XScale cache flush area.  This is used
+				in proc-xscale.S to flush the whole data
+				cache. (XScale does not have TCM.)
+
+fffe8000	fffeffff	DTCM mapping area for platforms with
+				DTCM mounted inside the CPU.
+
+fffe0000	fffe7fff	ITCM mapping area for platforms with
+				ITCM mounted inside the CPU.
+
+fff00000	fffdffff	Fixmap mapping region.  Addresses provided
+				by fix_to_virt() will be located here.
+
+ffc00000	ffefffff	DMA memory mapping region.  Memory returned
 				by the dma_alloc_xxx functions will be
 				dynamically mapped here.
 
 ff000000	ffbfffff	Reserved for future expansion of DMA
 				mapping region.
 
-VMALLOC_END	feffffff	Free for platform use, recommended.
-				VMALLOC_END must be aligned to a 2MB
-				boundary.
+fee00000	feffffff	Mapping of PCI I/O space. This is a static
+				mapping within the vmalloc space.
 
 VMALLOC_START	VMALLOC_END-1	vmalloc() / ioremap() space.
 				Memory returned by vmalloc/ioremap will
 				be dynamically placed in this region.
-				VMALLOC_START may be based upon the value
-				of the high_memory variable.
+				Machine specific static mappings are also
+				located here through iotable_init().
+				VMALLOC_START is based upon the value
+				of the high_memory variable, and VMALLOC_END
+				is equal to 0xff000000.
 
 PAGE_OFFSET	high_memory-1	Kernel direct-mapped RAM region.
 				This maps the platforms RAM, and typically
 				maps all platform RAM in a 1:1 relationship.
 
-TASK_SIZE	PAGE_OFFSET-1	Kernel module space
+PKMAP_BASE	PAGE_OFFSET-1	Permanent kernel mappings
+				One way of mapping HIGHMEM pages into kernel
+				space.
+
+MODULES_VADDR	MODULES_END-1	Kernel module space
 				Kernel modules inserted via insmod are
 				placed here using dynamic mappings.
 

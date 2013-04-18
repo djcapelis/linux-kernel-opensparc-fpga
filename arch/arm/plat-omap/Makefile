@@ -3,18 +3,18 @@
 #
 
 # Common support
-obj-y := common.o sram.o sram-fn.o clock.o devices.o dma.o mux.o gpio.o \
-	 usb.o fb.o
+obj-y := sram.o dma.o counter_32k.o
 obj-m :=
 obj-n :=
 obj-  :=
 
-obj-$(CONFIG_OMAP_32K_TIMER)	+= timer32k.o
+# omap_device support (OMAP2+ only at the moment)
 
-# OCPI interconnect support for 1710, 1610 and 5912
-obj-$(CONFIG_ARCH_OMAP16XX) += ocpi.o
-
-
-obj-$(CONFIG_CPU_FREQ) += cpu-omap.o
 obj-$(CONFIG_OMAP_DM_TIMER) += dmtimer.o
 obj-$(CONFIG_OMAP_DEBUG_LEDS) += debug-leds.o
+i2c-omap-$(CONFIG_I2C_OMAP) := i2c.o
+obj-y += $(i2c-omap-m) $(i2c-omap-y)
+
+# OMAP mailbox framework
+obj-$(CONFIG_OMAP_MBOX_FWK) += mailbox.o
+

@@ -19,21 +19,12 @@
 #include <linux/moduleloader.h>
 #include <linux/vmalloc.h>
 
-void *module_alloc(unsigned long size)
-{
-	if (size == 0)
-		return NULL;
-	return vmalloc(size);
-}
-
 void module_free(struct module *mod, void *module_region)
 {
 	vfree(mod->arch.syminfo);
 	mod->arch.syminfo = NULL;
 
 	vfree(module_region);
-	/* FIXME: if module_region == mod->init_region, trim exception
-	 * table entries. */
 }
 
 static inline int check_rela(Elf32_Rela *rela, struct module *module,
@@ -301,25 +292,11 @@ int apply_relocate_add(Elf32_Shdr *sechdrs, const char *strtab,
 	return ret;
 }
 
-int apply_relocate(Elf32_Shdr *sechdrs, const char *strtab,
-		   unsigned int symindex, unsigned int relindex,
-		   struct module *module)
-{
-	printk(KERN_ERR "module %s: REL relocations are not supported\n",
-		module->name);
-	return -ENOEXEC;
-}
-
 int module_finalize(const Elf_Ehdr *hdr, const Elf_Shdr *sechdrs,
 		    struct module *module)
 {
 	vfree(module->arch.syminfo);
 	module->arch.syminfo = NULL;
 
-	return module_bug_finalize(hdr, sechdrs, module);
-}
-
-void module_arch_cleanup(struct module *module)
-{
-	module_bug_cleanup(module);
+	return 0;
 }

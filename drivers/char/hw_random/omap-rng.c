@@ -1,7 +1,5 @@
 /*
- * drivers/char/hw_random/omap-rng.c
- *
- * RNG driver for TI OMAP CPU family
+ * omap-rng.c - RNG driver for TI OMAP CPU family
  *
  * Author: Deepak Saxena <dsaxena@plexity.net>
  *
@@ -10,25 +8,22 @@
  * Mostly based on original driver:
  *
  * Copyright (C) 2005 Nokia Corporation
- * Author: Juha Yrj��<juha.yrjola@nokia.com>
+ * Author: Juha Yrjölä <juha.yrjola@nokia.com>
  *
  * This file is licensed under  the terms of the GNU General Public
  * License version 2. This program is licensed "as is" without any
  * warranty of any kind, whether express or implied.
- *
- * TODO:
- *
- * - Make status updated be interrupt driven so we don't poll
- *
  */
 
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/random.h>
-#include <linux/clk.h>
 #include <linux/err.h>
 #include <linux/platform_device.h>
 #include <linux/hw_random.h>
+#include <linux/delay.h>
+#include <linux/slab.h>
+#include <linux/pm_runtime.h>
 
 #include <asm/io.h>
 
@@ -50,31 +45,57 @@
 #define RNG_SYSSTATUS		0x44		/* System status
 							[0] = RESETDONE */
 
-static void __iomem *rng_base;
-static struct clk *rng_ick;
-static struct platform_device *rng_dev;
+/**
+ * struct omap_rng_private_data - RNG IP block-specific data
+ * @base: virtual address of the beginning of the RNG IP block registers
+ * @mem_res: struct resource * for the IP block registers physical memory
+ */
+struct omap_rng_private_data {
+	void __iomem *base;
+	struct resource *mem_res;
+};
 
-static u32 omap_rng_read_reg(int reg)
+static inline u32 omap_rng_read_reg(struct omap_rng_private_data *priv, int reg)
 {
-	return __raw_readl(rng_base + reg);
+	return __raw_readl(priv->base + reg);
 }
 
-static void omap_rng_write_reg(int reg, u32 val)
+static inline void omap_rng_write_reg(struct omap_rng_private_data *priv,
+				      int reg, u32 val)
 {
-	__raw_writel(val, rng_base + reg);
+	__raw_writel(val, priv->base + reg);
 }
 
-/* REVISIT: Does the status bit really work on 16xx? */
-static int omap_rng_data_present(struct hwrng *rng)
+static int omap_rng_data_present(struct hwrng *rng, int wait)
 {
-	return omap_rng_read_reg(RNG_STAT_REG) ? 0 : 1;
+	struct omap_rng_private_data *priv;
+	int data, i;
+
+	priv = (struct omap_rng_private_data *)rng->priv;
+
+	for (i = 0; i < 20; i++) {
+		data = omap_rng_read_reg(priv, RNG_STAT_REG) ? 0 : 1;
+		if (data || !wait)
+			break;
+		/* RNG produces data fast enough (2+ MBit/sec, even
+		 * during "rngtest" loads, that these delays don't
+		 * seem to trigger.  We *could* use the RNG IRQ, but
+		 * that'd be higher overhead ... so why bother?
+		 */
+		udelay(10);
+	}
+	return data;
 }
 
 static int omap_rng_data_read(struct hwrng *rng, u32 *data)
 {
-	*data = omap_rng_read_reg(RNG_OUT_REG);
+	struct omap_rng_private_data *priv;
 
-	return 4;
+	priv = (struct omap_rng_private_data *)rng->priv;
+
+	*data = omap_rng_read_reg(priv, RNG_OUT_REG);
+
+	return sizeof(u32);
 }
 
 static struct hwrng omap_rng_ops = {
@@ -83,113 +104,120 @@ static struct hwrng omap_rng_ops = {
 	.data_read	= omap_rng_data_read,
 };
 
-static int __init omap_rng_probe(struct platform_device *pdev)
+static int omap_rng_probe(struct platform_device *pdev)
 {
-	struct resource *res, *mem;
+	struct omap_rng_private_data *priv;
 	int ret;
 
-	/*
-	 * A bit ugly, and it will never actually happen but there can
-	 * be only one RNG and this catches any bork
-	 */
-	BUG_ON(rng_dev);
+	priv = kzalloc(sizeof(struct omap_rng_private_data), GFP_KERNEL);
+	if (!priv) {
+		dev_err(&pdev->dev, "could not allocate memory\n");
+		return -ENOMEM;
+	};
 
-	if (cpu_is_omap24xx()) {
-		rng_ick = clk_get(NULL, "rng_ick");
-		if (IS_ERR(rng_ick)) {
-			dev_err(&pdev->dev, "Could not get rng_ick\n");
-			ret = PTR_ERR(rng_ick);
-			return ret;
-		} else
-			clk_enable(rng_ick);
+	omap_rng_ops.priv = (unsigned long)priv;
+	dev_set_drvdata(&pdev->dev, priv);
+
+	priv->mem_res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	if (!priv->mem_res) {
+		ret = -ENOENT;
+		goto err_ioremap;
 	}
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	priv->base = devm_request_and_ioremap(&pdev->dev, priv->mem_res);
+	if (!priv->base) {
+		ret = -ENOMEM;
+		goto err_ioremap;
+	}
+	dev_set_drvdata(&pdev->dev, priv);
 
-	if (!res)
-		return -ENOENT;
-
-	mem = request_mem_region(res->start, res->end - res->start + 1,
-				 pdev->name);
-	if (mem == NULL)
-		return -EBUSY;
-
-	dev_set_drvdata(&pdev->dev, mem);
-	rng_base = (u32 __iomem *)io_p2v(res->start);
+	pm_runtime_enable(&pdev->dev);
+	pm_runtime_get_sync(&pdev->dev);
 
 	ret = hwrng_register(&omap_rng_ops);
-	if (ret) {
-		release_resource(mem);
-		rng_base = NULL;
-		return ret;
-	}
+	if (ret)
+		goto err_register;
 
 	dev_info(&pdev->dev, "OMAP Random Number Generator ver. %02x\n",
-		omap_rng_read_reg(RNG_REV_REG));
-	omap_rng_write_reg(RNG_MASK_REG, 0x1);
+		 omap_rng_read_reg(priv, RNG_REV_REG));
 
-	rng_dev = pdev;
+	omap_rng_write_reg(priv, RNG_MASK_REG, 0x1);
 
 	return 0;
+
+err_register:
+	priv->base = NULL;
+	pm_runtime_disable(&pdev->dev);
+err_ioremap:
+	kfree(priv);
+
+	return ret;
 }
 
 static int __exit omap_rng_remove(struct platform_device *pdev)
 {
-	struct resource *mem = dev_get_drvdata(&pdev->dev);
+	struct omap_rng_private_data *priv = dev_get_drvdata(&pdev->dev);
 
 	hwrng_unregister(&omap_rng_ops);
 
-	omap_rng_write_reg(RNG_MASK_REG, 0x0);
+	omap_rng_write_reg(priv, RNG_MASK_REG, 0x0);
 
-	if (cpu_is_omap24xx()) {
-		clk_disable(rng_ick);
-		clk_put(rng_ick);
-	}
+	pm_runtime_put_sync(&pdev->dev);
+	pm_runtime_disable(&pdev->dev);
 
-	release_resource(mem);
-	rng_base = NULL;
+	release_mem_region(priv->mem_res->start, resource_size(priv->mem_res));
+
+	kfree(priv);
 
 	return 0;
 }
 
-#ifdef CONFIG_PM
+#ifdef CONFIG_PM_SLEEP
 
-static int omap_rng_suspend(struct platform_device *pdev, pm_message_t message)
+static int omap_rng_suspend(struct device *dev)
 {
-	omap_rng_write_reg(RNG_MASK_REG, 0x0);
+	struct omap_rng_private_data *priv = dev_get_drvdata(dev);
+
+	omap_rng_write_reg(priv, RNG_MASK_REG, 0x0);
+	pm_runtime_put_sync(dev);
+
 	return 0;
 }
 
-static int omap_rng_resume(struct platform_device *pdev)
+static int omap_rng_resume(struct device *dev)
 {
-	omap_rng_write_reg(RNG_MASK_REG, 0x1);
+	struct omap_rng_private_data *priv = dev_get_drvdata(dev);
+
+	pm_runtime_get_sync(dev);
+	omap_rng_write_reg(priv, RNG_MASK_REG, 0x1);
+
 	return 0;
 }
+
+static SIMPLE_DEV_PM_OPS(omap_rng_pm, omap_rng_suspend, omap_rng_resume);
+#define	OMAP_RNG_PM	(&omap_rng_pm)
 
 #else
 
-#define	omap_rng_suspend	NULL
-#define	omap_rng_resume		NULL
+#define	OMAP_RNG_PM	NULL
 
 #endif
 
+/* work with hotplug and coldplug */
+MODULE_ALIAS("platform:omap_rng");
 
 static struct platform_driver omap_rng_driver = {
 	.driver = {
 		.name		= "omap_rng",
 		.owner		= THIS_MODULE,
+		.pm		= OMAP_RNG_PM,
 	},
 	.probe		= omap_rng_probe,
 	.remove		= __exit_p(omap_rng_remove),
-	.suspend	= omap_rng_suspend,
-	.resume		= omap_rng_resume
 };
 
 static int __init omap_rng_init(void)
 {
-	if (!cpu_is_omap16xx() && !cpu_is_omap24xx())
-		return -ENODEV;
-
 	return platform_driver_register(&omap_rng_driver);
 }
 

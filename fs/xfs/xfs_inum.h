@@ -26,22 +26,6 @@
  * high agno_log-agblklog-inopblog bits - 0
  */
 
-typedef	__uint32_t	xfs_agino_t;	/* within allocation grp inode number */
-
-/*
- * Useful inode bits for this kernel.
- * Used in some places where having 64-bits in the 32-bit kernels
- * costs too much.
- */
-#if XFS_BIG_INUMS
-typedef	xfs_ino_t	xfs_intino_t;
-#else
-typedef	__uint32_t	xfs_intino_t;
-#endif
-
-#define	NULLFSINO	((xfs_ino_t)-1)
-#define	NULLAGINO	((xfs_agino_t)-1)
-
 struct xfs_mount;
 
 #define	XFS_INO_MASK(k)			(__uint32_t)((1ULL << (k)) - 1)
@@ -72,7 +56,6 @@ struct xfs_mount;
 
 #if XFS_BIG_INUMS
 #define	XFS_MAXINUMBER		((xfs_ino_t)((1ULL << 56) - 1ULL))
-#define	XFS_INO64_OFFSET	((xfs_ino_t)(1ULL << 32))
 #else
 #define	XFS_MAXINUMBER		((xfs_ino_t)((1ULL << 32) - 1ULL))
 #endif

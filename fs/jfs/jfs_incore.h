@@ -38,9 +38,9 @@
 struct jfs_inode_info {
 	int	fileset;	/* fileset number (always 16)*/
 	uint	mode2;		/* jfs-specific mode		*/
-	uint	saved_uid;	/* saved for uid mount option */
-	uint	saved_gid;	/* saved for gid mount option */
-	pxd_t   ixpxd;		/* inode extent descriptor	*/
+	kuid_t	saved_uid;	/* saved for uid mount option */
+	kgid_t	saved_gid;	/* saved for gid mount option */
+	pxd_t	ixpxd;		/* inode extent descriptor	*/
 	dxd_t	acl;		/* dxd describing acl	*/
 	dxd_t	ea;		/* dxd describing ea	*/
 	time_t	otime;		/* time created	*/
@@ -49,9 +49,10 @@ struct jfs_inode_info {
 	short	btorder;	/* access order	*/
 	short	btindex;	/* btpage entry index*/
 	struct inode *ipimap;	/* inode map			*/
-	long	cflag;		/* commit flags		*/
+	unsigned long cflag;	/* commit flags		*/
+	u64	agstart;	/* agstart of the containing IAG */
 	u16	bxflag;		/* xflag of pseudo buffer?	*/
-	unchar	agno;		/* ag number			*/
+	unchar	pad;
 	signed char active_ag;	/* ag currently allocating from	*/
 	lid_t	blid;		/* lid of pseudo buffer?	*/
 	lid_t	atlhead;	/* anonymous tlock list head	*/
@@ -74,10 +75,6 @@ struct jfs_inode_info {
 	/* xattr_sem allows us to access the xattrs without taking i_mutex */
 	struct rw_semaphore xattr_sem;
 	lid_t	xtlid;		/* lid of xtree lock on directory */
-#ifdef CONFIG_JFS_POSIX_ACL
-	struct posix_acl *i_acl;
-	struct posix_acl *i_default_acl;
-#endif
 	union {
 		struct {
 			xtpage_t _xtroot;	/* 288: xtree root */
@@ -106,8 +103,6 @@ struct jfs_inode_info {
 #define i_dtroot u.dir._dtroot
 #define i_inline u.link._inline
 #define i_inline_ea u.link._inline_ea
-
-#define JFS_ACL_NOT_CACHED ((void *)-1)
 
 #define IREAD_LOCK(ip, subclass) \
 	down_read_nested(&JFS_IP(ip)->rdwrlock, subclass)
@@ -190,16 +185,17 @@ struct jfs_sb_info {
 	uint		gengen;		/* inode generation generator*/
 	uint		inostamp;	/* shows inode belongs to fileset*/
 
-        /* Formerly in ipbmap */
+	/* Formerly in ipbmap */
 	struct bmap	*bmap;		/* incore bmap descriptor	*/
 	struct nls_table *nls_tab;	/* current codepage		*/
 	struct inode *direct_inode;	/* metadata inode */
 	uint		state;		/* mount/recovery state	*/
 	unsigned long	flag;		/* mount time flags */
 	uint		p_state;	/* state prior to going no integrity */
-	uint		uid;		/* uid to override on-disk uid */
-	uint		gid;		/* gid to override on-disk gid */
+	kuid_t		uid;		/* uid to override on-disk uid */
+	kgid_t		gid;		/* gid to override on-disk gid */
 	uint		umask;		/* umask to override on-disk umask */
+	uint		minblks_trim;	/* minimum blocks, for online trim */
 };
 
 /* jfs_sb_info commit_state */

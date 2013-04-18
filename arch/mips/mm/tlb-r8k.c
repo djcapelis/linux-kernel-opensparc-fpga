@@ -3,20 +3,20 @@
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1996 David S. Miller (dm@engr.sgi.com)
+ * Copyright (C) 1996 David S. Miller (davem@davemloft.net)
  * Copyright (C) 1997, 1998, 1999, 2000 Ralf Baechle ralf@gnu.org
  * Carsten Langgaard, carstenl@mips.com
  * Copyright (C) 2002 MIPS Technologies, Inc.  All rights reserved.
  */
 #include <linux/init.h>
 #include <linux/sched.h>
+#include <linux/smp.h>
 #include <linux/mm.h>
 
 #include <asm/cpu.h>
 #include <asm/bootinfo.h>
 #include <asm/mmu_context.h>
 #include <asm/pgtable.h>
-#include <asm/system.h>
 
 extern void build_tlb_refill_handler(void);
 
@@ -56,7 +56,7 @@ void local_flush_tlb_mm(struct mm_struct *mm)
 	int cpu = smp_processor_id();
 
 	if (cpu_context(cpu, mm) != 0)
-		drop_mmu_context(mm,cpu);
+		drop_mmu_context(mm, cpu);
 }
 
 void local_flush_tlb_range(struct vm_area_struct *vma, unsigned long start,
@@ -111,8 +111,7 @@ out_restore:
 /* Usable for KV1 addresses only! */
 void local_flush_tlb_kernel_range(unsigned long start, unsigned long end)
 {
-	unsigned long flags;
-	int size;
+	unsigned long size, flags;
 
 	size = (end - start + (PAGE_SIZE - 1)) >> PAGE_SHIFT;
 	size = (size + 1) >> 1;
@@ -214,14 +213,14 @@ void __update_tlb(struct vm_area_struct * vma, unsigned long address, pte_t pte)
 	local_irq_restore(flags);
 }
 
-static void __init probe_tlb(unsigned long config)
+static void __cpuinit probe_tlb(unsigned long config)
 {
 	struct cpuinfo_mips *c = &current_cpu_data;
 
 	c->tlbsize = 3 * 128;		/* 3 sets each 128 entries */
 }
 
-void __init tlb_init(void)
+void __cpuinit tlb_init(void)
 {
 	unsigned int config = read_c0_config();
 	unsigned long status;

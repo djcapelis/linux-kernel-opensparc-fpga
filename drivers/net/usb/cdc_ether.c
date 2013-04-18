@@ -25,38 +25,49 @@
 #include <linux/init.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
-#include <linux/ctype.h>
 #include <linux/ethtool.h>
 #include <linux/workqueue.h>
 #include <linux/mii.h>
 #include <linux/usb.h>
 #include <linux/usb/cdc.h>
-
-#include "usbnet.h"
+#include <linux/usb/usbnet.h>
 
 
 #if defined(CONFIG_USB_NET_RNDIS_HOST) || defined(CONFIG_USB_NET_RNDIS_HOST_MODULE)
 
 static int is_rndis(struct usb_interface_descriptor *desc)
 {
-	return desc->bInterfaceClass == USB_CLASS_COMM
-		&& desc->bInterfaceSubClass == 2
-		&& desc->bInterfaceProtocol == 0xff;
+	return (desc->bInterfaceClass == USB_CLASS_COMM &&
+		desc->bInterfaceSubClass == 2 &&
+		desc->bInterfaceProtocol == 0xff);
 }
 
 static int is_activesync(struct usb_interface_descriptor *desc)
 {
-	return desc->bInterfaceClass == USB_CLASS_MISC
-		&& desc->bInterfaceSubClass == 1
-		&& desc->bInterfaceProtocol == 1;
+	return (desc->bInterfaceClass == USB_CLASS_MISC &&
+		desc->bInterfaceSubClass == 1 &&
+		desc->bInterfaceProtocol == 1);
+}
+
+static int is_wireless_rndis(struct usb_interface_descriptor *desc)
+{
+	return (desc->bInterfaceClass == USB_CLASS_WIRELESS_CONTROLLER &&
+		desc->bInterfaceSubClass == 1 &&
+		desc->bInterfaceProtocol == 3);
 }
 
 #else
 
 #define is_rndis(desc)		0
 #define is_activesync(desc)	0
+#define is_wireless_rndis(desc)	0
 
 #endif
+
+static const u8 mbm_guid[16] = {
+	0xa3, 0x17, 0xa8, 0x8b, 0x04, 0x5e, 0x4f, 0x01,
+	0xa6, 0x07, 0xc0, 0xff, 0xcb, 0x7e, 0x39, 0x2a,
+};
 
 /*
  * probes control interface, claims data interface, collects the bulk
@@ -72,7 +83,10 @@ int usbnet_generic_cdc_bind(struct usbnet *dev, struct usb_interface *intf)
 	struct cdc_state		*info = (void *) &dev->data;
 	int				status;
 	int				rndis;
+	bool				android_rndis_quirk = false;
 	struct usb_driver		*driver = driver_of(intf);
+	struct usb_cdc_mdlm_desc	*desc = NULL;
+	struct usb_cdc_mdlm_detail_desc *detail = NULL;
 
 	if (sizeof dev->data < sizeof *info)
 		return -EDOM;
@@ -86,9 +100,7 @@ int usbnet_generic_cdc_bind(struct usbnet *dev, struct usb_interface *intf)
 		 */
 		buf = dev->udev->actconfig->extra;
 		len = dev->udev->actconfig->extralen;
-		if (len)
-			dev_dbg(&intf->dev,
-				"CDC descriptors on config\n");
+		dev_dbg(&intf->dev, "CDC descriptors on config\n");
 	}
 
 	/* Maybe CDC descriptors are after the endpoint?  This bug has
@@ -110,8 +122,9 @@ int usbnet_generic_cdc_bind(struct usbnet *dev, struct usb_interface *intf)
 	/* this assumes that if there's a non-RNDIS vendor variant
 	 * of cdc-acm, it'll fail RNDIS requests cleanly.
 	 */
-	rndis = is_rndis(&intf->cur_altsetting->desc)
-		|| is_activesync(&intf->cur_altsetting->desc);
+	rndis = (is_rndis(&intf->cur_altsetting->desc) ||
+		 is_activesync(&intf->cur_altsetting->desc) ||
+		 is_wireless_rndis(&intf->cur_altsetting->desc));
 
 	memset(info, 0, sizeof *info);
 	info->control = intf;
@@ -183,6 +196,11 @@ int usbnet_generic_cdc_bind(struct usbnet *dev, struct usb_interface *intf)
 					info->control,
 					info->u->bSlaveInterface0,
 					info->data);
+				/* fall back to hard-wiring for RNDIS */
+				if (rndis) {
+					android_rndis_quirk = true;
+					goto next_desc;
+				}
 				goto bad_desc;
 			}
 			if (info->control != intf) {
@@ -222,21 +240,54 @@ int usbnet_generic_cdc_bind(struct usbnet *dev, struct usb_interface *intf)
 			 * side link address we were given.
 			 */
 			break;
+		case USB_CDC_MDLM_TYPE:
+			if (desc) {
+				dev_dbg(&intf->dev, "extra MDLM descriptor\n");
+				goto bad_desc;
+			}
+
+			desc = (void *)buf;
+
+			if (desc->bLength != sizeof(*desc))
+				goto bad_desc;
+
+			if (memcmp(&desc->bGUID, mbm_guid, 16))
+				goto bad_desc;
+			break;
+		case USB_CDC_MDLM_DETAIL_TYPE:
+			if (detail) {
+				dev_dbg(&intf->dev, "extra MDLM detail descriptor\n");
+				goto bad_desc;
+			}
+
+			detail = (void *)buf;
+
+			if (detail->bGuidDescriptorType == 0) {
+				if (detail->bLength < (sizeof(*detail) + 1))
+					goto bad_desc;
+			} else
+				goto bad_desc;
+			break;
 		}
 next_desc:
 		len -= buf [0];	/* bLength */
 		buf += buf [0];
 	}
 
-	/* Microsoft ActiveSync based RNDIS devices lack the CDC descriptors,
-	 * so we'll hard-wire the interfaces and not check for descriptors.
+	/* Microsoft ActiveSync based and some regular RNDIS devices lack the
+	 * CDC descriptors, so we'll hard-wire the interfaces and not check
+	 * for descriptors.
+	 *
+	 * Some Android RNDIS devices have a CDC Union descriptor pointing
+	 * to non-existing interfaces.  Ignore that and attempt the same
+	 * hard-wired 0 and 1 interfaces.
 	 */
-	if (is_activesync(&intf->cur_altsetting->desc) && !info->u) {
+	if (rndis && (!info->u || android_rndis_quirk)) {
 		info->control = usb_ifnum_to_if(dev->udev, 0);
 		info->data = usb_ifnum_to_if(dev->udev, 1);
-		if (!info->control || !info->data) {
+		if (!info->control || !info->data || info->control != intf) {
 			dev_dbg(&intf->dev,
-				"activesync: master #0/%p slave #1/%p\n",
+				"rndis: master #0/%p slave #1/%p\n",
 				info->control,
 				info->data);
 			goto bad_desc;
@@ -271,10 +322,10 @@ next_desc:
 
 		dev->status = &info->control->cur_altsetting->endpoint [0];
 		desc = &dev->status->desc;
-		if (!usb_endpoint_is_int_in(desc)
-				|| (le16_to_cpu(desc->wMaxPacketSize)
-					< sizeof(struct usb_cdc_notification))
-				|| !desc->bInterval) {
+		if (!usb_endpoint_is_int_in(desc) ||
+		    (le16_to_cpu(desc->wMaxPacketSize)
+		     < sizeof(struct usb_cdc_notification)) ||
+		    !desc->bInterval) {
 			dev_dbg(&intf->dev, "bad notification endpoint\n");
 			dev->status = NULL;
 		}
@@ -316,7 +367,6 @@ void usbnet_cdc_unbind(struct usbnet *dev, struct usb_interface *intf)
 }
 EXPORT_SYMBOL_GPL(usbnet_cdc_unbind);
 
-
 /*-------------------------------------------------------------------------
  *
  * Communications Device Class, Ethernet Control model
@@ -332,13 +382,13 @@ EXPORT_SYMBOL_GPL(usbnet_cdc_unbind);
 
 static void dumpspeed(struct usbnet *dev, __le32 *speeds)
 {
-	if (netif_msg_timer(dev))
-		devinfo(dev, "link speeds: %u kbps up, %u kbps down",
-			__le32_to_cpu(speeds[0]) / 1000,
-		__le32_to_cpu(speeds[1]) / 1000);
+	netif_info(dev, timer, dev->net,
+		   "link speeds: %u kbps up, %u kbps down\n",
+		   __le32_to_cpu(speeds[0]) / 1000,
+		   __le32_to_cpu(speeds[1]) / 1000);
 }
 
-static void cdc_status(struct usbnet *dev, struct urb *urb)
+void usbnet_cdc_status(struct usbnet *dev, struct urb *urb)
 {
 	struct usb_cdc_notification	*event;
 
@@ -354,18 +404,16 @@ static void cdc_status(struct usbnet *dev, struct urb *urb)
 	event = urb->transfer_buffer;
 	switch (event->bNotificationType) {
 	case USB_CDC_NOTIFY_NETWORK_CONNECTION:
-		if (netif_msg_timer(dev))
-			devdbg(dev, "CDC: carrier %s",
-					event->wValue ? "on" : "off");
+		netif_dbg(dev, timer, dev->net, "CDC: carrier %s\n",
+			  event->wValue ? "on" : "off");
 		if (event->wValue)
 			netif_carrier_on(dev->net);
 		else
 			netif_carrier_off(dev->net);
 		break;
 	case USB_CDC_NOTIFY_SPEED_CHANGE:	/* tx/rx rates */
-		if (netif_msg_timer(dev))
-			devdbg(dev, "CDC: speed change (len %d)",
-					urb->actual_length);
+		netif_dbg(dev, timer, dev->net, "CDC: speed change (len %d)\n",
+			  urb->actual_length);
 		if (urb->actual_length != (sizeof *event + 8))
 			set_bit(EVENT_STS_SPLIT, &dev->flags);
 		else
@@ -375,52 +423,26 @@ static void cdc_status(struct usbnet *dev, struct urb *urb)
 	 * but there are no standard formats for the response data.
 	 */
 	default:
-		deverr(dev, "CDC: unexpected notification %02x!",
-				 event->bNotificationType);
+		netdev_err(dev->net, "CDC: unexpected notification %02x!\n",
+			   event->bNotificationType);
 		break;
 	}
 }
+EXPORT_SYMBOL_GPL(usbnet_cdc_status);
 
-static u8 nibble(unsigned char c)
-{
-	if (likely(isdigit(c)))
-		return c - '0';
-	c = toupper(c);
-	if (likely(isxdigit(c)))
-		return 10 + c - 'A';
-	return 0;
-}
-
-static inline int
-get_ethernet_addr(struct usbnet *dev, struct usb_cdc_ether_desc *e)
-{
-	int 		tmp, i;
-	unsigned char	buf [13];
-
-	tmp = usb_string(dev->udev, e->iMACAddress, buf, sizeof buf);
-	if (tmp != 12) {
-		dev_dbg(&dev->udev->dev,
-			"bad MAC string %d fetch, %d\n", e->iMACAddress, tmp);
-		if (tmp >= 0)
-			tmp = -EINVAL;
-		return tmp;
-	}
-	for (i = tmp = 0; i < 6; i++, tmp += 2)
-		dev->net->dev_addr [i] =
-			(nibble(buf [tmp]) << 4) + nibble(buf [tmp + 1]);
-	return 0;
-}
-
-static int cdc_bind(struct usbnet *dev, struct usb_interface *intf)
+int usbnet_cdc_bind(struct usbnet *dev, struct usb_interface *intf)
 {
 	int				status;
 	struct cdc_state		*info = (void *) &dev->data;
+
+	BUILD_BUG_ON((sizeof(((struct usbnet *)0)->data)
+			< sizeof(struct cdc_state)));
 
 	status = usbnet_generic_cdc_bind(dev, intf);
 	if (status < 0)
 		return status;
 
-	status = get_ethernet_addr(dev, info->ether);
+	status = usbnet_get_ethernet_addr(dev, info->ether->iMACAddress);
 	if (status < 0) {
 		usb_set_intfdata(info->data, NULL);
 		usb_driver_release_interface(driver_of(intf), info->data);
@@ -433,18 +455,33 @@ static int cdc_bind(struct usbnet *dev, struct usb_interface *intf)
 	 */
 	return 0;
 }
+EXPORT_SYMBOL_GPL(usbnet_cdc_bind);
 
 static const struct driver_info	cdc_info = {
 	.description =	"CDC Ethernet Device",
-	.flags =	FLAG_ETHER,
+	.flags =	FLAG_ETHER | FLAG_POINTTOPOINT,
 	// .check_connect = cdc_check_connect,
-	.bind =		cdc_bind,
+	.bind =		usbnet_cdc_bind,
 	.unbind =	usbnet_cdc_unbind,
-	.status =	cdc_status,
+	.status =	usbnet_cdc_status,
+	.manage_power =	usbnet_manage_power,
+};
+
+static const struct driver_info wwan_info = {
+	.description =	"Mobile Broadband Network Device",
+	.flags =	FLAG_WWAN,
+	.bind =		usbnet_cdc_bind,
+	.unbind =	usbnet_cdc_unbind,
+	.status =	usbnet_cdc_status,
+	.manage_power =	usbnet_manage_power,
 };
 
 /*-------------------------------------------------------------------------*/
 
+#define HUAWEI_VENDOR_ID	0x12D1
+#define NOVATEL_VENDOR_ID	0x1410
+#define ZTE_VENDOR_ID		0x19D2
+#define DELL_VENDOR_ID		0x413C
 
 static const struct usb_device_id	products [] = {
 /*
@@ -536,6 +573,48 @@ static const struct usb_device_id	products [] = {
 	.driver_info		= 0,
 },
 
+/* LG Electronics VL600 wants additional headers on every frame */
+{
+	USB_DEVICE_AND_INTERFACE_INFO(0x1004, 0x61aa, USB_CLASS_COMM,
+			USB_CDC_SUBCLASS_ETHERNET, USB_CDC_PROTO_NONE),
+	.driver_info = 0,
+},
+
+/* Logitech Harmony 900 - uses the pseudo-MDLM (BLAN) driver */
+{
+	USB_DEVICE_AND_INTERFACE_INFO(0x046d, 0xc11f, USB_CLASS_COMM,
+			USB_CDC_SUBCLASS_MDLM, USB_CDC_PROTO_NONE),
+	.driver_info		= 0,
+},
+
+/* Novatel USB551L and MC551 - handled by qmi_wwan */
+{
+	USB_DEVICE_AND_INTERFACE_INFO(NOVATEL_VENDOR_ID, 0xB001, USB_CLASS_COMM,
+			USB_CDC_SUBCLASS_ETHERNET, USB_CDC_PROTO_NONE),
+	.driver_info = 0,
+},
+
+/* Novatel E362 - handled by qmi_wwan */
+{
+	USB_DEVICE_AND_INTERFACE_INFO(NOVATEL_VENDOR_ID, 0x9010, USB_CLASS_COMM,
+			USB_CDC_SUBCLASS_ETHERNET, USB_CDC_PROTO_NONE),
+	.driver_info = 0,
+},
+
+/* Dell Wireless 5800 (Novatel E362) - handled by qmi_wwan */
+{
+	USB_DEVICE_AND_INTERFACE_INFO(DELL_VENDOR_ID, 0x8195, USB_CLASS_COMM,
+			USB_CDC_SUBCLASS_ETHERNET, USB_CDC_PROTO_NONE),
+	.driver_info = 0,
+},
+
+/* Dell Wireless 5800 (Novatel E362) - handled by qmi_wwan */
+{
+	USB_DEVICE_AND_INTERFACE_INFO(DELL_VENDOR_ID, 0x8196, USB_CLASS_COMM,
+			USB_CDC_SUBCLASS_ETHERNET, USB_CDC_PROTO_NONE),
+	.driver_info = 0,
+},
+
 /*
  * WHITELIST!!!
  *
@@ -548,9 +627,78 @@ static const struct usb_device_id	products [] = {
  * because of bugs/quirks in a given product (like Zaurus, above).
  */
 {
+	/* ZTE (Vodafone) K3805-Z */
+	.match_flags    =   USB_DEVICE_ID_MATCH_VENDOR
+		 | USB_DEVICE_ID_MATCH_PRODUCT
+		 | USB_DEVICE_ID_MATCH_INT_INFO,
+	.idVendor               = ZTE_VENDOR_ID,
+	.idProduct		= 0x1003,
+	.bInterfaceClass	= USB_CLASS_COMM,
+	.bInterfaceSubClass	= USB_CDC_SUBCLASS_ETHERNET,
+	.bInterfaceProtocol	= USB_CDC_PROTO_NONE,
+	.driver_info = (unsigned long)&wwan_info,
+}, {
+	/* ZTE (Vodafone) K3806-Z */
+	.match_flags    =   USB_DEVICE_ID_MATCH_VENDOR
+		 | USB_DEVICE_ID_MATCH_PRODUCT
+		 | USB_DEVICE_ID_MATCH_INT_INFO,
+	.idVendor               = ZTE_VENDOR_ID,
+	.idProduct		= 0x1015,
+	.bInterfaceClass	= USB_CLASS_COMM,
+	.bInterfaceSubClass	= USB_CDC_SUBCLASS_ETHERNET,
+	.bInterfaceProtocol	= USB_CDC_PROTO_NONE,
+	.driver_info = (unsigned long)&wwan_info,
+}, {
+	/* ZTE (Vodafone) K4510-Z */
+	.match_flags    =   USB_DEVICE_ID_MATCH_VENDOR
+		 | USB_DEVICE_ID_MATCH_PRODUCT
+		 | USB_DEVICE_ID_MATCH_INT_INFO,
+	.idVendor               = ZTE_VENDOR_ID,
+	.idProduct		= 0x1173,
+	.bInterfaceClass	= USB_CLASS_COMM,
+	.bInterfaceSubClass	= USB_CDC_SUBCLASS_ETHERNET,
+	.bInterfaceProtocol	= USB_CDC_PROTO_NONE,
+	.driver_info = (unsigned long)&wwan_info,
+}, {
+	/* ZTE (Vodafone) K3770-Z */
+	.match_flags    =   USB_DEVICE_ID_MATCH_VENDOR
+		 | USB_DEVICE_ID_MATCH_PRODUCT
+		 | USB_DEVICE_ID_MATCH_INT_INFO,
+	.idVendor               = ZTE_VENDOR_ID,
+	.idProduct		= 0x1177,
+	.bInterfaceClass	= USB_CLASS_COMM,
+	.bInterfaceSubClass	= USB_CDC_SUBCLASS_ETHERNET,
+	.bInterfaceProtocol	= USB_CDC_PROTO_NONE,
+	.driver_info = (unsigned long)&wwan_info,
+}, {
+	/* ZTE (Vodafone) K3772-Z */
+	.match_flags    =   USB_DEVICE_ID_MATCH_VENDOR
+		 | USB_DEVICE_ID_MATCH_PRODUCT
+		 | USB_DEVICE_ID_MATCH_INT_INFO,
+	.idVendor               = ZTE_VENDOR_ID,
+	.idProduct		= 0x1181,
+	.bInterfaceClass	= USB_CLASS_COMM,
+	.bInterfaceSubClass	= USB_CDC_SUBCLASS_ETHERNET,
+	.bInterfaceProtocol	= USB_CDC_PROTO_NONE,
+	.driver_info = (unsigned long)&wwan_info,
+}, {
 	USB_INTERFACE_INFO(USB_CLASS_COMM, USB_CDC_SUBCLASS_ETHERNET,
 			USB_CDC_PROTO_NONE),
 	.driver_info = (unsigned long) &cdc_info,
+}, {
+	USB_INTERFACE_INFO(USB_CLASS_COMM, USB_CDC_SUBCLASS_MDLM,
+			USB_CDC_PROTO_NONE),
+	.driver_info = (unsigned long)&wwan_info,
+
+}, {
+	/* Various Huawei modems with a network port like the UMG1831 */
+	.match_flags    =   USB_DEVICE_ID_MATCH_VENDOR
+		 | USB_DEVICE_ID_MATCH_INT_INFO,
+	.idVendor               = HUAWEI_VENDOR_ID,
+	.bInterfaceClass	= USB_CLASS_COMM,
+	.bInterfaceSubClass	= USB_CDC_SUBCLASS_ETHERNET,
+	.bInterfaceProtocol	= 255,
+	.driver_info = (unsigned long)&wwan_info,
 },
 	{ },		// END
 };
@@ -563,23 +711,12 @@ static struct usb_driver cdc_driver = {
 	.disconnect =	usbnet_disconnect,
 	.suspend =	usbnet_suspend,
 	.resume =	usbnet_resume,
+	.reset_resume =	usbnet_resume,
+	.supports_autosuspend = 1,
+	.disable_hub_initiated_lpm = 1,
 };
 
-
-static int __init cdc_init(void)
-{
-	BUILD_BUG_ON((sizeof(((struct usbnet *)0)->data)
-			< sizeof(struct cdc_state)));
-
- 	return usb_register(&cdc_driver);
-}
-module_init(cdc_init);
-
-static void __exit cdc_exit(void)
-{
- 	usb_deregister(&cdc_driver);
-}
-module_exit(cdc_exit);
+module_usb_driver(cdc_driver);
 
 MODULE_AUTHOR("David Brownell");
 MODULE_DESCRIPTION("USB CDC Ethernet devices");

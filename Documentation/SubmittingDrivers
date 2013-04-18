@@ -36,13 +36,12 @@ Linux 2.4:
 	If the code area has a general maintainer then please submit it to
 	the maintainer listed in MAINTAINERS in the kernel file. If the
 	maintainer does not respond or you cannot find the appropriate
-	maintainer then please contact Marcelo Tosatti
-	<marcelo.tosatti@cyclades.com>.
+	maintainer then please contact Willy Tarreau <w@1wt.eu>.
 
 Linux 2.6:
 	The same rules apply as 2.4 except that you should follow linux-kernel
 	to track changes in API's. The final contact point for Linux 2.6
-	submissions is Andrew Morton <akpm@osdl.org>.
+	submissions is Andrew Morton.
 
 What Criteria Determine Acceptance
 ----------------------------------
@@ -102,7 +101,7 @@ PM support:	Since Linux is used on many portable and desktop systems, your
 		complete overview of the power management issues related to
 		drivers see Documentation/power/devices.txt .
 
-Control:	In general if there is active maintainance of a driver by
+Control:	In general if there is active maintenance of a driver by
 		the author then patches will be redirected to them unless
 		they are totally obvious and without need of checking.
 		If you want to be the contact and update point for the
@@ -130,6 +129,8 @@ Resources
 Linux kernel master tree:
 	ftp.??.kernel.org:/pub/linux/kernel/...
 	?? == your country code, such as "us", "uk", "fr", etc.
+
+	http://git.kernel.org/?p=linux/kernel/git/torvalds/linux.git
 
 Linux kernel mailing list:
 	linux-kernel@vger.kernel.org
@@ -160,4 +161,7 @@ How to NOT write kernel driver by Arjan van de Ven:
 	http://www.fenrus.org/how-to-not-write-a-device-driver-paper.pdf
 
 Kernel Janitor:
-	http://janitor.kernelnewbies.org/
+	http://kernelnewbies.org/KernelJanitors
+
+GIT, Fast Version Control System:
+	http://git-scm.com/

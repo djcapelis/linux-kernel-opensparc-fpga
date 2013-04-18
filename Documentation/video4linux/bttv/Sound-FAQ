@@ -2,13 +2,13 @@
 bttv and sound mini howto
 =========================
 
-There are alot of different bt848/849/878/879 based boards available.
+There are a lot of different bt848/849/878/879 based boards available.
 Making video work often is not a big deal, because this is handled
 completely by the bt8xx chip, which is common on all boards.  But
 sound is handled in slightly different ways on each board.
 
 To handle the grabber boards correctly, there is a array tvcards[] in
-bttv-cards.c, which holds the informations required for each board.
+bttv-cards.c, which holds the information required for each board.
 Sound will work only, if the correct entry is used (for video it often
 makes no difference).  The bttv driver prints a line to the kernel
 log, telling which card type is used.  Like this one:
@@ -82,7 +82,7 @@ card installed, you might to check out if you can read these registers
 values used by the windows driver.  A tool to do this is available
 from ftp://telepresence.dmem.strath.ac.uk/pub/bt848/winutil, but it
 does'nt work with bt878 boards according to some reports I received.
-Another one with bt878 suport is available from
+Another one with bt878 support is available from
 http://btwincap.sourceforge.net/Files/btspy2.00.zip
 
 You might also dig around in the *.ini files of the Windows applications.

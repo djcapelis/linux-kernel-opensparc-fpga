@@ -19,15 +19,11 @@
 #include "xfs_fs.h"
 #include "xfs_types.h"
 #include "xfs_log.h"
-#include "xfs_inum.h"
 #include "xfs_trans.h"
 #include "xfs_sb.h"
-#include "xfs_dir2.h"
-#include "xfs_dmapi.h"
+#include "xfs_ag.h"
 #include "xfs_mount.h"
 #include "xfs_bmap_btree.h"
-#include "xfs_dir2_sf.h"
-#include "xfs_attr_sf.h"
 #include "xfs_dinode.h"
 #include "xfs_inode.h"
 #include "xfs_utils.h"
@@ -51,27 +47,17 @@ xfs_error_trap(int e)
 			break;
 		if (e != xfs_etrap[i])
 			continue;
-		cmn_err(CE_NOTE, "xfs_error_trap: error %d", e);
+		xfs_notice(NULL, "%s: error %d", __func__, e);
 		BUG();
 		break;
 	}
 	return e;
 }
-#endif
-
-#if (defined(DEBUG) || defined(INDUCE_IO_ERROR))
 
 int	xfs_etest[XFS_NUM_INJECT_ERROR];
 int64_t	xfs_etest_fsid[XFS_NUM_INJECT_ERROR];
 char *	xfs_etest_fsname[XFS_NUM_INJECT_ERROR];
-
-void
-xfs_error_test_init(void)
-{
-	memset(xfs_etest, 0, sizeof(xfs_etest));
-	memset(xfs_etest_fsid, 0, sizeof(xfs_etest_fsid));
-	memset(xfs_etest_fsname, 0, sizeof(xfs_etest_fsname));
-}
+int	xfs_error_test_active;
 
 int
 xfs_error_test(int error_tag, int *fsidp, char *expression,
@@ -87,7 +73,7 @@ xfs_error_test(int error_tag, int *fsidp, char *expression,
 
 	for (i = 0; i < XFS_NUM_INJECT_ERROR; i++)  {
 		if (xfs_etest[i] == error_tag && xfs_etest_fsid[i] == fsid) {
-			cmn_err(CE_WARN,
+			xfs_warn(NULL,
 	"Injecting error (%s) at file %s, line %d, on filesystem \"%s\"",
 				expression, file, line, xfs_etest_fsname[i]);
 			return 1;
@@ -108,175 +94,91 @@ xfs_errortag_add(int error_tag, xfs_mount_t *mp)
 
 	for (i = 0; i < XFS_NUM_INJECT_ERROR; i++)  {
 		if (xfs_etest_fsid[i] == fsid && xfs_etest[i] == error_tag) {
-			cmn_err(CE_WARN, "XFS error tag #%d on", error_tag);
+			xfs_warn(mp, "error tag #%d on", error_tag);
 			return 0;
 		}
 	}
 
 	for (i = 0; i < XFS_NUM_INJECT_ERROR; i++)  {
 		if (xfs_etest[i] == 0) {
-			cmn_err(CE_WARN, "Turned on XFS error tag #%d",
+			xfs_warn(mp, "Turned on XFS error tag #%d",
 				error_tag);
 			xfs_etest[i] = error_tag;
 			xfs_etest_fsid[i] = fsid;
 			len = strlen(mp->m_fsname);
 			xfs_etest_fsname[i] = kmem_alloc(len + 1, KM_SLEEP);
 			strcpy(xfs_etest_fsname[i], mp->m_fsname);
+			xfs_error_test_active++;
 			return 0;
 		}
 	}
 
-	cmn_err(CE_WARN, "error tag overflow, too many turned on");
+	xfs_warn(mp, "error tag overflow, too many turned on");
 
 	return 1;
 }
 
 int
-xfs_errortag_clearall_umount(int64_t fsid, char *fsname, int loud)
+xfs_errortag_clearall(xfs_mount_t *mp, int loud)
 {
-	int i;
+	int64_t fsid;
 	int cleared = 0;
+	int i;
+
+	memcpy(&fsid, mp->m_fixedfsid, sizeof(xfs_fsid_t));
+
 
 	for (i = 0; i < XFS_NUM_INJECT_ERROR; i++) {
 		if ((fsid == 0LL || xfs_etest_fsid[i] == fsid) &&
 		     xfs_etest[i] != 0) {
 			cleared = 1;
-			cmn_err(CE_WARN, "Clearing XFS error tag #%d",
+			xfs_warn(mp, "Clearing XFS error tag #%d",
 				xfs_etest[i]);
 			xfs_etest[i] = 0;
 			xfs_etest_fsid[i] = 0LL;
-			kmem_free(xfs_etest_fsname[i],
-				  strlen(xfs_etest_fsname[i]) + 1);
+			kmem_free(xfs_etest_fsname[i]);
 			xfs_etest_fsname[i] = NULL;
+			xfs_error_test_active--;
 		}
 	}
 
 	if (loud || cleared)
-		cmn_err(CE_WARN,
-			"Cleared all XFS error tags for filesystem \"%s\"",
-			fsname);
+		xfs_warn(mp, "Cleared all XFS error tags for filesystem");
 
 	return 0;
 }
-
-int
-xfs_errortag_clearall(xfs_mount_t *mp)
-{
-	int64_t fsid;
-
-	memcpy(&fsid, mp->m_fixedfsid, sizeof(xfs_fsid_t));
-
-	return xfs_errortag_clearall_umount(fsid, mp->m_fsname, 1);
-}
-#endif /* DEBUG || INDUCE_IO_ERROR */
-
-static void
-xfs_fs_vcmn_err(int level, xfs_mount_t *mp, char *fmt, va_list ap)
-{
-	if (mp != NULL) {
-		char	*newfmt;
-		int	len = 16 + mp->m_fsname_len + strlen(fmt);
-
-		newfmt = kmem_alloc(len, KM_SLEEP);
-		sprintf(newfmt, "Filesystem \"%s\": %s", mp->m_fsname, fmt);
-		icmn_err(level, newfmt, ap);
-		kmem_free(newfmt, len);
-	} else {
-		icmn_err(level, fmt, ap);
-	}
-}
-
-void
-xfs_fs_cmn_err(int level, xfs_mount_t *mp, char *fmt, ...)
-{
-	va_list ap;
-
-	va_start(ap, fmt);
-	xfs_fs_vcmn_err(level, mp, fmt, ap);
-	va_end(ap);
-}
-
-void
-xfs_cmn_err(int panic_tag, int level, xfs_mount_t *mp, char *fmt, ...)
-{
-	va_list ap;
-
-#ifdef DEBUG
-	xfs_panic_mask |= XFS_PTAG_SHUTDOWN_CORRUPT;
-#endif
-
-	if (xfs_panic_mask && (xfs_panic_mask & panic_tag)
-	    && (level & CE_ALERT)) {
-		level &= ~CE_ALERT;
-		level |= CE_PANIC;
-		cmn_err(CE_ALERT, "XFS: Transforming an alert into a BUG.");
-	}
-	va_start(ap, fmt);
-	xfs_fs_vcmn_err(level, mp, fmt, ap);
-	va_end(ap);
-}
+#endif /* DEBUG */
 
 void
 xfs_error_report(
-	char		*tag,
-	int		level,
-	xfs_mount_t	*mp,
-	char		*fname,
-	int		linenum,
-	inst_t		*ra)
+	const char		*tag,
+	int			level,
+	struct xfs_mount	*mp,
+	const char		*filename,
+	int			linenum,
+	inst_t			*ra)
 {
 	if (level <= xfs_error_level) {
-		xfs_cmn_err(XFS_PTAG_ERROR_REPORT,
-			    CE_ALERT, mp,
-		"XFS internal error %s at line %d of file %s.  Caller 0x%p\n",
-			    tag, linenum, fname, ra);
+		xfs_alert_tag(mp, XFS_PTAG_ERROR_REPORT,
+		"Internal error %s at line %d of file %s.  Caller 0x%p\n",
+			    tag, linenum, filename, ra);
 
 		xfs_stack_trace();
 	}
 }
 
-STATIC void
-xfs_hex_dump(void *p, int length)
-{
-	__uint8_t *uip = (__uint8_t*)p;
-	int	i;
-	char	sbuf[128], *s;
-
-	s = sbuf;
-	*s = '\0';
-	for (i=0; i<length; i++, uip++) {
-		if ((i % 16) == 0) {
-			if (*s != '\0')
-				cmn_err(CE_ALERT, "%s\n", sbuf);
-			s = sbuf;
-			sprintf(s, "0x%x: ", i);
-			while( *s != '\0')
-				s++;
-		}
-		sprintf(s, "%02x ", *uip);
-
-		/*
-		 * the kernel sprintf is a void; user sprintf returns
-		 * the sprintf'ed string's length.  Find the new end-
-		 * of-string
-		 */
-		while( *s != '\0')
-			s++;
-	}
-	cmn_err(CE_ALERT, "%s\n", sbuf);
-}
-
 void
 xfs_corruption_error(
-	char		*tag,
-	int		level,
-	xfs_mount_t	*mp,
-	void		*p,
-	char		*fname,
-	int		linenum,
-	inst_t		*ra)
+	const char		*tag,
+	int			level,
+	struct xfs_mount	*mp,
+	void			*p,
+	const char		*filename,
+	int			linenum,
+	inst_t			*ra)
 {
 	if (level <= xfs_error_level)
 		xfs_hex_dump(p, 16);
-	xfs_error_report(tag, level, mp, fname, linenum, ra);
+	xfs_error_report(tag, level, mp, filename, linenum, ra);
+	xfs_alert(mp, "Corruption detected. Unmount and run xfs_repair");
 }

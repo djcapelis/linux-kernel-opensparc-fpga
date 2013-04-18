@@ -15,11 +15,10 @@
 #include <linux/init.h>
 
 #include <asm/assembler.h>
-#include <asm/mach-types.h>
 #include <asm/ptrace.h>
 #include <asm/asm-offsets.h>
+#include <asm/cp15.h>
 #include <asm/thread_info.h>
-#include <asm/system.h>
 
 /*
  * Kernel startup entry point.
@@ -33,10 +32,17 @@
  * numbers for r1.
  *
  */
-	.section ".text.head", "ax"
-	.type	stext, %function
+	.arm
+
+	__HEAD
 ENTRY(stext)
-	msr	cpsr_c, #PSR_F_BIT | PSR_I_BIT | SVC_MODE @ ensure svc mode
+
+ THUMB(	adr	r9, BSYM(1f)	)	@ Kernel is always entered in ARM.
+ THUMB(	bx	r9		)	@ If this is a Thumb-2 kernel,
+ THUMB(	.thumb			)	@ switch to Thumb now.
+ THUMB(1:			)
+
+	setmode	PSR_F_BIT | PSR_I_BIT | SVC_MODE, r9 @ ensure svc mode
 						@ and irqs disabled
 #ifndef CONFIG_CPU_CP15
 	ldr	r9, =CONFIG_PROCESSOR_ID
@@ -46,23 +52,23 @@ ENTRY(stext)
 	bl	__lookup_processor_type		@ r5=procinfo r9=cpuid
 	movs	r10, r5				@ invalid processor (r5=0)?
 	beq	__error_p				@ yes, error 'p'
-	bl	__lookup_machine_type		@ r5=machinfo
-	movs	r8, r5				@ invalid machine (r5=0)?
-	beq	__error_a			@ yes, error 'a'
 
-	ldr	r13, __switch_data		@ address to jump to after
-						@ the initialization is done
-	adr	lr, __after_proc_init		@ return (PIC) address
-	add	pc, r10, #PROCINFO_INITFUNC
+	adr	lr, BSYM(__after_proc_init)	@ return (PIC) address
+ ARM(	add	pc, r10, #PROCINFO_INITFUNC	)
+ THUMB(	add	r12, r10, #PROCINFO_INITFUNC	)
+ THUMB(	mov	pc, r12				)
+ENDPROC(stext)
 
 /*
  * Set the Control Register and Read the process ID.
  */
-	.type	__after_proc_init, %function
 __after_proc_init:
 #ifdef CONFIG_CPU_CP15
-	mrc	p15, 0, r0, c1, c0, 0		@ read control reg
-#ifdef CONFIG_ALIGNMENT_TRAP
+	/*
+	 * CP15 system control register value returned in r0 from
+	 * the CPU init function.
+	 */
+#if defined(CONFIG_ALIGNMENT_TRAP) && __LINUX_ARM_ARCH__ < 6
 	orr	r0, r0, #CR_A
 #else
 	bic	r0, r0, #CR_A
@@ -84,8 +90,9 @@ __after_proc_init:
 	mcr	p15, 0, r0, c1, c0, 0		@ write control reg
 #endif /* CONFIG_CPU_CP15 */
 
-	mov	pc, r13				@ clear the BSS and jump
+	b	__mmap_switched			@ clear the BSS and jump
 						@ to start_kernel
+ENDPROC(__after_proc_init)
 	.ltorg
 
 #include "head-common.S"

@@ -12,10 +12,16 @@
  */
 #include <linux/sched.h>
 #include <linux/mm.h>
+#include <linux/dma-mapping.h>
+#include <asm/cacheflush.h>
+#include <asm/glue-df.h>
+#include <asm/glue-pf.h>
 #include <asm/mach/arch.h>
 #include <asm/thread_info.h>
 #include <asm/memory.h>
 #include <asm/procinfo.h>
+#include <asm/hardware/cache-l2x0.h>
+#include <linux/kbuild.h>
 
 /*
  * Make sure that the compiler and target are compatible.
@@ -35,16 +41,12 @@
 #error    Known good compilers: 3.3
 #endif
 
-/* Use marker if you need to separate the values later */
-
-#define DEFINE(sym, val) \
-        asm volatile("\n->" #sym " %0 " #val : : "i" (val))
-
-#define BLANK() asm volatile("\n->" : : )
-
 int main(void)
 {
   DEFINE(TSK_ACTIVE_MM,		offsetof(struct task_struct, active_mm));
+#ifdef CONFIG_CC_STACKPROTECTOR
+  DEFINE(TSK_STACK_CANARY,	offsetof(struct task_struct, stack_canary));
+#endif
   BLANK();
   DEFINE(TI_FLAGS,		offsetof(struct thread_info, flags));
   DEFINE(TI_PREEMPT,		offsetof(struct thread_info, preempt_count));
@@ -57,7 +59,15 @@ int main(void)
   DEFINE(TI_USED_CP,		offsetof(struct thread_info, used_cp));
   DEFINE(TI_TP_VALUE,		offsetof(struct thread_info, tp_value));
   DEFINE(TI_FPSTATE,		offsetof(struct thread_info, fpstate));
+#ifdef CONFIG_VFP
   DEFINE(TI_VFPSTATE,		offsetof(struct thread_info, vfpstate));
+#ifdef CONFIG_SMP
+  DEFINE(VFP_CPU,		offsetof(union vfp_state, hard.cpu));
+#endif
+#endif
+#ifdef CONFIG_ARM_THUMBEE
+  DEFINE(TI_THUMBEE_STATE,	offsetof(struct thread_info, thumbee_state));
+#endif
 #ifdef CONFIG_IWMMXT
   DEFINE(TI_IWMMXT_STATE,	offsetof(struct thread_info, fpstate.iwmmxt));
 #endif
@@ -85,8 +95,19 @@ int main(void)
   DEFINE(S_OLD_R0,		offsetof(struct pt_regs, ARM_ORIG_r0));
   DEFINE(S_FRAME_SIZE,		sizeof(struct pt_regs));
   BLANK();
+#ifdef CONFIG_CACHE_L2X0
+  DEFINE(L2X0_R_PHY_BASE,	offsetof(struct l2x0_regs, phy_base));
+  DEFINE(L2X0_R_AUX_CTRL,	offsetof(struct l2x0_regs, aux_ctrl));
+  DEFINE(L2X0_R_TAG_LATENCY,	offsetof(struct l2x0_regs, tag_latency));
+  DEFINE(L2X0_R_DATA_LATENCY,	offsetof(struct l2x0_regs, data_latency));
+  DEFINE(L2X0_R_FILTER_START,	offsetof(struct l2x0_regs, filter_start));
+  DEFINE(L2X0_R_FILTER_END,	offsetof(struct l2x0_regs, filter_end));
+  DEFINE(L2X0_R_PREFETCH_CTRL,	offsetof(struct l2x0_regs, prefetch_ctrl));
+  DEFINE(L2X0_R_PWR_CTRL,	offsetof(struct l2x0_regs, pwr_ctrl));
+  BLANK();
+#endif
 #ifdef CONFIG_CPU_HAS_ASID
-  DEFINE(MM_CONTEXT_ID,		offsetof(struct mm_struct, context.id));
+  DEFINE(MM_CONTEXT_ID,		offsetof(struct mm_struct, context.id.counter));
   BLANK();
 #endif
   DEFINE(VMA_VM_MM,		offsetof(struct vm_area_struct, vm_mm));
@@ -101,12 +122,29 @@ int main(void)
   DEFINE(SIZEOF_MACHINE_DESC,	sizeof(struct machine_desc));
   DEFINE(MACHINFO_TYPE,		offsetof(struct machine_desc, nr));
   DEFINE(MACHINFO_NAME,		offsetof(struct machine_desc, name));
-  DEFINE(MACHINFO_PHYSIO,	offsetof(struct machine_desc, phys_io));
-  DEFINE(MACHINFO_PGOFFIO,	offsetof(struct machine_desc, io_pg_offst));
   BLANK();
   DEFINE(PROC_INFO_SZ,		sizeof(struct proc_info_list));
   DEFINE(PROCINFO_INITFUNC,	offsetof(struct proc_info_list, __cpu_flush));
   DEFINE(PROCINFO_MM_MMUFLAGS,	offsetof(struct proc_info_list, __cpu_mm_mmu_flags));
   DEFINE(PROCINFO_IO_MMUFLAGS,	offsetof(struct proc_info_list, __cpu_io_mmu_flags));
+  BLANK();
+#ifdef MULTI_DABORT
+  DEFINE(PROCESSOR_DABT_FUNC,	offsetof(struct processor, _data_abort));
+#endif
+#ifdef MULTI_PABORT
+  DEFINE(PROCESSOR_PABT_FUNC,	offsetof(struct processor, _prefetch_abort));
+#endif
+#ifdef MULTI_CPU
+  DEFINE(CPU_SLEEP_SIZE,	offsetof(struct processor, suspend_size));
+  DEFINE(CPU_DO_SUSPEND,	offsetof(struct processor, do_suspend));
+  DEFINE(CPU_DO_RESUME,		offsetof(struct processor, do_resume));
+#endif
+#ifdef MULTI_CACHE
+  DEFINE(CACHE_FLUSH_KERN_ALL,	offsetof(struct cpu_cache_fns, flush_kern_all));
+#endif
+  BLANK();
+  DEFINE(DMA_BIDIRECTIONAL,	DMA_BIDIRECTIONAL);
+  DEFINE(DMA_TO_DEVICE,		DMA_TO_DEVICE);
+  DEFINE(DMA_FROM_DEVICE,	DMA_FROM_DEVICE);
   return 0; 
 }

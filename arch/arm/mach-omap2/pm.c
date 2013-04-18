@@ -1,360 +1,276 @@
 /*
- * linux/arch/arm/mach-omap2/pm.c
+ * pm.c - Common OMAP2+ power management-related code
  *
- * OMAP2 Power Management Routines
- *
- * Copyright (C) 2006 Nokia Corporation
- * Tony Lindgren <tony@atomide.com>
- *
- * Copyright (C) 2005 Texas Instruments, Inc.
- * Richard Woodruff <r-woodruff2@ti.com>
- *
- * Based on pm.c for omap1
+ * Copyright (C) 2010 Texas Instruments, Inc.
+ * Copyright (C) 2010 Nokia Corporation
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
  */
 
-#include <linux/pm.h>
-#include <linux/sched.h>
-#include <linux/proc_fs.h>
-#include <linux/pm.h>
-#include <linux/interrupt.h>
-#include <linux/sysfs.h>
-#include <linux/module.h>
-#include <linux/delay.h>
+#include <linux/kernel.h>
+#include <linux/init.h>
+#include <linux/io.h>
+#include <linux/err.h>
+#include <linux/opp.h>
+#include <linux/export.h>
+#include <linux/suspend.h>
+#include <linux/cpu.h>
 
-#include <asm/io.h>
-#include <asm/irq.h>
-#include <asm/atomic.h>
-#include <asm/mach/time.h>
-#include <asm/mach/irq.h>
-#include <asm/mach-types.h>
+#include <asm/system_misc.h>
 
-#include <asm/arch/irqs.h>
-#include <asm/arch/clock.h>
-#include <asm/arch/sram.h>
-#include <asm/arch/pm.h>
+#include "omap-pm.h"
+#include "omap_device.h"
+#include "common.h"
 
-#include "prcm-regs.h"
+#include "soc.h"
+#include "prcm-common.h"
+#include "voltage.h"
+#include "powerdomain.h"
+#include "clockdomain.h"
+#include "pm.h"
+#include "twl-common.h"
 
-static struct clk *vclk;
-static void (*omap2_sram_idle)(void);
-static void (*omap2_sram_suspend)(int dllctrl, int cpu_rev);
-static void (*saved_idle)(void);
+static struct omap_device_pm_latency *pm_lats;
 
-extern void __init pmdomain_init(void);
-extern void pmdomain_set_autoidle(void);
+/*
+ * omap_pm_suspend: points to a function that does the SoC-specific
+ * suspend work
+ */
+int (*omap_pm_suspend)(void);
 
-static unsigned int omap24xx_sleep_save[OMAP24XX_SLEEP_SAVE_SIZE];
+#ifdef CONFIG_PM
+/**
+ * struct omap2_oscillator - Describe the board main oscillator latencies
+ * @startup_time: oscillator startup latency
+ * @shutdown_time: oscillator shutdown latency
+ */
+struct omap2_oscillator {
+	u32 startup_time;
+	u32 shutdown_time;
+};
 
-void omap2_pm_idle(void)
+static struct omap2_oscillator oscillator = {
+	.startup_time = ULONG_MAX,
+	.shutdown_time = ULONG_MAX,
+};
+
+void omap_pm_setup_oscillator(u32 tstart, u32 tshut)
 {
-	local_irq_disable();
-	local_fiq_disable();
-	if (need_resched()) {
-		local_fiq_enable();
-		local_irq_enable();
+	oscillator.startup_time = tstart;
+	oscillator.shutdown_time = tshut;
+}
+
+void omap_pm_get_oscillator(u32 *tstart, u32 *tshut)
+{
+	if (!tstart || !tshut)
 		return;
-	}
 
-	/*
-	 * Since an interrupt may set up a timer, we don't want to
-	 * reprogram the hardware timer with interrupts enabled.
-	 * Re-enable interrupts only after returning from idle.
-	 */
-	timer_dyn_reprogram();
-
-	omap2_sram_idle();
-	local_fiq_enable();
-	local_irq_enable();
+	*tstart = oscillator.startup_time;
+	*tshut = oscillator.shutdown_time;
 }
+#endif
 
-static int omap2_pm_prepare(suspend_state_t state)
+static int __init _init_omap_device(char *name)
 {
-	int error = 0;
+	struct omap_hwmod *oh;
+	struct platform_device *pdev;
 
-	/* We cannot sleep in idle until we have resumed */
-	saved_idle = pm_idle;
-	pm_idle = NULL;
+	oh = omap_hwmod_lookup(name);
+	if (WARN(!oh, "%s: could not find omap_hwmod for %s\n",
+		 __func__, name))
+		return -ENODEV;
 
-	switch (state)
-	{
-	case PM_SUSPEND_STANDBY:
-	case PM_SUSPEND_MEM:
-		break;
-
-	case PM_SUSPEND_DISK:
-		return -ENOTSUPP;
-
-	default:
-		return -EINVAL;
-	}
-
-	return error;
-}
-
-#define INT0_WAKE_MASK	(OMAP_IRQ_BIT(INT_24XX_GPIO_BANK1) |	\
-			OMAP_IRQ_BIT(INT_24XX_GPIO_BANK2) |	\
-			OMAP_IRQ_BIT(INT_24XX_GPIO_BANK3))
-
-#define INT1_WAKE_MASK	(OMAP_IRQ_BIT(INT_24XX_GPIO_BANK4))
-
-#define INT2_WAKE_MASK	(OMAP_IRQ_BIT(INT_24XX_UART1_IRQ) |	\
-			OMAP_IRQ_BIT(INT_24XX_UART2_IRQ) |	\
-			OMAP_IRQ_BIT(INT_24XX_UART3_IRQ))
-
-#define preg(reg)	printk("%s\t(0x%p):\t0x%08x\n", #reg, &reg, reg);
-
-static void omap2_pm_debug(char * desc)
-{
-	printk("%s:\n", desc);
-
-	preg(CM_CLKSTCTRL_MPU);
-	preg(CM_CLKSTCTRL_CORE);
-	preg(CM_CLKSTCTRL_GFX);
-	preg(CM_CLKSTCTRL_DSP);
-	preg(CM_CLKSTCTRL_MDM);
-
-	preg(PM_PWSTCTRL_MPU);
-	preg(PM_PWSTCTRL_CORE);
-	preg(PM_PWSTCTRL_GFX);
-	preg(PM_PWSTCTRL_DSP);
-	preg(PM_PWSTCTRL_MDM);
-
-	preg(PM_PWSTST_MPU);
-	preg(PM_PWSTST_CORE);
-	preg(PM_PWSTST_GFX);
-	preg(PM_PWSTST_DSP);
-	preg(PM_PWSTST_MDM);
-
-	preg(CM_AUTOIDLE1_CORE);
-	preg(CM_AUTOIDLE2_CORE);
-	preg(CM_AUTOIDLE3_CORE);
-	preg(CM_AUTOIDLE4_CORE);
-	preg(CM_AUTOIDLE_WKUP);
-	preg(CM_AUTOIDLE_PLL);
-	preg(CM_AUTOIDLE_DSP);
-	preg(CM_AUTOIDLE_MDM);
-
-	preg(CM_ICLKEN1_CORE);
-	preg(CM_ICLKEN2_CORE);
-	preg(CM_ICLKEN3_CORE);
-	preg(CM_ICLKEN4_CORE);
-	preg(CM_ICLKEN_GFX);
-	preg(CM_ICLKEN_WKUP);
-	preg(CM_ICLKEN_DSP);
-	preg(CM_ICLKEN_MDM);
-
-	preg(CM_IDLEST1_CORE);
-	preg(CM_IDLEST2_CORE);
-	preg(CM_IDLEST3_CORE);
-	preg(CM_IDLEST4_CORE);
-	preg(CM_IDLEST_GFX);
-	preg(CM_IDLEST_WKUP);
-	preg(CM_IDLEST_CKGEN);
-	preg(CM_IDLEST_DSP);
-	preg(CM_IDLEST_MDM);
-
-	preg(RM_RSTST_MPU);
-	preg(RM_RSTST_GFX);
-	preg(RM_RSTST_WKUP);
-	preg(RM_RSTST_DSP);
-	preg(RM_RSTST_MDM);
-
-	preg(PM_WKDEP_MPU);
-	preg(PM_WKDEP_CORE);
-	preg(PM_WKDEP_GFX);
-	preg(PM_WKDEP_DSP);
-	preg(PM_WKDEP_MDM);
-
-	preg(CM_FCLKEN_WKUP);
-	preg(CM_ICLKEN_WKUP);
-	preg(CM_IDLEST_WKUP);
-	preg(CM_AUTOIDLE_WKUP);
-	preg(CM_CLKSEL_WKUP);
-
-	preg(PM_WKEN_WKUP);
-	preg(PM_WKST_WKUP);
-}
-
-static inline void omap2_pm_save_registers(void)
-{
-	/* Save interrupt registers */
-	OMAP24XX_SAVE(INTC_MIR0);
-	OMAP24XX_SAVE(INTC_MIR1);
-	OMAP24XX_SAVE(INTC_MIR2);
-
-	/* Save power control registers */
-	OMAP24XX_SAVE(CM_CLKSTCTRL_MPU);
-	OMAP24XX_SAVE(CM_CLKSTCTRL_CORE);
-	OMAP24XX_SAVE(CM_CLKSTCTRL_GFX);
-	OMAP24XX_SAVE(CM_CLKSTCTRL_DSP);
-	OMAP24XX_SAVE(CM_CLKSTCTRL_MDM);
-
-	/* Save power state registers */
-	OMAP24XX_SAVE(PM_PWSTCTRL_MPU);
-	OMAP24XX_SAVE(PM_PWSTCTRL_CORE);
-	OMAP24XX_SAVE(PM_PWSTCTRL_GFX);
-	OMAP24XX_SAVE(PM_PWSTCTRL_DSP);
-	OMAP24XX_SAVE(PM_PWSTCTRL_MDM);
-
-	/* Save autoidle registers */
-	OMAP24XX_SAVE(CM_AUTOIDLE1_CORE);
-	OMAP24XX_SAVE(CM_AUTOIDLE2_CORE);
-	OMAP24XX_SAVE(CM_AUTOIDLE3_CORE);
-	OMAP24XX_SAVE(CM_AUTOIDLE4_CORE);
-	OMAP24XX_SAVE(CM_AUTOIDLE_WKUP);
-	OMAP24XX_SAVE(CM_AUTOIDLE_PLL);
-	OMAP24XX_SAVE(CM_AUTOIDLE_DSP);
-	OMAP24XX_SAVE(CM_AUTOIDLE_MDM);
-
-	/* Save idle state registers */
-	OMAP24XX_SAVE(CM_IDLEST1_CORE);
-	OMAP24XX_SAVE(CM_IDLEST2_CORE);
-	OMAP24XX_SAVE(CM_IDLEST3_CORE);
-	OMAP24XX_SAVE(CM_IDLEST4_CORE);
-	OMAP24XX_SAVE(CM_IDLEST_GFX);
-	OMAP24XX_SAVE(CM_IDLEST_WKUP);
-	OMAP24XX_SAVE(CM_IDLEST_CKGEN);
-	OMAP24XX_SAVE(CM_IDLEST_DSP);
-	OMAP24XX_SAVE(CM_IDLEST_MDM);
-
-	/* Save clock registers */
-	OMAP24XX_SAVE(CM_FCLKEN1_CORE);
-	OMAP24XX_SAVE(CM_FCLKEN2_CORE);
-	OMAP24XX_SAVE(CM_ICLKEN1_CORE);
-	OMAP24XX_SAVE(CM_ICLKEN2_CORE);
-	OMAP24XX_SAVE(CM_ICLKEN3_CORE);
-	OMAP24XX_SAVE(CM_ICLKEN4_CORE);
-}
-
-static inline void omap2_pm_restore_registers(void)
-{
-	/* Restore clock state registers */
-	OMAP24XX_RESTORE(CM_CLKSTCTRL_MPU);
-	OMAP24XX_RESTORE(CM_CLKSTCTRL_CORE);
-	OMAP24XX_RESTORE(CM_CLKSTCTRL_GFX);
-	OMAP24XX_RESTORE(CM_CLKSTCTRL_DSP);
-	OMAP24XX_RESTORE(CM_CLKSTCTRL_MDM);
-
-	/* Restore power state registers */
-	OMAP24XX_RESTORE(PM_PWSTCTRL_MPU);
-	OMAP24XX_RESTORE(PM_PWSTCTRL_CORE);
-	OMAP24XX_RESTORE(PM_PWSTCTRL_GFX);
-	OMAP24XX_RESTORE(PM_PWSTCTRL_DSP);
-	OMAP24XX_RESTORE(PM_PWSTCTRL_MDM);
-
-	/* Restore idle state registers */
-	OMAP24XX_RESTORE(CM_IDLEST1_CORE);
-	OMAP24XX_RESTORE(CM_IDLEST2_CORE);
-	OMAP24XX_RESTORE(CM_IDLEST3_CORE);
-	OMAP24XX_RESTORE(CM_IDLEST4_CORE);
-	OMAP24XX_RESTORE(CM_IDLEST_GFX);
-	OMAP24XX_RESTORE(CM_IDLEST_WKUP);
-	OMAP24XX_RESTORE(CM_IDLEST_CKGEN);
-	OMAP24XX_RESTORE(CM_IDLEST_DSP);
-	OMAP24XX_RESTORE(CM_IDLEST_MDM);
-
-	/* Restore autoidle registers */
-	OMAP24XX_RESTORE(CM_AUTOIDLE1_CORE);
-	OMAP24XX_RESTORE(CM_AUTOIDLE2_CORE);
-	OMAP24XX_RESTORE(CM_AUTOIDLE3_CORE);
-	OMAP24XX_RESTORE(CM_AUTOIDLE4_CORE);
-	OMAP24XX_RESTORE(CM_AUTOIDLE_WKUP);
-	OMAP24XX_RESTORE(CM_AUTOIDLE_PLL);
-	OMAP24XX_RESTORE(CM_AUTOIDLE_DSP);
-	OMAP24XX_RESTORE(CM_AUTOIDLE_MDM);
-
-	/* Restore clock registers */
-	OMAP24XX_RESTORE(CM_FCLKEN1_CORE);
-	OMAP24XX_RESTORE(CM_FCLKEN2_CORE);
-	OMAP24XX_RESTORE(CM_ICLKEN1_CORE);
-	OMAP24XX_RESTORE(CM_ICLKEN2_CORE);
-	OMAP24XX_RESTORE(CM_ICLKEN3_CORE);
-	OMAP24XX_RESTORE(CM_ICLKEN4_CORE);
-
-	/* REVISIT: Clear interrupts here */
-
-	/* Restore interrupt registers */
-	OMAP24XX_RESTORE(INTC_MIR0);
-	OMAP24XX_RESTORE(INTC_MIR1);
-	OMAP24XX_RESTORE(INTC_MIR2);
-}
-
-static int omap2_pm_suspend(void)
-{
-	int processor_type = 0;
-
-	/* REVISIT: 0x21 or 0x26? */
-	if (cpu_is_omap2420())
-		processor_type = 0x21;
-
-	if (!processor_type)
-		return -ENOTSUPP;
-
-	local_irq_disable();
-	local_fiq_disable();
-
-	omap2_pm_save_registers();
-
-	/* Disable interrupts except for the wake events */
-	INTC_MIR_SET0 = 0xffffffff & ~INT0_WAKE_MASK;
-	INTC_MIR_SET1 = 0xffffffff & ~INT1_WAKE_MASK;
-	INTC_MIR_SET2 = 0xffffffff & ~INT2_WAKE_MASK;
-
-	pmdomain_set_autoidle();
-
-	/* Clear old wake-up events */
-	PM_WKST1_CORE = 0;
-	PM_WKST2_CORE = 0;
-	PM_WKST_WKUP = 0;
-
-	/* Enable wake-up events */
-	PM_WKEN1_CORE = (1 << 22) | (1 << 21);	/* UART1 & 2 */
-	PM_WKEN2_CORE = (1 << 2);		/* UART3 */
-	PM_WKEN_WKUP = (1 << 2) | (1 << 0);	/* GPIO & GPT1 */
-
-	/* Disable clocks except for CM_ICLKEN2_CORE. It gets disabled
-	 * in the SRAM suspend code */
-	CM_FCLKEN1_CORE = 0;
-	CM_FCLKEN2_CORE = 0;
-	CM_ICLKEN1_CORE = 0;
-	CM_ICLKEN3_CORE = 0;
-	CM_ICLKEN4_CORE = 0;
-
-	omap2_pm_debug("Status before suspend");
-
-	/* Must wait for serial buffers to clear */
-	mdelay(200);
-
-	/* Jump to SRAM suspend code
-	 * REVISIT: When is this SDRC_DLLB_CTRL?
-	 */
-	omap2_sram_suspend(SDRC_DLLA_CTRL, processor_type);
-
-	/* Back from sleep */
-	omap2_pm_restore_registers();
-
-	local_fiq_enable();
-	local_irq_enable();
+	pdev = omap_device_build(oh->name, 0, oh, NULL, 0, pm_lats, 0, false);
+	if (WARN(IS_ERR(pdev), "%s: could not build omap_device for %s\n",
+		 __func__, name))
+		return -ENODEV;
 
 	return 0;
 }
 
-static int omap2_pm_enter(suspend_state_t state)
+/*
+ * Build omap_devices for processors and bus.
+ */
+static void __init omap2_init_processor_devices(void)
+{
+	_init_omap_device("mpu");
+	if (omap3_has_iva())
+		_init_omap_device("iva");
+
+	if (cpu_is_omap44xx()) {
+		_init_omap_device("l3_main_1");
+		_init_omap_device("dsp");
+		_init_omap_device("iva");
+	} else {
+		_init_omap_device("l3_main");
+	}
+}
+
+/* Types of sleep_switch used in omap_set_pwrdm_state */
+#define FORCEWAKEUP_SWITCH	0
+#define LOWPOWERSTATE_SWITCH	1
+
+int __init omap_pm_clkdms_setup(struct clockdomain *clkdm, void *unused)
+{
+	if ((clkdm->flags & CLKDM_CAN_ENABLE_AUTO) &&
+	    !(clkdm->flags & CLKDM_MISSING_IDLE_REPORTING))
+		clkdm_allow_idle(clkdm);
+	else if (clkdm->flags & CLKDM_CAN_FORCE_SLEEP &&
+		 atomic_read(&clkdm->usecount) == 0)
+		clkdm_sleep(clkdm);
+	return 0;
+}
+
+/*
+ * This sets pwrdm state (other than mpu & core. Currently only ON &
+ * RET are supported.
+ */
+int omap_set_pwrdm_state(struct powerdomain *pwrdm, u32 pwrst)
+{
+	u8 curr_pwrst, next_pwrst;
+	int sleep_switch = -1, ret = 0, hwsup = 0;
+
+	if (!pwrdm || IS_ERR(pwrdm))
+		return -EINVAL;
+
+	while (!(pwrdm->pwrsts & (1 << pwrst))) {
+		if (pwrst == PWRDM_POWER_OFF)
+			return ret;
+		pwrst--;
+	}
+
+	next_pwrst = pwrdm_read_next_pwrst(pwrdm);
+	if (next_pwrst == pwrst)
+		return ret;
+
+	curr_pwrst = pwrdm_read_pwrst(pwrdm);
+	if (curr_pwrst < PWRDM_POWER_ON) {
+		if ((curr_pwrst > pwrst) &&
+			(pwrdm->flags & PWRDM_HAS_LOWPOWERSTATECHANGE)) {
+			sleep_switch = LOWPOWERSTATE_SWITCH;
+		} else {
+			hwsup = clkdm_in_hwsup(pwrdm->pwrdm_clkdms[0]);
+			clkdm_wakeup(pwrdm->pwrdm_clkdms[0]);
+			sleep_switch = FORCEWAKEUP_SWITCH;
+		}
+	}
+
+	ret = pwrdm_set_next_pwrst(pwrdm, pwrst);
+	if (ret)
+		pr_err("%s: unable to set power state of powerdomain: %s\n",
+		       __func__, pwrdm->name);
+
+	switch (sleep_switch) {
+	case FORCEWAKEUP_SWITCH:
+		if (hwsup)
+			clkdm_allow_idle(pwrdm->pwrdm_clkdms[0]);
+		else
+			clkdm_sleep(pwrdm->pwrdm_clkdms[0]);
+		break;
+	case LOWPOWERSTATE_SWITCH:
+		pwrdm_set_lowpwrstchange(pwrdm);
+		pwrdm_wait_transition(pwrdm);
+		pwrdm_state_switch(pwrdm);
+		break;
+	}
+
+	return ret;
+}
+
+
+
+/*
+ * This API is to be called during init to set the various voltage
+ * domains to the voltage as per the opp table. Typically we boot up
+ * at the nominal voltage. So this function finds out the rate of
+ * the clock associated with the voltage domain, finds out the correct
+ * opp entry and sets the voltage domain to the voltage specified
+ * in the opp entry
+ */
+static int __init omap2_set_init_voltage(char *vdd_name, char *clk_name,
+					 const char *oh_name)
+{
+	struct voltagedomain *voltdm;
+	struct clk *clk;
+	struct opp *opp;
+	unsigned long freq, bootup_volt;
+	struct device *dev;
+
+	if (!vdd_name || !clk_name || !oh_name) {
+		pr_err("%s: invalid parameters\n", __func__);
+		goto exit;
+	}
+
+	if (!strncmp(oh_name, "mpu", 3))
+		/* 
+		 * All current OMAPs share voltage rail and clock
+		 * source, so CPU0 is used to represent the MPU-SS.
+		 */
+		dev = get_cpu_device(0);
+	else
+		dev = omap_device_get_by_hwmod_name(oh_name);
+
+	if (IS_ERR(dev)) {
+		pr_err("%s: Unable to get dev pointer for hwmod %s\n",
+			__func__, oh_name);
+		goto exit;
+	}
+
+	voltdm = voltdm_lookup(vdd_name);
+	if (!voltdm) {
+		pr_err("%s: unable to get vdd pointer for vdd_%s\n",
+			__func__, vdd_name);
+		goto exit;
+	}
+
+	clk =  clk_get(NULL, clk_name);
+	if (IS_ERR(clk)) {
+		pr_err("%s: unable to get clk %s\n", __func__, clk_name);
+		goto exit;
+	}
+
+	freq = clk_get_rate(clk);
+	clk_put(clk);
+
+	rcu_read_lock();
+	opp = opp_find_freq_ceil(dev, &freq);
+	if (IS_ERR(opp)) {
+		rcu_read_unlock();
+		pr_err("%s: unable to find boot up OPP for vdd_%s\n",
+			__func__, vdd_name);
+		goto exit;
+	}
+
+	bootup_volt = opp_get_voltage(opp);
+	rcu_read_unlock();
+	if (!bootup_volt) {
+		pr_err("%s: unable to find voltage corresponding to the bootup OPP for vdd_%s\n",
+		       __func__, vdd_name);
+		goto exit;
+	}
+
+	voltdm_scale(voltdm, bootup_volt);
+	return 0;
+
+exit:
+	pr_err("%s: unable to set vdd_%s\n", __func__, vdd_name);
+	return -EINVAL;
+}
+
+#ifdef CONFIG_SUSPEND
+static int omap_pm_enter(suspend_state_t suspend_state)
 {
 	int ret = 0;
 
-	switch (state)
-	{
+	if (!omap_pm_suspend)
+		return -ENOENT; /* XXX doublecheck */
+
+	switch (suspend_state) {
 	case PM_SUSPEND_STANDBY:
 	case PM_SUSPEND_MEM:
-		ret = omap2_pm_suspend();
-		break;
-	case PM_SUSPEND_DISK:
-		ret = -ENOTSUPP;
+		ret = omap_pm_suspend();
 		break;
 	default:
 		ret = -EINVAL;
@@ -363,46 +279,89 @@ static int omap2_pm_enter(suspend_state_t state)
 	return ret;
 }
 
-static int omap2_pm_finish(suspend_state_t state)
+static int omap_pm_begin(suspend_state_t state)
 {
-	pm_idle = saved_idle;
+	disable_hlt();
+	if (cpu_is_omap34xx())
+		omap_prcm_irq_prepare();
 	return 0;
 }
 
-static struct pm_ops omap_pm_ops = {
-	.prepare	= omap2_pm_prepare,
-	.enter		= omap2_pm_enter,
-	.finish		= omap2_pm_finish,
-	.valid		= pm_valid_only_mem,
+static void omap_pm_end(void)
+{
+	enable_hlt();
+	return;
+}
+
+static void omap_pm_finish(void)
+{
+	if (cpu_is_omap34xx())
+		omap_prcm_irq_complete();
+}
+
+static const struct platform_suspend_ops omap_pm_ops = {
+	.begin		= omap_pm_begin,
+	.end		= omap_pm_end,
+	.enter		= omap_pm_enter,
+	.finish		= omap_pm_finish,
+	.valid		= suspend_valid_only_mem,
 };
 
-int __init omap2_pm_init(void)
+#endif /* CONFIG_SUSPEND */
+
+static void __init omap3_init_voltages(void)
 {
-	printk("Power Management for TI OMAP.\n");
+	if (!cpu_is_omap34xx())
+		return;
 
-	vclk = clk_get(NULL, "virt_prcm_set");
-	if (IS_ERR(vclk)) {
-		printk(KERN_ERR "Could not get PM vclk\n");
-		return -ENODEV;
-	}
+	omap2_set_init_voltage("mpu_iva", "dpll1_ck", "mpu");
+	omap2_set_init_voltage("core", "l3_ick", "l3_main");
+}
 
-	/*
-	 * We copy the assembler sleep/wakeup routines to SRAM.
-	 * These routines need to be in SRAM as that's the only
-	 * memory the MPU can see when it wakes up.
-	 */
-	omap2_sram_idle = omap_sram_push(omap24xx_idle_loop_suspend,
-					 omap24xx_idle_loop_suspend_sz);
+static void __init omap4_init_voltages(void)
+{
+	if (!cpu_is_omap44xx())
+		return;
 
-	omap2_sram_suspend = omap_sram_push(omap24xx_cpu_suspend,
-					    omap24xx_cpu_suspend_sz);
+	omap2_set_init_voltage("mpu", "dpll_mpu_ck", "mpu");
+	omap2_set_init_voltage("core", "l3_div_ck", "l3_main_1");
+	omap2_set_init_voltage("iva", "dpll_iva_m5x2_ck", "iva");
+}
 
-	pm_set_ops(&omap_pm_ops);
-	pm_idle = omap2_pm_idle;
-
-	pmdomain_init();
+static int __init omap2_common_pm_init(void)
+{
+	if (!of_have_populated_dt())
+		omap2_init_processor_devices();
+	omap_pm_if_init();
 
 	return 0;
 }
+postcore_initcall(omap2_common_pm_init);
 
-__initcall(omap2_pm_init);
+int __init omap2_common_pm_late_init(void)
+{
+	/*
+	 * In the case of DT, the PMIC and SR initialization will be done using
+	 * a completely different mechanism.
+	 * Disable this part if a DT blob is available.
+	 */
+	if (of_have_populated_dt())
+		return 0;
+
+	/* Init the voltage layer */
+	omap_pmic_late_init();
+	omap_voltage_late_init();
+
+	/* Initialize the voltages */
+	omap3_init_voltages();
+	omap4_init_voltages();
+
+	/* Smartreflex device init */
+	omap_devinit_smartreflex();
+
+#ifdef CONFIG_SUSPEND
+	suspend_set_ops(&omap_pm_ops);
+#endif
+
+	return 0;
+}

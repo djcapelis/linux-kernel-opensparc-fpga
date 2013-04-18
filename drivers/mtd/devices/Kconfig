@@ -1,8 +1,6 @@
-# drivers/mtd/maps/Kconfig
-# $Id: Kconfig,v 1.18 2005/11/07 11:14:24 gleixner Exp $
-
 menu "Self-contained MTD device drivers"
 	depends on MTD!=n
+	depends on HAS_IOMEM
 
 config MTD_PMC551
 	tristate "Ramix PMC551 PCI Mezzanine RAM card support"
@@ -50,7 +48,7 @@ config MTD_MS02NV
 	  If you want to compile this driver as a module ( = code which can be
 	  inserted in and removed from the running kernel whenever you want),
 	  say M here and read <file:Documentation/kbuild/modules.txt>.
-	  The module will be called ms02-nv.ko.
+	  The module will be called ms02-nv.
 
 config MTD_DATAFLASH
 	tristate "Support for AT45xxx DataFlash"
@@ -60,21 +58,75 @@ config MTD_DATAFLASH
 	  Sometimes DataFlash chips are packaged inside MMC-format
 	  cards; at this writing, the MMC stack won't handle those.
 
-config MTD_DATAFLASH26
-	tristate "AT91RM9200 DataFlash AT26xxx"
-	depends on MTD && ARCH_AT91RM9200 && AT91_SPI
+config MTD_DATAFLASH_WRITE_VERIFY
+	bool "Verify DataFlash page writes"
+	depends on MTD_DATAFLASH
 	help
-	  This enables access to the DataFlash chip (AT26xxx) on an
-	  AT91RM9200-based board.
-	  If you have such a board and such a DataFlash, say 'Y'.
+	  This adds an extra check when data is written to the flash.
+	  It may help if you are verifying chip setup (timings etc) on
+	  your board.  There is a rare possibility that even though the
+	  device thinks the write was successful, a bit could have been
+	  flipped accidentally due to device wear or something else.
+
+config MTD_DATAFLASH_OTP
+	bool "DataFlash OTP support (Security Register)"
+	depends on MTD_DATAFLASH
+	select HAVE_MTD_OTP
+	help
+	  Newer DataFlash chips (revisions C and D) support 128 bytes of
+	  one-time-programmable (OTP) data.  The first half may be written
+	  (once) with up to 64 bytes of data, such as a serial number or
+	  other key product data.  The second half is programmed with a
+	  unique-to-each-chip bit pattern at the factory.
 
 config MTD_M25P80
-	tristate "Support for M25 SPI Flash"
+	tristate "Support most SPI Flash chips (AT26DF, M25P, W25X, ...)"
 	depends on SPI_MASTER && EXPERIMENTAL
 	help
-	  This enables access to ST M25P80 and similar SPI flash chips,
-	  used for program and data storage.  Set up your spi devices
-	  with the right board-specific platform data.
+	  This enables access to most modern SPI flash chips, used for
+	  program and data storage.   Series supported include Atmel AT26DF,
+	  Spansion S25SL, SST 25VF, ST M25P, and Winbond W25X.  Other chips
+	  are supported as well.  See the driver source for the current list,
+	  or to add other chips.
+
+	  Note that the original DataFlash chips (AT45 series, not AT26DF),
+	  need an entirely different driver.
+
+	  Set up your spi devices with the right board-specific platform data,
+	  if you want to specify device partitioning or to use a device which
+	  doesn't support the JEDEC ID instruction.
+
+config M25PXX_USE_FAST_READ
+	bool "Use FAST_READ OPCode allowing SPI CLK >= 50MHz"
+	depends on MTD_M25P80
+	default y
+	help
+	  This option enables FAST_READ access supported by ST M25Pxx.
+
+config MTD_SPEAR_SMI
+	tristate "SPEAR MTD NOR Support through SMI controller"
+	depends on PLAT_SPEAR
+	default y
+	help
+	  This enable SNOR support on SPEAR platforms using SMI controller
+
+config MTD_SST25L
+	tristate "Support SST25L (non JEDEC) SPI Flash chips"
+	depends on SPI_MASTER
+	help
+	  This enables access to the non JEDEC SST25L SPI flash chips, used
+	  for program and data storage.
+
+	  Set up your spi devices with the right board-specific platform data,
+	  if you want to specify device partitioning.
+
+config MTD_BCM47XXSFLASH
+	tristate "R/O support for serial flash on BCMA bus"
+	depends on BCMA_SFLASH
+	help
+	  BCMA bus can have various flash memories attached, they are
+	  registered by bcma as platform devices. This enables driver for
+	  serial flash memories (only read-only mode is implemented).
 
 config MTD_SLRAM
 	tristate "Uncached system RAM"
@@ -155,6 +207,7 @@ comment "Disk-On-Chip Device Drivers"
 
 config MTD_DOC2000
 	tristate "M-Systems Disk-On-Chip 2000 and Millennium (DEPRECATED)"
+	depends on MTD_NAND
 	select MTD_DOCPROBE
 	select MTD_NAND_IDS
 	---help---
@@ -177,6 +230,7 @@ config MTD_DOC2000
 
 config MTD_DOC2001
 	tristate "M-Systems Disk-On-Chip Millennium-only alternative driver (DEPRECATED)"
+	depends on MTD_NAND
 	select MTD_DOCPROBE
 	select MTD_NAND_IDS
 	---help---
@@ -198,6 +252,7 @@ config MTD_DOC2001
 
 config MTD_DOC2001PLUS
 	tristate "M-Systems Disk-On-Chip Millennium Plus"
+	depends on MTD_NAND
 	select MTD_DOCPROBE
 	select MTD_NAND_IDS
 	---help---
@@ -212,6 +267,26 @@ config MTD_DOC2001PLUS
 	  NOTE: This driver will soon be replaced by the new DiskOnChip driver
 	  under "NAND Flash Device Drivers" (currently that driver does not
 	  support all Millennium Plus devices).
+
+config MTD_DOCG3
+	tristate "M-Systems Disk-On-Chip G3"
+	select BCH
+	select BCH_CONST_PARAMS
+	select BITREVERSE
+	---help---
+	  This provides an MTD device driver for the M-Systems DiskOnChip
+	  G3 devices.
+
+	  The driver provides access to G3 DiskOnChip, distributed by
+	  M-Systems and now Sandisk. The support is very experimental,
+	  and doesn't give access to any write operations.
+
+if MTD_DOCG3
+config BCH_CONST_M
+	default 14
+config BCH_CONST_T
+	default 4
+endif
 
 config MTD_DOCPROBE
 	tristate
@@ -232,8 +307,7 @@ config MTD_DOCPROBE_ADVANCED
 config MTD_DOCPROBE_ADDRESS
 	hex "Physical address of DiskOnChip" if MTD_DOCPROBE_ADVANCED
 	depends on MTD_DOCPROBE
-	default "0x0000" if MTD_DOCPROBE_ADVANCED
-	default "0" if !MTD_DOCPROBE_ADVANCED
+	default "0x0"
 	---help---
 	  By default, the probe for DiskOnChip devices will look for a
 	  DiskOnChip at every multiple of 0x2000 between 0xC8000 and 0xEE000.
@@ -270,4 +344,3 @@ config MTD_DOCPROBE_55AA
 	  you have managed to wipe the first block.
 
 endmenu
-

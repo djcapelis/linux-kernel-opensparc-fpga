@@ -2,9 +2,9 @@
  * linux/arch/arm/mach-sa1100/time.c
  *
  * Copyright (C) 1998 Deborah Wallach.
- * Twiddles  (C) 1999 	Hugo Fiennes <hugo@empeg.com>
- * 
- * 2000/03/29 (C) Nicolas Pitre <nico@cam.org>
+ * Twiddles  (C) 1999 Hugo Fiennes <hugo@empeg.com>
+ *
+ * 2000/03/29 (C) Nicolas Pitre <nico@fluxnic.net>
  *	Rewritten: big cleanup, much simpler, better HZ accuracy.
  *
  */
@@ -13,189 +13,123 @@
 #include <linux/interrupt.h>
 #include <linux/irq.h>
 #include <linux/timex.h>
-#include <linux/signal.h>
+#include <linux/clockchips.h>
 
 #include <asm/mach/time.h>
-#include <asm/hardware.h>
+#include <asm/sched_clock.h>
+#include <mach/hardware.h>
+#include <mach/irqs.h>
 
-#define RTC_DEF_DIVIDER		(32768 - 1)
-#define RTC_DEF_TRIM            0
-
-static unsigned long __init sa1100_get_rtc_time(void)
+static u32 notrace sa1100_read_sched_clock(void)
 {
-	/*
-	 * According to the manual we should be able to let RTTR be zero
-	 * and then a default divisor for a 32.768KHz clock is used.
-	 * Apparently this doesn't work, at least for my SA1110 rev 5.
-	 * If the clock divider is uninitialized then reset it to the
-	 * default value to get the 1Hz clock.
-	 */
-	if (RTTR == 0) {
-		RTTR = RTC_DEF_DIVIDER + (RTC_DEF_TRIM << 16);
-		printk(KERN_WARNING "Warning: uninitialized Real Time Clock\n");
-		/* The current RTC value probably doesn't make sense either */
-		RCNR = 0;
-		return 0;
-	}
-	return RCNR;
+	return readl_relaxed(OSCR);
 }
 
-static int sa1100_set_rtc(void)
+#define MIN_OSCR_DELTA 2
+
+static irqreturn_t sa1100_ost0_interrupt(int irq, void *dev_id)
 {
-	unsigned long current_time = xtime.tv_sec;
+	struct clock_event_device *c = dev_id;
 
-	if (RTSR & RTSR_ALE) {
-		/* make sure not to forward the clock over an alarm */
-		unsigned long alarm = RTAR;
-		if (current_time >= alarm && alarm >= RCNR)
-			return -ERESTARTSYS;
-	}
-	RCNR = current_time;
-	return 0;
-}
-
-/* IRQs are disabled before entering here from do_gettimeofday() */
-static unsigned long sa1100_gettimeoffset (void)
-{
-	unsigned long ticks_to_match, elapsed, usec;
-
-	/* Get ticks before next timer match */
-	ticks_to_match = OSMR0 - OSCR;
-
-	/* We need elapsed ticks since last match */
-	elapsed = LATCH - ticks_to_match;
-
-	/* Now convert them to usec */
-	usec = (unsigned long)(elapsed * (tick_nsec / 1000))/LATCH;
-
-	return usec;
-}
-
-#ifdef CONFIG_NO_IDLE_HZ
-static unsigned long initial_match;
-static int match_posponed;
-#endif
-
-static irqreturn_t
-sa1100_timer_interrupt(int irq, void *dev_id)
-{
-	unsigned int next_match;
-
-	write_seqlock(&xtime_lock);
-
-#ifdef CONFIG_NO_IDLE_HZ
-	if (match_posponed) {
-		match_posponed = 0;
-		OSMR0 = initial_match;
-	}
-#endif
-
-	/*
-	 * Loop until we get ahead of the free running timer.
-	 * This ensures an exact clock tick count and time accuracy.
-	 * Since IRQs are disabled at this point, coherence between
-	 * lost_ticks(updated in do_timer()) and the match reg value is
-	 * ensured, hence we can use do_gettimeofday() from interrupt
-	 * handlers.
-	 */
-	do {
-		timer_tick();
-		OSSR = OSSR_M0;  /* Clear match on timer 0 */
-		next_match = (OSMR0 += LATCH);
-	} while ((signed long)(next_match - OSCR) <= 0);
-
-	write_sequnlock(&xtime_lock);
+	/* Disarm the compare/match, signal the event. */
+	writel_relaxed(readl_relaxed(OIER) & ~OIER_E0, OIER);
+	writel_relaxed(OSSR_M0, OSSR);
+	c->event_handler(c);
 
 	return IRQ_HANDLED;
 }
 
+static int
+sa1100_osmr0_set_next_event(unsigned long delta, struct clock_event_device *c)
+{
+	unsigned long next, oscr;
+
+	writel_relaxed(readl_relaxed(OIER) | OIER_E0, OIER);
+	next = readl_relaxed(OSCR) + delta;
+	writel_relaxed(next, OSMR0);
+	oscr = readl_relaxed(OSCR);
+
+	return (signed)(next - oscr) <= MIN_OSCR_DELTA ? -ETIME : 0;
+}
+
+static void
+sa1100_osmr0_set_mode(enum clock_event_mode mode, struct clock_event_device *c)
+{
+	switch (mode) {
+	case CLOCK_EVT_MODE_ONESHOT:
+	case CLOCK_EVT_MODE_UNUSED:
+	case CLOCK_EVT_MODE_SHUTDOWN:
+		writel_relaxed(readl_relaxed(OIER) & ~OIER_E0, OIER);
+		writel_relaxed(OSSR_M0, OSSR);
+		break;
+
+	case CLOCK_EVT_MODE_RESUME:
+	case CLOCK_EVT_MODE_PERIODIC:
+		break;
+	}
+}
+
+static struct clock_event_device ckevt_sa1100_osmr0 = {
+	.name		= "osmr0",
+	.features	= CLOCK_EVT_FEAT_ONESHOT,
+	.rating		= 200,
+	.set_next_event	= sa1100_osmr0_set_next_event,
+	.set_mode	= sa1100_osmr0_set_mode,
+};
+
 static struct irqaction sa1100_timer_irq = {
-	.name		= "SA11xx Timer Tick",
+	.name		= "ost0",
 	.flags		= IRQF_DISABLED | IRQF_TIMER | IRQF_IRQPOLL,
-	.handler	= sa1100_timer_interrupt,
+	.handler	= sa1100_ost0_interrupt,
+	.dev_id		= &ckevt_sa1100_osmr0,
 };
 
 static void __init sa1100_timer_init(void)
 {
-	struct timespec tv;
-	unsigned long flags;
+	writel_relaxed(0, OIER);
+	writel_relaxed(OSSR_M0 | OSSR_M1 | OSSR_M2 | OSSR_M3, OSSR);
 
-	set_rtc = sa1100_set_rtc;
+	setup_sched_clock(sa1100_read_sched_clock, 32, 3686400);
 
-	tv.tv_nsec = 0;
-	tv.tv_sec = sa1100_get_rtc_time();
-	do_settimeofday(&tv);
+	clockevents_calc_mult_shift(&ckevt_sa1100_osmr0, 3686400, 4);
+	ckevt_sa1100_osmr0.max_delta_ns =
+		clockevent_delta2ns(0x7fffffff, &ckevt_sa1100_osmr0);
+	ckevt_sa1100_osmr0.min_delta_ns =
+		clockevent_delta2ns(MIN_OSCR_DELTA * 2, &ckevt_sa1100_osmr0) + 1;
+	ckevt_sa1100_osmr0.cpumask = cpumask_of(0);
 
-	OIER = 0;		/* disable any timer interrupts */
-	OSSR = 0xf;		/* clear status on all timers */
 	setup_irq(IRQ_OST0, &sa1100_timer_irq);
-	local_irq_save(flags);
-	OIER = OIER_E0;		/* enable match on timer 0 to cause interrupts */
-	OSMR0 = OSCR + LATCH;	/* set initial match */
-	local_irq_restore(flags);
-}
 
-#ifdef CONFIG_NO_IDLE_HZ
-static int sa1100_dyn_tick_enable_disable(void)
-{
-	/* nothing to do */
-	return 0;
+	clocksource_mmio_init(OSCR, "oscr", CLOCK_TICK_RATE, 200, 32,
+		clocksource_mmio_readl_up);
+	clockevents_register_device(&ckevt_sa1100_osmr0);
 }
-
-static void sa1100_dyn_tick_reprogram(unsigned long ticks)
-{
-	if (ticks > 1) {
-		initial_match = OSMR0;
-		OSMR0 = initial_match + ticks * LATCH;
-		match_posponed = 1;
-	}
-}
-
-static irqreturn_t
-sa1100_dyn_tick_handler(int irq, void *dev_id)
-{
-	if (match_posponed) {
-		match_posponed = 0;
-		OSMR0 = initial_match;
-		if ((signed long)(initial_match - OSCR) <= 0)
-			return sa1100_timer_interrupt(irq, dev_id);
-	}
-	return IRQ_NONE;
-}
-
-static struct dyn_tick_timer sa1100_dyn_tick = {
-	.enable		= sa1100_dyn_tick_enable_disable,
-	.disable	= sa1100_dyn_tick_enable_disable,
-	.reprogram	= sa1100_dyn_tick_reprogram,
-	.handler	= sa1100_dyn_tick_handler,
-};
-#endif
 
 #ifdef CONFIG_PM
 unsigned long osmr[4], oier;
 
 static void sa1100_timer_suspend(void)
 {
-	osmr[0] = OSMR0;
-	osmr[1] = OSMR1;
-	osmr[2] = OSMR2;
-	osmr[3] = OSMR3;
-	oier = OIER;
+	osmr[0] = readl_relaxed(OSMR0);
+	osmr[1] = readl_relaxed(OSMR1);
+	osmr[2] = readl_relaxed(OSMR2);
+	osmr[3] = readl_relaxed(OSMR3);
+	oier = readl_relaxed(OIER);
 }
 
 static void sa1100_timer_resume(void)
 {
-	OSSR = 0x0f;
-	OSMR0 = osmr[0];
-	OSMR1 = osmr[1];
-	OSMR2 = osmr[2];
-	OSMR3 = osmr[3];
-	OIER = oier;
+	writel_relaxed(0x0f, OSSR);
+	writel_relaxed(osmr[0], OSMR0);
+	writel_relaxed(osmr[1], OSMR1);
+	writel_relaxed(osmr[2], OSMR2);
+	writel_relaxed(osmr[3], OSMR3);
+	writel_relaxed(oier, OIER);
 
 	/*
 	 * OSMR0 is the system timer: make sure OSCR is sufficiently behind
 	 */
-	OSCR = OSMR0 - LATCH;
+	writel_relaxed(OSMR0 - LATCH, OSCR);
 }
 #else
 #define sa1100_timer_suspend NULL
@@ -206,8 +140,4 @@ struct sys_timer sa1100_timer = {
 	.init		= sa1100_timer_init,
 	.suspend	= sa1100_timer_suspend,
 	.resume		= sa1100_timer_resume,
-	.offset		= sa1100_gettimeoffset,
-#ifdef CONFIG_NO_IDLE_HZ
-	.dyn_tick	= &sa1100_dyn_tick,
-#endif
 };

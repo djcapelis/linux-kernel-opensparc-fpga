@@ -19,9 +19,11 @@
  *
  */
 
+#include <linux/capability.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/if_arp.h>
+#include <linux/slab.h>
 #include <linux/pci.h>
 
 #include <asm/uaccess.h>
@@ -71,7 +73,7 @@ prism54_mib_mode_helper(islpci_private *priv, u32 iw_mode)
 	if (iw_mode == IW_MODE_REPEAT || iw_mode == IW_MODE_SECOND) {
 		printk(KERN_DEBUG
 		       "%s(): Sorry, Repeater mode and Secondary mode "
-		       "are not yet supported by this driver.\n", __FUNCTION__);
+		       "are not yet supported by this driver.\n", __func__);
 		return -EINVAL;
 	}
 
@@ -165,8 +167,7 @@ prism54_update_stats(struct work_struct *work)
 	struct obj_bss bss, *bss2;
 	union oid_res_t r;
 
-	if (down_interruptible(&priv->stats_sem))
-		return;
+	mutex_lock(&priv->stats_lock);
 
 /* Noise floor.
  * I'm not sure if the unit is dBm.
@@ -208,9 +209,7 @@ prism54_update_stats(struct work_struct *work)
 	mgt_get_request(priv, DOT11_OID_MPDUTXFAILED, 0, NULL, &r);
 	priv->local_iwstatistics.discard.retries = r.u;
 
-	up(&priv->stats_sem);
-
-	return;
+	mutex_unlock(&priv->stats_lock);
 }
 
 struct iw_statistics *
@@ -219,12 +218,12 @@ prism54_get_wireless_stats(struct net_device *ndev)
 	islpci_private *priv = netdev_priv(ndev);
 
 	/* If the stats are being updated return old data */
-	if (down_trylock(&priv->stats_sem) == 0) {
+	if (mutex_trylock(&priv->stats_lock)) {
 		memcpy(&priv->iwstatistics, &priv->local_iwstatistics,
 		       sizeof (struct iw_statistics));
 		/* They won't be marked updated for the next time */
 		priv->local_iwstatistics.qual.updated = 0;
-		up(&priv->stats_sem);
+		mutex_unlock(&priv->stats_lock);
 	} else
 		priv->iwstatistics.qual.updated = 0;
 
@@ -334,7 +333,7 @@ prism54_set_mode(struct net_device *ndev, struct iw_request_info *info,
 	if (*uwrq > IW_MODE_MONITOR || *uwrq < IW_MODE_AUTO) {
 		printk(KERN_DEBUG
 		       "%s: %s() You passed a non-valid init_mode.\n",
-		       priv->ndev->name, __FUNCTION__);
+		       priv->ndev->name, __func__);
 		return -EINVAL;
 	}
 
@@ -572,8 +571,9 @@ prism54_set_scan(struct net_device *dev, struct iw_request_info *info,
  */
 
 static char *
-prism54_translate_bss(struct net_device *ndev, char *current_ev,
-		      char *end_buf, struct obj_bss *bss, char noise)
+prism54_translate_bss(struct net_device *ndev, struct iw_request_info *info,
+		      char *current_ev, char *end_buf, struct obj_bss *bss,
+		      char noise)
 {
 	struct iw_event iwe;	/* Temporary buffer */
 	short cap;
@@ -585,8 +585,8 @@ prism54_translate_bss(struct net_device *ndev, char *current_ev,
 	memcpy(iwe.u.ap_addr.sa_data, bss->address, 6);
 	iwe.u.ap_addr.sa_family = ARPHRD_ETHER;
 	iwe.cmd = SIOCGIWAP;
-	current_ev =
-	    iwe_stream_add_event(current_ev, end_buf, &iwe, IW_EV_ADDR_LEN);
+	current_ev = iwe_stream_add_event(info, current_ev, end_buf,
+					  &iwe, IW_EV_ADDR_LEN);
 
 	/* The following entries will be displayed in the same order we give them */
 
@@ -594,7 +594,7 @@ prism54_translate_bss(struct net_device *ndev, char *current_ev,
 	iwe.u.data.length = bss->ssid.length;
 	iwe.u.data.flags = 1;
 	iwe.cmd = SIOCGIWESSID;
-	current_ev = iwe_stream_add_point(current_ev, end_buf,
+	current_ev = iwe_stream_add_point(info, current_ev, end_buf,
 					  &iwe, bss->ssid.octets);
 
 	/* Capabilities */
@@ -611,9 +611,8 @@ prism54_translate_bss(struct net_device *ndev, char *current_ev,
 		iwe.u.mode = IW_MODE_ADHOC;
 	iwe.cmd = SIOCGIWMODE;
 	if (iwe.u.mode)
-		current_ev =
-		    iwe_stream_add_event(current_ev, end_buf, &iwe,
-					 IW_EV_UINT_LEN);
+		current_ev = iwe_stream_add_event(info, current_ev, end_buf,
+						  &iwe, IW_EV_UINT_LEN);
 
 	/* Encryption capability */
 	if (cap & CAP_CRYPT)
@@ -622,14 +621,15 @@ prism54_translate_bss(struct net_device *ndev, char *current_ev,
 		iwe.u.data.flags = IW_ENCODE_DISABLED;
 	iwe.u.data.length = 0;
 	iwe.cmd = SIOCGIWENCODE;
-	current_ev = iwe_stream_add_point(current_ev, end_buf, &iwe, NULL);
+	current_ev = iwe_stream_add_point(info, current_ev, end_buf,
+					  &iwe, NULL);
 
 	/* Add frequency. (short) bss->channel is the frequency in MHz */
 	iwe.u.freq.m = bss->channel;
 	iwe.u.freq.e = 6;
 	iwe.cmd = SIOCGIWFREQ;
-	current_ev =
-	    iwe_stream_add_event(current_ev, end_buf, &iwe, IW_EV_FREQ_LEN);
+	current_ev = iwe_stream_add_event(info, current_ev, end_buf,
+					  &iwe, IW_EV_FREQ_LEN);
 
 	/* Add quality statistics */
 	iwe.u.qual.level = bss->rssi;
@@ -637,20 +637,20 @@ prism54_translate_bss(struct net_device *ndev, char *current_ev,
 	/* do a simple SNR for quality */
 	iwe.u.qual.qual = bss->rssi - noise;
 	iwe.cmd = IWEVQUAL;
-	current_ev =
-	    iwe_stream_add_event(current_ev, end_buf, &iwe, IW_EV_QUAL_LEN);
+	current_ev = iwe_stream_add_event(info, current_ev, end_buf,
+					  &iwe, IW_EV_QUAL_LEN);
 
 	/* Add WPA/RSN Information Element, if any */
 	wpa_ie_len = prism54_wpa_bss_ie_get(priv, bss->address, wpa_ie);
 	if (wpa_ie_len > 0) {
 		iwe.cmd = IWEVGENIE;
 		iwe.u.data.length = min(wpa_ie_len, (size_t)MAX_WPA_IE_LEN);
-		current_ev = iwe_stream_add_point(current_ev, end_buf,
-				&iwe, wpa_ie);
+		current_ev = iwe_stream_add_point(info, current_ev, end_buf,
+						  &iwe, wpa_ie);
 	}
 	/* Do the bitrates */
 	{
-		char *	current_val = current_ev + IW_EV_LCP_LEN;
+		char *current_val = current_ev + iwe_stream_lcp_len(info);
 		int i;
 		int mask;
 
@@ -663,14 +663,14 @@ prism54_translate_bss(struct net_device *ndev, char *current_ev,
 		for(i = 0; i < sizeof(scan_rate_list); i++) {
 			if(bss->rates & mask) {
 				iwe.u.bitrate.value = (scan_rate_list[i] * 500000);
-				current_val = iwe_stream_add_value(current_ev, current_val,
-								   end_buf, &iwe,
-								   IW_EV_PARAM_LEN);
+				current_val = iwe_stream_add_value(
+					info, current_ev, current_val,
+					end_buf, &iwe, IW_EV_PARAM_LEN);
 			}
 			mask <<= 1;
 		}
 		/* Check if we added any event */
-		if ((current_val - current_ev) > IW_EV_LCP_LEN)
+		if ((current_val - current_ev) > iwe_stream_lcp_len(info))
 			current_ev = current_val;
 	}
 
@@ -711,7 +711,7 @@ prism54_get_scan(struct net_device *ndev, struct iw_request_info *info,
 
 	/* ok now, scan the list and translate its info */
 	for (i = 0; i < (int) bsslist->nr; i++) {
-		current_ev = prism54_translate_bss(ndev, current_ev,
+		current_ev = prism54_translate_bss(ndev, info, current_ev,
 						   extra + dwrq->length,
 						   &(bsslist->bsslist[i]),
 						   noise);
@@ -778,7 +778,7 @@ prism54_get_essid(struct net_device *ndev, struct iw_request_info *info,
 		dwrq->flags = 0;
 		dwrq->length = 0;
 	}
-	essid->octets[essid->length] = '\0';
+	essid->octets[dwrq->length] = '\0';
 	memcpy(extra, essid->octets, dwrq->length);
 	kfree(essid);
 
@@ -1118,7 +1118,7 @@ prism54_set_encode(struct net_device *ndev, struct iw_request_info *info,
 			    mgt_set_request(priv, DOT11_OID_DEFKEYID, 0,
 					    &index);
 		} else {
-			if (!dwrq->flags & IW_ENCODE_MODE) {
+			if (!(dwrq->flags & IW_ENCODE_MODE)) {
 				/* we cannot do anything. Complain. */
 				return -EINVAL;
 			}
@@ -1187,7 +1187,7 @@ prism54_get_encode(struct net_device *ndev, struct iw_request_info *info,
 	rvalue |= mgt_get_request(priv, DOT11_OID_DEFKEYID, 0, NULL, &r);
 	devindex = r.u;
 	/* Now get the key, return it */
-	if ((index < 0) || (index > 3))
+	if (index == -1 || index > 3)
 		/* no index provided, use the current one */
 		index = devindex;
 	rvalue |= mgt_get_request(priv, DOT11_OID_DEFKEYX, index, NULL, &r);
@@ -1234,7 +1234,7 @@ prism54_set_txpower(struct net_device *ndev, struct iw_request_info *info,
 		/* don't know how to disable radio */
 		printk(KERN_DEBUG
 		       "%s: %s() disabling radio is not yet supported.\n",
-		       priv->ndev->name, __FUNCTION__);
+		       priv->ndev->name, __func__);
 		return -ENOTSUPP;
 	} else if (vwrq->fixed)
 		/* currently only fixed value is supported */
@@ -1242,7 +1242,7 @@ prism54_set_txpower(struct net_device *ndev, struct iw_request_info *info,
 	else {
 		printk(KERN_DEBUG
 		       "%s: %s() auto power will be implemented later.\n",
-		       priv->ndev->name, __FUNCTION__);
+		       priv->ndev->name, __func__);
 		return -ENOTSUPP;
 	}
 }
@@ -1753,7 +1753,7 @@ prism54_get_oid(struct net_device *ndev, struct iw_request_info *info,
 	int rvalue;
 	enum oid_num_t n = dwrq->flags;
 
-	rvalue = mgt_get_request((islpci_private *) ndev->priv, n, 0, NULL, &r);
+	rvalue = mgt_get_request(netdev_priv(ndev), n, 0, NULL, &r);
 	dwrq->length = mgt_response_to_str(n, &r, extra);
 	if ((isl_oid[n].flags & OID_FLAG_TYPE) != OID_TYPE_U32)
 		kfree(r.ptr);
@@ -1766,7 +1766,7 @@ prism54_set_u32(struct net_device *ndev, struct iw_request_info *info,
 {
 	u32 oid = uwrq[0], u = uwrq[1];
 
-	return mgt_set_request((islpci_private *) ndev->priv, oid, 0, &u);
+	return mgt_set_request(netdev_priv(ndev), oid, 0, &u);
 }
 
 static int
@@ -1775,13 +1775,13 @@ prism54_set_raw(struct net_device *ndev, struct iw_request_info *info,
 {
 	u32 oid = dwrq->flags;
 
-	return mgt_set_request((islpci_private *) ndev->priv, oid, 0, extra);
+	return mgt_set_request(netdev_priv(ndev), oid, 0, extra);
 }
 
 void
 prism54_acl_init(struct islpci_acl *acl)
 {
-	sema_init(&acl->sem, 1);
+	mutex_init(&acl->lock);
 	INIT_LIST_HEAD(&acl->mac_list);
 	acl->size = 0;
 	acl->policy = MAC_POLICY_OPEN;
@@ -1793,11 +1793,10 @@ prism54_clear_mac(struct islpci_acl *acl)
 	struct list_head *ptr, *next;
 	struct mac_entry *entry;
 
-	if (down_interruptible(&acl->sem))
-		return;
+	mutex_lock(&acl->lock);
 
 	if (acl->size == 0) {
-		up(&acl->sem);
+		mutex_unlock(&acl->lock);
 		return;
 	}
 
@@ -1808,7 +1807,7 @@ prism54_clear_mac(struct islpci_acl *acl)
 		kfree(entry);
 	}
 	acl->size = 0;
-	up(&acl->sem);
+	mutex_unlock(&acl->lock);
 }
 
 void
@@ -1835,13 +1834,13 @@ prism54_add_mac(struct net_device *ndev, struct iw_request_info *info,
 
 	memcpy(entry->addr, addr->sa_data, ETH_ALEN);
 
-	if (down_interruptible(&acl->sem)) {
+	if (mutex_lock_interruptible(&acl->lock)) {
 		kfree(entry);
 		return -ERESTARTSYS;
 	}
 	list_add_tail(&entry->_list, &acl->mac_list);
 	acl->size++;
-	up(&acl->sem);
+	mutex_unlock(&acl->lock);
 
 	return 0;
 }
@@ -1853,26 +1852,23 @@ prism54_del_mac(struct net_device *ndev, struct iw_request_info *info,
 	islpci_private *priv = netdev_priv(ndev);
 	struct islpci_acl *acl = &priv->acl;
 	struct mac_entry *entry;
-	struct list_head *ptr;
 	struct sockaddr *addr = (struct sockaddr *) extra;
 
 	if (addr->sa_family != ARPHRD_ETHER)
 		return -EOPNOTSUPP;
 
-	if (down_interruptible(&acl->sem))
+	if (mutex_lock_interruptible(&acl->lock))
 		return -ERESTARTSYS;
-	for (ptr = acl->mac_list.next; ptr != &acl->mac_list; ptr = ptr->next) {
-		entry = list_entry(ptr, struct mac_entry, _list);
-
+	list_for_each_entry(entry, &acl->mac_list, _list) {
 		if (memcmp(entry->addr, addr->sa_data, ETH_ALEN) == 0) {
-			list_del(ptr);
+			list_del(&entry->_list);
 			acl->size--;
 			kfree(entry);
-			up(&acl->sem);
+			mutex_unlock(&acl->lock);
 			return 0;
 		}
 	}
-	up(&acl->sem);
+	mutex_unlock(&acl->lock);
 	return -EINVAL;
 }
 
@@ -1883,27 +1879,24 @@ prism54_get_mac(struct net_device *ndev, struct iw_request_info *info,
 	islpci_private *priv = netdev_priv(ndev);
 	struct islpci_acl *acl = &priv->acl;
 	struct mac_entry *entry;
-	struct list_head *ptr;
 	struct sockaddr *dst = (struct sockaddr *) extra;
 
 	dwrq->length = 0;
 
-	if (down_interruptible(&acl->sem))
+	if (mutex_lock_interruptible(&acl->lock))
 		return -ERESTARTSYS;
 
-	for (ptr = acl->mac_list.next; ptr != &acl->mac_list; ptr = ptr->next) {
-		entry = list_entry(ptr, struct mac_entry, _list);
-
+	list_for_each_entry(entry, &acl->mac_list, _list) {
 		memcpy(dst->sa_data, entry->addr, ETH_ALEN);
 		dst->sa_family = ARPHRD_ETHER;
 		dwrq->length++;
 		dst++;
 	}
-	up(&acl->sem);
+	mutex_unlock(&acl->lock);
 	return 0;
 }
 
-/* Setting policy also clears the MAC acl, even if we don't change the defaut
+/* Setting policy also clears the MAC acl, even if we don't change the default
  * policy
  */
 
@@ -1960,27 +1953,25 @@ prism54_get_policy(struct net_device *ndev, struct iw_request_info *info,
 static int
 prism54_mac_accept(struct islpci_acl *acl, char *mac)
 {
-	struct list_head *ptr;
 	struct mac_entry *entry;
 	int res = 0;
 
-	if (down_interruptible(&acl->sem))
+	if (mutex_lock_interruptible(&acl->lock))
 		return -ERESTARTSYS;
 
 	if (acl->policy == MAC_POLICY_OPEN) {
-		up(&acl->sem);
+		mutex_unlock(&acl->lock);
 		return 1;
 	}
 
-	for (ptr = acl->mac_list.next; ptr != &acl->mac_list; ptr = ptr->next) {
-		entry = list_entry(ptr, struct mac_entry, _list);
+	list_for_each_entry(entry, &acl->mac_list, _list) {
 		if (memcmp(entry->addr, mac, ETH_ALEN) == 0) {
 			res = 1;
 			break;
 		}
 	}
 	res = (acl->policy == MAC_POLICY_ACCEPT) ? !res : res;
-	up(&acl->sem);
+	mutex_unlock(&acl->lock);
 
 	return res;
 }
@@ -2037,12 +2028,11 @@ static void
 format_event(islpci_private *priv, char *dest, const char *str,
 	     const struct obj_mlme *mlme, u16 *length, int error)
 {
-	const u8 *a = mlme->address;
 	int n = snprintf(dest, IW_CUSTOM_MAX,
-			 "%s %s %2.2X:%2.2X:%2.2X:%2.2X:%2.2X:%2.2X %s (%2.2X)",
+			 "%s %s %pM %s (%2.2X)",
 			 str,
 			 ((priv->iw_mode == IW_MODE_MASTER) ? "from" : "to"),
-			 a[0], a[1], a[2], a[3], a[4], a[5],
+			 mlme->address,
 			 (error ? (mlme->code ? " : REJECTED " : " : ACCEPTED ")
 			  : ""), mlme->code);
 	BUG_ON(n > IW_CUSTOM_MAX);
@@ -2077,7 +2067,7 @@ send_simple_event(islpci_private *priv, const char *str)
 	memptr = kmalloc(IW_CUSTOM_MAX, GFP_KERNEL);
 	if (!memptr)
 		return;
-	BUG_ON(n > IW_CUSTOM_MAX);
+	BUG_ON(n >= IW_CUSTOM_MAX);
 	wrqu.data.pointer = memptr;
 	wrqu.data.length = n;
 	strcpy(memptr, str);
@@ -2091,6 +2081,7 @@ link_changed(struct net_device *ndev, u32 bitrate)
 	islpci_private *priv = netdev_priv(ndev);
 
 	if (bitrate) {
+		netif_carrier_on(ndev);
 		if (priv->iw_mode == IW_MODE_INFRA) {
 			union iwreq_data uwrq;
 			prism54_get_wap(ndev, NULL, (struct sockaddr *) &uwrq,
@@ -2099,8 +2090,10 @@ link_changed(struct net_device *ndev, u32 bitrate)
 		} else
 			send_simple_event(netdev_priv(ndev),
 					  "Link established");
-	} else
+	} else {
+		netif_carrier_off(ndev);
 		send_simple_event(netdev_priv(ndev), "Link lost");
+	}
 }
 
 /* Beacon/ProbeResp payload header */
@@ -2108,13 +2101,10 @@ struct ieee80211_beacon_phdr {
 	u8 timestamp[8];
 	u16 beacon_int;
 	u16 capab_info;
-} __attribute__ ((packed));
+} __packed;
 
 #define WLAN_EID_GENERIC 0xdd
 static u8 wpa_oid[4] = { 0x00, 0x50, 0xf2, 1 };
-
-#define MAC2STR(a) (a)[0], (a)[1], (a)[2], (a)[3], (a)[4], (a)[5]
-#define MACSTR "%02x:%02x:%02x:%02x:%02x:%02x"
 
 static void
 prism54_wpa_bss_ie_add(islpci_private *priv, u8 *bssid,
@@ -2126,8 +2116,7 @@ prism54_wpa_bss_ie_add(islpci_private *priv, u8 *bssid,
 	if (wpa_ie_len > MAX_WPA_IE_LEN)
 		wpa_ie_len = MAX_WPA_IE_LEN;
 
-	if (down_interruptible(&priv->wpa_sem))
-		return;
+	mutex_lock(&priv->wpa_lock);
 
 	/* try to use existing entry */
 	list_for_each(ptr, &priv->bss_wpa_list) {
@@ -2162,8 +2151,8 @@ prism54_wpa_bss_ie_add(islpci_private *priv, u8 *bssid,
 		bss->wpa_ie_len = wpa_ie_len;
 		bss->last_update = jiffies;
 	} else {
-		printk(KERN_DEBUG "Failed to add BSS WPA entry for " MACSTR
-		       "\n", MAC2STR(bssid));
+		printk(KERN_DEBUG "Failed to add BSS WPA entry for "
+		       "%pM\n", bssid);
 	}
 
 	/* expire old entries from WPA list */
@@ -2178,7 +2167,7 @@ prism54_wpa_bss_ie_add(islpci_private *priv, u8 *bssid,
 		kfree(bss);
 	}
 
-	up(&priv->wpa_sem);
+	mutex_unlock(&priv->wpa_lock);
 }
 
 static size_t
@@ -2188,8 +2177,7 @@ prism54_wpa_bss_ie_get(islpci_private *priv, u8 *bssid, u8 *wpa_ie)
 	struct islpci_bss_wpa_ie *bss = NULL;
 	size_t len = 0;
 
-	if (down_interruptible(&priv->wpa_sem))
-		return 0;
+	mutex_lock(&priv->wpa_lock);
 
 	list_for_each(ptr, &priv->bss_wpa_list) {
 		bss = list_entry(ptr, struct islpci_bss_wpa_ie, list);
@@ -2201,7 +2189,7 @@ prism54_wpa_bss_ie_get(islpci_private *priv, u8 *bssid, u8 *wpa_ie)
 		len = bss->wpa_ie_len;
 		memcpy(wpa_ie, bss->wpa_ie, len);
 	}
-	up(&priv->wpa_sem);
+	mutex_unlock(&priv->wpa_lock);
 
 	return len;
 }
@@ -2210,17 +2198,15 @@ void
 prism54_wpa_bss_ie_init(islpci_private *priv)
 {
 	INIT_LIST_HEAD(&priv->bss_wpa_list);
-	sema_init(&priv->wpa_sem, 1);
+	mutex_init(&priv->wpa_lock);
 }
 
 void
 prism54_wpa_bss_ie_clean(islpci_private *priv)
 {
-	struct list_head *ptr, *n;
+	struct islpci_bss_wpa_ie *bss, *n;
 
-	list_for_each_safe(ptr, n, &priv->bss_wpa_list) {
-		struct islpci_bss_wpa_ie *bss;
-		bss = list_entry(ptr, struct islpci_bss_wpa_ie, list);
+	list_for_each_entry_safe(bss, n, &priv->bss_wpa_list, list) {
 		kfree(bss);
 	}
 }
@@ -2241,7 +2227,7 @@ prism54_process_bss_data(islpci_private *priv, u32 oid, u8 *addr,
 	while (pos < end) {
 		if (pos + 2 + pos[1] > end) {
 			printk(KERN_DEBUG "Parsing Beacon/ProbeResp failed "
-			       "for " MACSTR "\n", MAC2STR(addr));
+			       "for %pM\n", addr);
 			return;
 		}
 		if (pos[0] == WLAN_EID_GENERIC && pos[1] >= 4 &&
@@ -2336,7 +2322,7 @@ prism54_process_trap_helper(islpci_private *priv, enum oid_num_t oid,
 
 	case DOT11_OID_BEACON:
 		send_formatted_event(priv,
-				     "Received a beacon from an unkown AP",
+				     "Received a beacon from an unknown AP",
 				     mlme, 0);
 		break;
 
@@ -2368,14 +2354,8 @@ prism54_process_trap_helper(islpci_private *priv, enum oid_num_t oid,
 			break;
 
 		memcpy(&confirm->address, mlmeex->address, ETH_ALEN);
-		printk(KERN_DEBUG "Authenticate from: address:\t%02x:%02x:%02x:%02x:%02x:%02x\n",
-				mlmeex->address[0],
-				mlmeex->address[1],
-				mlmeex->address[2],
-				mlmeex->address[3],
-				mlmeex->address[4],
-				mlmeex->address[5]
-				);
+		printk(KERN_DEBUG "Authenticate from: address:\t%pM\n",
+		       mlmeex->address);
 		confirm->id = -1; /* or mlmeex->id ? */
 		confirm->state = 0; /* not used */
 		confirm->code = 0;
@@ -2420,15 +2400,8 @@ prism54_process_trap_helper(islpci_private *priv, enum oid_num_t oid,
 		wpa_ie_len = prism54_wpa_bss_ie_get(priv, mlmeex->address, wpa_ie);
 
 		if (!wpa_ie_len) {
-			printk(KERN_DEBUG "No WPA IE found from "
-					"address:\t%02x:%02x:%02x:%02x:%02x:%02x\n",
-				mlmeex->address[0],
-				mlmeex->address[1],
-				mlmeex->address[2],
-				mlmeex->address[3],
-				mlmeex->address[4],
-				mlmeex->address[5]
-				);
+			printk(KERN_DEBUG "No WPA IE found from address:\t%pM\n",
+			       mlmeex->address);
 			kfree(confirm);
 			break;
 		}
@@ -2464,15 +2437,8 @@ prism54_process_trap_helper(islpci_private *priv, enum oid_num_t oid,
 		wpa_ie_len = prism54_wpa_bss_ie_get(priv, mlmeex->address, wpa_ie);
 
 		if (!wpa_ie_len) {
-			printk(KERN_DEBUG "No WPA IE found from "
-					"address:\t%02x:%02x:%02x:%02x:%02x:%02x\n",
-				mlmeex->address[0],
-				mlmeex->address[1],
-				mlmeex->address[2],
-				mlmeex->address[3],
-				mlmeex->address[4],
-				mlmeex->address[5]
-				);
+			printk(KERN_DEBUG "No WPA IE found from address:\t%pM\n",
+			       mlmeex->address);
 			kfree(confirm);
 			break;
 		}
@@ -2527,324 +2493,7 @@ prism54_set_mac_address(struct net_device *ndev, void *addr)
 	return ret;
 }
 
-/* Note: currently, use hostapd ioctl from the Host AP driver for WPA
- * support. This is to be replaced with Linux wireless extensions once they
- * get WPA support. */
-
-/* Note II: please leave all this together as it will be easier to remove later,
- * once wireless extensions add WPA support -mcgrof */
-
-/* PRISM54_HOSTAPD ioctl() cmd: */
-enum {
-	PRISM2_SET_ENCRYPTION = 6,
-	PRISM2_HOSTAPD_SET_GENERIC_ELEMENT = 12,
-	PRISM2_HOSTAPD_MLME = 13,
-	PRISM2_HOSTAPD_SCAN_REQ = 14,
-};
-
 #define PRISM54_SET_WPA			SIOCIWFIRSTPRIV+12
-#define PRISM54_HOSTAPD			SIOCIWFIRSTPRIV+25
-#define PRISM54_DROP_UNENCRYPTED	SIOCIWFIRSTPRIV+26
-
-#define PRISM2_HOSTAPD_MAX_BUF_SIZE 1024
-#define PRISM2_HOSTAPD_GENERIC_ELEMENT_HDR_LEN \
-((int) (&((struct prism2_hostapd_param *) 0)->u.generic_elem.data))
-
-/* Maximum length for algorithm names (-1 for nul termination)
- * used in ioctl() */
-#define HOSTAP_CRYPT_ALG_NAME_LEN 16
-
-struct prism2_hostapd_param {
-	u32 cmd;
-	u8 sta_addr[ETH_ALEN];
-	union {
-	       struct {
-		       u8 alg[HOSTAP_CRYPT_ALG_NAME_LEN];
-		       u32 flags;
-		       u32 err;
-		       u8 idx;
-		       u8 seq[8]; /* sequence counter (set: RX, get: TX) */
-		       u16 key_len;
-		       u8 key[0];
-		       } crypt;
-               struct {
-                       u8 len;
-                       u8 data[0];
-               } generic_elem;
-               struct {
-#define MLME_STA_DEAUTH 0
-#define MLME_STA_DISASSOC 1
-                       u16 cmd;
-                       u16 reason_code;
-               } mlme;
-               struct {
-                       u8 ssid_len;
-                       u8 ssid[32];
-               } scan_req;
-       } u;
-};
-
-
-static int
-prism2_ioctl_set_encryption(struct net_device *dev,
-	struct prism2_hostapd_param *param,
-	int param_len)
-{
-	islpci_private *priv = netdev_priv(dev);
-	int rvalue = 0, force = 0;
-	int authen = DOT11_AUTH_OS, invoke = 0, exunencrypt = 0;
-	union oid_res_t r;
-
-	/* with the new API, it's impossible to get a NULL pointer.
-	 * New version of iwconfig set the IW_ENCODE_NOKEY flag
-	 * when no key is given, but older versions don't. */
-
-	if (param->u.crypt.key_len > 0) {
-		/* we have a key to set */
-		int index = param->u.crypt.idx;
-		int current_index;
-		struct obj_key key = { DOT11_PRIV_TKIP, 0, "" };
-
-		/* get the current key index */
-		rvalue = mgt_get_request(priv, DOT11_OID_DEFKEYID, 0, NULL, &r);
-		current_index = r.u;
-		/* Verify that the key is not marked as invalid */
-		if (!(param->u.crypt.flags & IW_ENCODE_NOKEY)) {
-			key.length = param->u.crypt.key_len > sizeof (param->u.crypt.key) ?
-			    sizeof (param->u.crypt.key) : param->u.crypt.key_len;
-			memcpy(key.key, param->u.crypt.key, key.length);
-			if (key.length == 32)
-				/* we want WPA-PSK */
-				key.type = DOT11_PRIV_TKIP;
-			if ((index < 0) || (index > 3))
-				/* no index provided use the current one */
-				index = current_index;
-
-			/* now send the key to the card  */
-			rvalue |=
-			    mgt_set_request(priv, DOT11_OID_DEFKEYX, index,
-					    &key);
-		}
-		/*
-		 * If a valid key is set, encryption should be enabled
-		 * (user may turn it off later).
-		 * This is also how "iwconfig ethX key on" works
-		 */
-		if ((index == current_index) && (key.length > 0))
-			force = 1;
-	} else {
-		int index = (param->u.crypt.flags & IW_ENCODE_INDEX) - 1;
-		if ((index >= 0) && (index <= 3)) {
-			/* we want to set the key index */
-			rvalue |=
-			    mgt_set_request(priv, DOT11_OID_DEFKEYID, 0,
-					    &index);
-		} else {
-			if (!param->u.crypt.flags & IW_ENCODE_MODE) {
-				/* we cannot do anything. Complain. */
-				return -EINVAL;
-			}
-		}
-	}
-	/* now read the flags */
-	if (param->u.crypt.flags & IW_ENCODE_DISABLED) {
-		/* Encoding disabled,
-		 * authen = DOT11_AUTH_OS;
-		 * invoke = 0;
-		 * exunencrypt = 0; */
-	}
-	if (param->u.crypt.flags & IW_ENCODE_OPEN)
-		/* Encode but accept non-encoded packets. No auth */
-		invoke = 1;
-	if ((param->u.crypt.flags & IW_ENCODE_RESTRICTED) || force) {
-		/* Refuse non-encoded packets. Auth */
-		authen = DOT11_AUTH_BOTH;
-		invoke = 1;
-		exunencrypt = 1;
-	}
-	/* do the change if requested  */
-	if ((param->u.crypt.flags & IW_ENCODE_MODE) || force) {
-		rvalue |=
-		    mgt_set_request(priv, DOT11_OID_AUTHENABLE, 0, &authen);
-		rvalue |=
-		    mgt_set_request(priv, DOT11_OID_PRIVACYINVOKED, 0, &invoke);
-		rvalue |=
-		    mgt_set_request(priv, DOT11_OID_EXUNENCRYPTED, 0,
-				    &exunencrypt);
-	}
-	return rvalue;
-}
-
-static int
-prism2_ioctl_set_generic_element(struct net_device *ndev,
-	struct prism2_hostapd_param *param,
-	int param_len)
-{
-       islpci_private *priv = netdev_priv(ndev);
-       int max_len, len, alen, ret=0;
-       struct obj_attachment *attach;
-
-       len = param->u.generic_elem.len;
-       max_len = param_len - PRISM2_HOSTAPD_GENERIC_ELEMENT_HDR_LEN;
-       if (max_len < 0 || max_len < len)
-               return -EINVAL;
-
-       alen = sizeof(*attach) + len;
-       attach = kzalloc(alen, GFP_KERNEL);
-       if (attach == NULL)
-               return -ENOMEM;
-
-#define WLAN_FC_TYPE_MGMT 0
-#define WLAN_FC_STYPE_ASSOC_REQ 0
-#define WLAN_FC_STYPE_REASSOC_REQ 2
-
-       /* Note: endianness is covered by mgt_set_varlen */
-
-       attach->type = (WLAN_FC_TYPE_MGMT << 2) |
-               (WLAN_FC_STYPE_ASSOC_REQ << 4);
-       attach->id = -1;
-       attach->size = len;
-       memcpy(attach->data, param->u.generic_elem.data, len);
-
-       ret = mgt_set_varlen(priv, DOT11_OID_ATTACHMENT, attach, len);
-
-       if (ret == 0) {
-               attach->type = (WLAN_FC_TYPE_MGMT << 2) |
-                       (WLAN_FC_STYPE_REASSOC_REQ << 4);
-
-	       ret = mgt_set_varlen(priv, DOT11_OID_ATTACHMENT, attach, len);
-
-	       if (ret == 0)
-		       printk(KERN_DEBUG "%s: WPA IE Attachment was set\n",
-				       ndev->name);
-       }
-
-       kfree(attach);
-       return ret;
-
-}
-
-static int
-prism2_ioctl_mlme(struct net_device *dev, struct prism2_hostapd_param *param)
-{
-	return -EOPNOTSUPP;
-}
-
-static int
-prism2_ioctl_scan_req(struct net_device *ndev,
-                     struct prism2_hostapd_param *param)
-{
-	islpci_private *priv = netdev_priv(ndev);
-	int i, rvalue;
-	struct obj_bsslist *bsslist;
-	u32 noise = 0;
-	char *extra = "";
-	char *current_ev = "foo";
-	union oid_res_t r;
-
-	if (islpci_get_state(priv) < PRV_STATE_INIT) {
-		/* device is not ready, fail gently */
-		return 0;
-	}
-
-	/* first get the noise value. We will use it to report the link quality */
-	rvalue = mgt_get_request(priv, DOT11_OID_NOISEFLOOR, 0, NULL, &r);
-	noise = r.u;
-
-	/* Ask the device for a list of known bss. We can report at most
-	 * IW_MAX_AP=64 to the range struct. But the device won't repport anything
-	 * if you change the value of IWMAX_BSS=24.
-	 */
-	rvalue |= mgt_get_request(priv, DOT11_OID_BSSLIST, 0, NULL, &r);
-	bsslist = r.ptr;
-
-	/* ok now, scan the list and translate its info */
-	for (i = 0; i < min(IW_MAX_AP, (int) bsslist->nr); i++)
-		current_ev = prism54_translate_bss(ndev, current_ev,
-						   extra + IW_SCAN_MAX_DATA,
-						   &(bsslist->bsslist[i]),
-						   noise);
-	kfree(bsslist);
-
-	return rvalue;
-}
-
-static int
-prism54_hostapd(struct net_device *ndev, struct iw_point *p)
-{
-       struct prism2_hostapd_param *param;
-       int ret = 0;
-       u32 uwrq;
-
-       printk(KERN_DEBUG "prism54_hostapd - len=%d\n", p->length);
-       if (p->length < sizeof(struct prism2_hostapd_param) ||
-           p->length > PRISM2_HOSTAPD_MAX_BUF_SIZE || !p->pointer)
-               return -EINVAL;
-
-       param = kmalloc(p->length, GFP_KERNEL);
-       if (param == NULL)
-               return -ENOMEM;
-
-       if (copy_from_user(param, p->pointer, p->length)) {
-               kfree(param);
-               return -EFAULT;
-       }
-
-       switch (param->cmd) {
-       case PRISM2_SET_ENCRYPTION:
-	       printk(KERN_DEBUG "%s: Caught WPA supplicant set encryption request\n",
-			       ndev->name);
-               ret = prism2_ioctl_set_encryption(ndev, param, p->length);
-               break;
-       case PRISM2_HOSTAPD_SET_GENERIC_ELEMENT:
-	       printk(KERN_DEBUG "%s: Caught WPA supplicant set WPA IE request\n",
-			       ndev->name);
-               ret = prism2_ioctl_set_generic_element(ndev, param,
-                                                      p->length);
-               break;
-       case PRISM2_HOSTAPD_MLME:
-	       printk(KERN_DEBUG "%s: Caught WPA supplicant MLME request\n",
-			       ndev->name);
-               ret = prism2_ioctl_mlme(ndev, param);
-               break;
-       case PRISM2_HOSTAPD_SCAN_REQ:
-	       printk(KERN_DEBUG "%s: Caught WPA supplicant scan request\n",
-			       ndev->name);
-               ret = prism2_ioctl_scan_req(ndev, param);
-               break;
-	case PRISM54_SET_WPA:
-	       printk(KERN_DEBUG "%s: Caught WPA supplicant wpa init request\n",
-			       ndev->name);
-	       uwrq = 1;
-	       ret = prism54_set_wpa(ndev, NULL, &uwrq, NULL);
-	       break;
-	case PRISM54_DROP_UNENCRYPTED:
-	       printk(KERN_DEBUG "%s: Caught WPA drop unencrypted request\n",
-			       ndev->name);
-#if 0
-	       uwrq = 0x01;
-	       mgt_set(priv, DOT11_OID_EXUNENCRYPTED, &uwrq);
-	       down_write(&priv->mib_sem);
-	       mgt_commit(priv);
-	       up_write(&priv->mib_sem);
-#endif
-	       /* Not necessary, as set_wpa does it, should we just do it here though? */
-	       ret = 0;
-	       break;
-       default:
-	       printk(KERN_DEBUG "%s: Caught a WPA supplicant request that is not supported\n",
-			       ndev->name);
-               ret = -EOPNOTSUPP;
-               break;
-       }
-
-       if (ret == 0 && copy_to_user(p->pointer, param, p->length))
-               ret = -EFAULT;
-
-       kfree(param);
-
-       return ret;
-}
 
 static int
 prism54_set_wpa(struct net_device *ndev, struct iw_request_info *info,
@@ -3011,7 +2660,8 @@ prism54_set_spy(struct net_device *ndev,
 		union iwreq_data *uwrq, char *extra)
 {
 	islpci_private *priv = netdev_priv(ndev);
-	u32 u, oid = OID_INL_CONFIG;
+	u32 u;
+	enum oid_num_t oid = OID_INL_CONFIG;
 
 	down_write(&priv->mib_sem);
 	mgt_get(priv, OID_INL_CONFIG, &u);
@@ -3249,29 +2899,11 @@ static const iw_handler prism54_private_handler[] = {
 };
 
 const struct iw_handler_def prism54_handler_def = {
-	.num_standard = sizeof (prism54_handler) / sizeof (iw_handler),
-	.num_private = sizeof (prism54_private_handler) / sizeof (iw_handler),
-	.num_private_args =
-	    sizeof (prism54_private_args) / sizeof (struct iw_priv_args),
+	.num_standard = ARRAY_SIZE(prism54_handler),
+	.num_private = ARRAY_SIZE(prism54_private_handler),
+	.num_private_args = ARRAY_SIZE(prism54_private_args),
 	.standard = (iw_handler *) prism54_handler,
 	.private = (iw_handler *) prism54_private_handler,
 	.private_args = (struct iw_priv_args *) prism54_private_args,
 	.get_wireless_stats = prism54_get_wireless_stats,
 };
-
-/* For wpa_supplicant */
-
-int
-prism54_ioctl(struct net_device *ndev, struct ifreq *rq, int cmd)
-{
-	struct iwreq *wrq = (struct iwreq *) rq;
-	int ret = -1;
-	switch (cmd) {
-		case PRISM54_HOSTAPD:
-		if (!capable(CAP_NET_ADMIN))
-		return -EPERM;
-		ret = prism54_hostapd(ndev, &wrq->u.data);
-		return ret;
-	}
-	return -EOPNOTSUPP;
-}

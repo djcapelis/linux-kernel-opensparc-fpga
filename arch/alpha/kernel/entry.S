@@ -73,8 +73,6 @@
 	ldq	$20, HAE_REG($19);	\
 	stq	$21, HAE_CACHE($19);	\
 	stq	$21, 0($20);		\
-	ldq	$0, 0($sp);		\
-	ldq	$1, 8($sp);		\
 99:;					\
 	ldq	$19, 72($sp);		\
 	ldq	$20, 80($sp);		\
@@ -313,21 +311,26 @@ entSys:
 
 	.align	4
 ret_from_sys_call:
-	cmovne	$26, 0, $19		/* $19 = 0 => non-restartable */
+	cmovne	$26, 0, $18		/* $18 = 0 => non-restartable */
 	ldq	$0, SP_OFF($sp)
 	and	$0, 8, $0
-	beq	$0, restore_all
-ret_from_reschedule:
+	beq	$0, ret_to_kernel
+ret_to_user:
 	/* Make sure need_resched and sigpending don't change between
 		sampling and the rti.  */
 	lda	$16, 7
 	call_pal PAL_swpipl
-	ldl	$5, TI_FLAGS($8)
-	and	$5, _TIF_WORK_MASK, $2
-	bne	$5, work_pending
+	ldl	$17, TI_FLAGS($8)
+	and	$17, _TIF_WORK_MASK, $2
+	bne	$2, work_pending
 restore_all:
 	RESTORE_ALL
 	call_pal PAL_rti
+
+ret_to_kernel:
+	lda	$16, 7
+	call_pal PAL_swpipl
+	br restore_all
 
 	.align 3
 $syscall_error:
@@ -338,10 +341,10 @@ $syscall_error:
 	 * frame to indicate that a negative return value wasn't an
 	 * error number..
 	 */
-	ldq	$19, 0($sp)	/* old syscall nr (zero if success) */
-	beq	$19, $ret_success
+	ldq	$18, 0($sp)	/* old syscall nr (zero if success) */
+	beq	$18, $ret_success
 
-	ldq	$20, 72($sp)	/* .. and this a3 */
+	ldq	$19, 72($sp)	/* .. and this a3 */
 	subq	$31, $0, $0	/* with error in v0 */
 	addq	$31, 1, $1	/* set a3 for errno return */
 	stq	$0, 0($sp)
@@ -359,43 +362,33 @@ $ret_success:
  * Do all cleanup when returning from all interrupts and system calls.
  *
  * Arguments:
- *       $5: TI_FLAGS.
  *       $8: current.
- *      $19: The old syscall number, or zero if this is not a return
+ *      $17: TI_FLAGS.
+ *      $18: The old syscall number, or zero if this is not a return
  *           from a syscall that errored and is possibly restartable.
- *      $20: Error indication.
+ *      $19: The old a3 value
  */
 
 	.align	4
 	.ent	work_pending
 work_pending:
-	and	$5, _TIF_NEED_RESCHED, $2
-	beq	$2, $work_notifysig
+	and	$17, _TIF_NOTIFY_RESUME | _TIF_SIGPENDING, $2
+	bne	$2, $work_notifysig
 
 $work_resched:
-	subq	$sp, 16, $sp
-	stq	$19, 0($sp)              /* save syscall nr */
-	stq	$20, 8($sp)              /* and error indication (a3) */
+	/*
+	 * We can get here only if we returned from syscall without SIGPENDING
+	 * or got through work_notifysig already.  Either case means no syscall
+	 * restarts for us, so let $18 and $19 burn.
+	 */
 	jsr	$26, schedule
-	ldq	$19, 0($sp)
-	ldq	$20, 8($sp)
-	addq	$sp, 16, $sp
-	/* Make sure need_resched and sigpending don't change between
-		sampling and the rti.  */
-	lda	$16, 7
-	call_pal PAL_swpipl
-	ldl	$5, TI_FLAGS($8)
-	and	$5, _TIF_WORK_MASK, $2
-	beq	$2, restore_all
-	and	$5, _TIF_NEED_RESCHED, $2
-	bne	$2, $work_resched
+	mov	0, $18
+	br	ret_to_user
 
 $work_notifysig:
 	mov	$sp, $16
-	br	$1, do_switch_stack
-	mov	$sp, $17
-	mov	$5, $18
-	jsr	$26, do_notify_resume
+	bsr	$1, do_switch_stack
+	jsr	$26, do_work_pending
 	bsr	$1, undo_switch_stack
 	br	restore_all
 .end work_pending
@@ -409,11 +402,10 @@ $work_notifysig:
 strace:
 	/* set up signal stack, call syscall_trace */
 	bsr	$1, do_switch_stack
-	jsr	$26, syscall_trace
+	jsr	$26, syscall_trace_enter /* returns the syscall number */
 	bsr	$1, undo_switch_stack
 
-	/* get the system call number and the arguments back.. */
-	ldq	$0, 0($sp)
+	/* get the arguments back.. */
 	ldq	$16, SP_OFF+24($sp)
 	ldq	$17, SP_OFF+32($sp)
 	ldq	$18, SP_OFF+40($sp)
@@ -430,6 +422,7 @@ strace:
 	beq	$1, 1f
 	ldq	$27, 0($2)
 1:	jsr	$26, ($27), sys_gettimeofday
+ret_from_straced:
 	ldgp	$gp, 0($26)
 
 	/* check return.. */
@@ -439,15 +432,15 @@ $strace_success:
 	stq	$0, 0($sp)		/* save return value */
 
 	bsr	$1, do_switch_stack
-	jsr	$26, syscall_trace
+	jsr	$26, syscall_trace_leave
 	bsr	$1, undo_switch_stack
 	br	$31, ret_from_sys_call
 
 	.align	3
 $strace_error:
-	ldq	$19, 0($sp)	/* old syscall nr (zero if success) */
-	beq	$19, $strace_success
-	ldq	$20, 72($sp)	/* .. and this a3 */
+	ldq	$18, 0($sp)	/* old syscall nr (zero if success) */
+	beq	$18, $strace_success
+	ldq	$19, 72($sp)	/* .. and this a3 */
 
 	subq	$31, $0, $0	/* with error in v0 */
 	addq	$31, 1, $1	/* set a3 for errno return */
@@ -455,11 +448,11 @@ $strace_error:
 	stq	$1, 72($sp)	/* a3 for return */
 
 	bsr	$1, do_switch_stack
-	mov	$19, $9		/* save old syscall number */
-	mov	$20, $10	/* save old a3 */
-	jsr	$26, syscall_trace
-	mov	$9, $19
-	mov	$10, $20
+	mov	$18, $9		/* save old syscall number */
+	mov	$19, $10	/* save old a3 */
+	jsr	$26, syscall_trace_leave
+	mov	$9, $18
+	mov	$10, $19
 	bsr	$1, undo_switch_stack
 
 	mov	$31, $26	/* tell "ret_from_sys_call" we can restart */
@@ -599,169 +592,57 @@ ret_from_fork:
 .end ret_from_fork
 
 /*
- * kernel_thread(fn, arg, clone_flags)
+ * ... and new kernel threads - here
  */
 	.align 4
-	.globl	kernel_thread
-	.ent	kernel_thread
-kernel_thread:
-	/* We can be called from a module.  */
-	ldgp	$gp, 0($27)
-	.prologue 1
-	subq	$sp, SP_OFF+6*8, $sp
-	br	$1, 2f		/* load start address */
-
-	/* We've now "returned" from a fake system call.  */
-	unop
-	blt	$0, 1f		/* error?  */
-	ldi	$1, 0x3fff
-	beq	$20, 1f		/* parent or child?  */
-
-	bic	$sp, $1, $8	/* in child.  */
-	jsr	$26, ($27)
-	ldgp	$gp, 0($26)
-	mov	$0, $16
-	mov	$31, $26
-	jmp	$31, sys_exit
-
-1:	ret			/* in parent.  */
-
-	.align 4
-2:	/* Fake a system call stack frame, as we can't do system calls
-	   from kernel space.  Note that we store FN and ARG as they
-	   need to be set up in the child for the call.  Also store $8
-	   and $26 for use in the parent.  */
-	stq	$31, SP_OFF($sp)	/* ps */
-	stq	$1, SP_OFF+8($sp)	/* pc */
-	stq	$gp, SP_OFF+16($sp)	/* gp */
-	stq	$16, 136($sp)		/* $27; FN for child */
-	stq	$17, SP_OFF+24($sp)	/* $16; ARG for child */
-	stq	$8, 64($sp)		/* $8 */
-	stq	$26, 128($sp)		/* $26 */
-	/* Avoid the HAE being gratuitously wrong, to avoid restoring it.  */
-	ldq	$2, alpha_mv+HAE_CACHE
-	stq	$2, 152($sp)		/* HAE */
-
-	/* Shuffle FLAGS to the front; add CLONE_VM.  */
-	ldi	$1, CLONE_VM|CLONE_UNTRACED
-	or	$18, $1, $16
-	bsr	$26, sys_clone
-
-	/* We don't actually care for a3 success widgetry in the kernel.
-	   Not for positive errno values.  */
-	stq	$0, 0($sp)		/* $0 */
-	br	restore_all
-.end kernel_thread
-
-/*
- * kernel_execve(path, argv, envp)
- */
-	.align	4
-	.globl	kernel_execve
-	.ent	kernel_execve
-kernel_execve:
-	/* We can be called from a module.  */
-	ldgp	$gp, 0($27)
-	lda	$sp, -(32+SIZEOF_PT_REGS+8)($sp)
-	.frame	$sp, 32+SIZEOF_PT_REGS+8, $26, 0
-	stq	$26, 0($sp)
-	stq	$16, 8($sp)
-	stq	$17, 16($sp)
-	stq	$18, 24($sp)
-	.prologue 1
-
-	lda	$16, 32($sp)
-	lda	$17, 0
-	lda	$18, SIZEOF_PT_REGS
-	bsr	$26, memset		!samegp
-
-	/* Avoid the HAE being gratuitously wrong, which would cause us
-	   to do the whole turn off interrupts thing and restore it.  */
-	ldq	$2, alpha_mv+HAE_CACHE
-	stq	$2, 152+32($sp)
-
-	ldq	$16, 8($sp)
-	ldq	$17, 16($sp)
-	ldq	$18, 24($sp)
-	lda	$19, 32($sp)
-	bsr	$26, do_execve		!samegp
-
-	ldq	$26, 0($sp)
-	bne	$0, 1f			/* error! */
-
-	/* Move the temporary pt_regs struct from its current location
-	   to the top of the kernel stack frame.  See copy_thread for
-	   details for a normal process.  */
-	lda	$16, 0x4000 - SIZEOF_PT_REGS($8)
-	lda	$17, 32($sp)
-	lda	$18, SIZEOF_PT_REGS
-	bsr	$26, memmove		!samegp
-
-	/* Take that over as our new stack frame and visit userland!  */
-	lda	$sp, 0x4000 - SIZEOF_PT_REGS($8)
-	br	$31, ret_from_sys_call
-
-1:	lda	$sp, 32+SIZEOF_PT_REGS+8($sp)
-	ret
-.end kernel_execve
+	.globl	ret_from_kernel_thread
+	.ent	ret_from_kernel_thread
+ret_from_kernel_thread:
+	mov	$17, $16
+	jsr	$26, schedule_tail
+	mov	$9, $27
+	mov	$10, $16
+	jsr	$26, ($9)
+	mov	$31, $19		/* to disable syscall restarts */
+	br	$31, ret_to_user
+.end ret_from_kernel_thread
 
 
 /*
  * Special system calls.  Most of these are special in that they either
  * have to play switch_stack games or in some way use the pt_regs struct.
  */
-	.align	4
-	.globl	sys_fork
-	.ent	sys_fork
-sys_fork:
-	.prologue 0
-	mov	$sp, $21
-	bsr	$1, do_switch_stack
-	bis	$31, SIGCHLD, $16
-	mov	$31, $17
-	mov	$31, $18
-	mov	$31, $19
-	mov	$31, $20
-	jsr	$26, alpha_clone
-	bsr	$1, undo_switch_stack
-	ret
-.end sys_fork
 
+.macro	fork_like name
 	.align	4
-	.globl	sys_clone
-	.ent	sys_clone
-sys_clone:
+	.globl	alpha_\name
+	.ent	alpha_\name
+alpha_\name:
 	.prologue 0
-	mov	$sp, $21
 	bsr	$1, do_switch_stack
-	/* $16, $17, $18, $19, $20 come from the user.  */
-	jsr	$26, alpha_clone
-	bsr	$1, undo_switch_stack
+	jsr	$26, sys_\name
+	ldq	$26, 56($sp)
+	lda	$sp, SWITCH_STACK_SIZE($sp)
 	ret
-.end sys_clone
+.end	alpha_\name
+.endm
 
-	.align	4
-	.globl	sys_vfork
-	.ent	sys_vfork
-sys_vfork:
-	.prologue 0
-	mov	$sp, $16
-	bsr	$1, do_switch_stack
-	jsr	$26, alpha_vfork
-	bsr	$1, undo_switch_stack
-	ret
-.end sys_vfork
+fork_like fork
+fork_like vfork
+fork_like clone
 
 	.align	4
 	.globl	sys_sigreturn
 	.ent	sys_sigreturn
 sys_sigreturn:
 	.prologue 0
-	mov	$sp, $17
-	lda	$18, -SWITCH_STACK_SIZE($sp)
+	lda	$9, ret_from_straced
+	cmpult	$26, $9, $9
 	lda	$sp, -SWITCH_STACK_SIZE($sp)
 	jsr	$26, do_sigreturn
-	br	$1, undo_switch_stack
+	bne	$9, 1f
+	jsr	$26, syscall_trace_leave
+1:	br	$1, undo_switch_stack
 	br	ret_from_sys_call
 .end sys_sigreturn
 
@@ -770,178 +651,15 @@ sys_sigreturn:
 	.ent	sys_rt_sigreturn
 sys_rt_sigreturn:
 	.prologue 0
-	mov	$sp, $17
-	lda	$18, -SWITCH_STACK_SIZE($sp)
+	lda	$9, ret_from_straced
+	cmpult	$26, $9, $9
 	lda	$sp, -SWITCH_STACK_SIZE($sp)
 	jsr	$26, do_rt_sigreturn
-	br	$1, undo_switch_stack
+	bne	$9, 1f
+	jsr	$26, syscall_trace_leave
+1:	br	$1, undo_switch_stack
 	br	ret_from_sys_call
 .end sys_rt_sigreturn
-
-	.align	4
-	.globl	sys_sigsuspend
-	.ent	sys_sigsuspend
-sys_sigsuspend:
-	.prologue 0
-	mov	$sp, $17
-	br	$1, do_switch_stack
-	mov	$sp, $18
-	subq	$sp, 16, $sp
-	stq	$26, 0($sp)
-	jsr	$26, do_sigsuspend
-	ldq	$26, 0($sp)
-	lda	$sp, SWITCH_STACK_SIZE+16($sp)
-	ret
-.end sys_sigsuspend
-
-	.align	4
-	.globl	sys_rt_sigsuspend
-	.ent	sys_rt_sigsuspend
-sys_rt_sigsuspend:
-	.prologue 0
-	mov	$sp, $18
-	br	$1, do_switch_stack
-	mov	$sp, $19
-	subq	$sp, 16, $sp
-	stq	$26, 0($sp)
-	jsr	$26, do_rt_sigsuspend
-	ldq	$26, 0($sp)
-	lda	$sp, SWITCH_STACK_SIZE+16($sp)
-	ret
-.end sys_rt_sigsuspend
-
-	.align	4
-	.globl	sys_sethae
-	.ent	sys_sethae
-sys_sethae:
-	.prologue 0
-	stq	$16, 152($sp)
-	ret
-.end sys_sethae
-
-	.align	4
-	.globl	osf_getpriority
-	.ent	osf_getpriority
-osf_getpriority:
-	lda	$sp, -16($sp)
-	stq	$26, 0($sp)
-	.prologue 0
-
-	jsr	$26, sys_getpriority
-
-	ldq	$26, 0($sp)
-	blt	$0, 1f
-
-	/* Return value is the unbiased priority, i.e. 20 - prio.
-	   This does result in negative return values, so signal
-	   no error by writing into the R0 slot.  */
-	lda	$1, 20
-	stq	$31, 16($sp)
-	subl	$1, $0, $0
-	unop
-
-1:	lda	$sp, 16($sp)
-	ret
-.end osf_getpriority
-
-	.align	4
-	.globl	sys_getxuid
-	.ent	sys_getxuid
-sys_getxuid:
-	.prologue 0
-	ldq	$2, TI_TASK($8)
-	ldl	$0, TASK_UID($2)
-	ldl	$1, TASK_EUID($2)
-	stq	$1, 80($sp)
-	ret
-.end sys_getxuid
-
-	.align	4
-	.globl	sys_getxgid
-	.ent	sys_getxgid
-sys_getxgid:
-	.prologue 0
-	ldq	$2, TI_TASK($8)
-	ldl	$0, TASK_GID($2)
-	ldl	$1, TASK_EGID($2)
-	stq	$1, 80($sp)
-	ret
-.end sys_getxgid
-
-	.align	4
-	.globl	sys_getxpid
-	.ent	sys_getxpid
-sys_getxpid:
-	.prologue 0
-	ldq	$2, TI_TASK($8)
-
-	/* See linux/kernel/timer.c sys_getppid for discussion
-	   about this loop.  */
-	ldq	$3, TASK_GROUP_LEADER($2)
-	ldq	$4, TASK_REAL_PARENT($3)
-	ldl	$0, TASK_TGID($2)
-1:	ldl	$1, TASK_TGID($4)
-#ifdef CONFIG_SMP
-	mov	$4, $5
-	mb
-	ldq	$3, TASK_GROUP_LEADER($2)
-	ldq	$4, TASK_REAL_PARENT($3)
-	cmpeq	$4, $5, $5
-	beq	$5, 1b
-#endif
-	stq	$1, 80($sp)
-	ret
-.end sys_getxpid
-
-	.align	4
-	.globl	sys_pipe
-	.ent	sys_pipe
-sys_pipe:
-	lda	$sp, -16($sp)
-	stq	$26, 0($sp)
-	.prologue 0
-
-	lda	$16, 8($sp)
-	jsr	$26, do_pipe
-
-	ldq	$26, 0($sp)
-	bne	$0, 1f
-
-	/* The return values are in $0 and $20.  */
-	ldl	$1, 12($sp)
-	ldl	$0, 8($sp)
-
-	stq	$1, 80+16($sp)
-1:	lda	$sp, 16($sp)
-	ret
-.end sys_pipe
-
-	.align	4
-	.globl	sys_ptrace
-	.ent	sys_ptrace
-sys_ptrace:
-	.prologue 0
-	mov	$sp, $20
-	jmp	$31, do_sys_ptrace
-.end sys_ptrace
-
-	.align	4
-	.globl	sys_execve
-	.ent	sys_execve
-sys_execve:
-	.prologue 0
-	mov	$sp, $19
-	jmp	$31, do_sys_execve
-.end sys_execve
-
-	.align	4
-	.globl	osf_sigprocmask
-	.ent	osf_sigprocmask
-osf_sigprocmask:
-	.prologue 0
-	mov	$sp, $18
-	jmp	$31, do_osf_sigprocmask
-.end osf_sigprocmask
 
 	.align	4
 	.globl	alpha_ni_syscall

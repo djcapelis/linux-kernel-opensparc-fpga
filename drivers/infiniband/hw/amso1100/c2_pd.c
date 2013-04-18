@@ -34,6 +34,7 @@
  */
 
 #include <linux/init.h>
+#include <linux/slab.h>
 #include <linux/errno.h>
 
 #include "c2.h"
@@ -69,7 +70,7 @@ void c2_pd_free(struct c2_dev *c2dev, struct c2_pd *pd)
 	spin_unlock(&c2dev->pd_table.lock);
 }
 
-int __devinit c2_init_pd_table(struct c2_dev *c2dev)
+int c2_init_pd_table(struct c2_dev *c2dev)
 {
 
 	c2dev->pd_table.last = 0;
@@ -83,7 +84,7 @@ int __devinit c2_init_pd_table(struct c2_dev *c2dev)
 	return 0;
 }
 
-void __devexit c2_cleanup_pd_table(struct c2_dev *c2dev)
+void c2_cleanup_pd_table(struct c2_dev *c2dev)
 {
 	kfree(c2dev->pd_table.table);
 }

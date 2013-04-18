@@ -1,108 +1,20 @@
-/* $Id: parport.h,v 1.1 1998/05/17 10:57:52 andrea Exp andrea $ */
-
 /*
  * Any part of this program may be used in documents licensed under
  * the GNU Free Documentation License, Version 1.1 or any later version
  * published by the Free Software Foundation.
  */
-
 #ifndef _PARPORT_H_
 #define _PARPORT_H_
 
-/* Start off with user-visible constants */
-
-/* Maximum of 16 ports per machine */
-#define PARPORT_MAX  16
-
-/* Magic numbers */
-#define PARPORT_IRQ_NONE  -1
-#define PARPORT_DMA_NONE  -1
-#define PARPORT_IRQ_AUTO  -2
-#define PARPORT_DMA_AUTO  -2
-#define PARPORT_DMA_NOFIFO -3
-#define PARPORT_DISABLE   -2
-#define PARPORT_IRQ_PROBEONLY -3
-#define PARPORT_IOHI_AUTO -1
-
-#define PARPORT_CONTROL_STROBE    0x1
-#define PARPORT_CONTROL_AUTOFD    0x2
-#define PARPORT_CONTROL_INIT      0x4
-#define PARPORT_CONTROL_SELECT    0x8
-
-#define PARPORT_STATUS_ERROR      0x8
-#define PARPORT_STATUS_SELECT     0x10
-#define PARPORT_STATUS_PAPEROUT   0x20
-#define PARPORT_STATUS_ACK        0x40
-#define PARPORT_STATUS_BUSY       0x80
-
-/* Type classes for Plug-and-Play probe.  */
-typedef enum {
-	PARPORT_CLASS_LEGACY = 0,       /* Non-IEEE1284 device */
-	PARPORT_CLASS_PRINTER,
-	PARPORT_CLASS_MODEM,
-	PARPORT_CLASS_NET,
-	PARPORT_CLASS_HDC,              /* Hard disk controller */
-	PARPORT_CLASS_PCMCIA,
-	PARPORT_CLASS_MEDIA,            /* Multimedia device */
-	PARPORT_CLASS_FDC,              /* Floppy disk controller */
-	PARPORT_CLASS_PORTS,
-	PARPORT_CLASS_SCANNER,
-	PARPORT_CLASS_DIGCAM,
-	PARPORT_CLASS_OTHER,            /* Anything else */
-	PARPORT_CLASS_UNSPEC,           /* No CLS field in ID */
-	PARPORT_CLASS_SCSIADAPTER
-} parport_device_class;
-
-/* The "modes" entry in parport is a bit field representing the
-   capabilities of the hardware. */
-#define PARPORT_MODE_PCSPP	(1<<0) /* IBM PC registers available. */
-#define PARPORT_MODE_TRISTATE	(1<<1) /* Can tristate. */
-#define PARPORT_MODE_EPP	(1<<2) /* Hardware EPP. */
-#define PARPORT_MODE_ECP	(1<<3) /* Hardware ECP. */
-#define PARPORT_MODE_COMPAT	(1<<4) /* Hardware 'printer protocol'. */
-#define PARPORT_MODE_DMA	(1<<5) /* Hardware can DMA. */
-#define PARPORT_MODE_SAFEININT	(1<<6) /* SPP registers accessible in IRQ. */
-
-/* IEEE1284 modes: 
-   Nibble mode, byte mode, ECP, ECPRLE and EPP are their own
-   'extensibility request' values.  Others are special.
-   'Real' ECP modes must have the IEEE1284_MODE_ECP bit set.  */
-#define IEEE1284_MODE_NIBBLE             0
-#define IEEE1284_MODE_BYTE              (1<<0)
-#define IEEE1284_MODE_COMPAT            (1<<8)
-#define IEEE1284_MODE_BECP              (1<<9) /* Bounded ECP mode */
-#define IEEE1284_MODE_ECP               (1<<4)
-#define IEEE1284_MODE_ECPRLE            (IEEE1284_MODE_ECP | (1<<5))
-#define IEEE1284_MODE_ECPSWE            (1<<10) /* Software-emulated */
-#define IEEE1284_MODE_EPP               (1<<6)
-#define IEEE1284_MODE_EPPSL             (1<<11) /* EPP 1.7 */
-#define IEEE1284_MODE_EPPSWE            (1<<12) /* Software-emulated */
-#define IEEE1284_DEVICEID               (1<<2)  /* This is a flag */
-#define IEEE1284_EXT_LINK               (1<<14) /* This flag causes the
-						 * extensibility link to
-						 * be requested, using
-						 * bits 0-6. */
-
-/* For the benefit of parport_read/write, you can use these with
- * parport_negotiate to use address operations.  They have no effect
- * other than to make parport_read/write use address transfers. */
-#define IEEE1284_ADDR			(1<<13)	/* This is a flag */
-#define IEEE1284_DATA			 0	/* So is this */
-
-/* Flags for block transfer operations. */
-#define PARPORT_EPP_FAST		(1<<0) /* Unreliable counts. */
-#define PARPORT_W91284PIC		(1<<1) /* have a Warp9 w91284pic in the device */
-
-/* The rest is for the kernel only */
-#ifdef __KERNEL__
 
 #include <linux/jiffies.h>
 #include <linux/proc_fs.h>
 #include <linux/spinlock.h>
 #include <linux/wait.h>
-#include <asm/system.h>
+#include <linux/irqreturn.h>
+#include <linux/semaphore.h>
 #include <asm/ptrace.h>
-#include <asm/semaphore.h>
+#include <uapi/linux/parport.h>
 
 /* Define this later. */
 struct parport;
@@ -229,7 +141,7 @@ struct pardevice {
 	int (*preempt)(void *);
 	void (*wakeup)(void *);
 	void *private;
-	void (*irq_func)(int, void *);
+	void (*irq_func)(void *);
 	unsigned int flags;
 	struct pardevice *next;
 	struct pardevice *prev;
@@ -325,6 +237,10 @@ struct parport {
 	int spintime;
 	atomic_t ref_count;
 
+	unsigned long devflags;
+#define PARPORT_DEVPROC_REGISTERED	0
+	struct pardevice *proc_device;	/* Currently register proc device */
+
 	struct list_head full_list;
 	struct parport *slaves[3];
 };
@@ -366,6 +282,9 @@ extern void parport_unregister_driver (struct parport_driver *);
 extern struct parport *parport_find_number (int);
 extern struct parport *parport_find_base (unsigned long);
 
+/* generic irq handler, if it suits your needs */
+extern irqreturn_t parport_irq_handler(int irq, void *dev_id);
+
 /* Reference counting for ports. */
 extern struct parport *parport_get_port (struct parport *);
 extern void parport_put_port (struct parport *);
@@ -379,7 +298,7 @@ extern void parport_put_port (struct parport *);
 struct pardevice *parport_register_device(struct parport *port, 
 			  const char *name,
 			  int (*pf)(void *), void (*kf)(void *),
-			  void (*irq_func)(int, void *), 
+			  void (*irq_func)(void *), 
 			  int flags, void *handle);
 
 /* parport_unregister unlinks a device from the chain. */
@@ -461,7 +380,7 @@ static __inline__ int parport_yield_blocking(struct pardevice *dev)
 #define PARPORT_FLAG_EXCL		(1<<1)	/* EXCL driver registered. */
 
 /* IEEE1284 functions */
-extern void parport_ieee1284_interrupt (int, void *);
+extern void parport_ieee1284_interrupt (void *);
 extern int parport_negotiate (struct parport *, int mode);
 extern ssize_t parport_write (struct parport *, const void *buf, size_t len);
 extern ssize_t parport_read (struct parport *, void *buf, size_t len);
@@ -503,24 +422,19 @@ extern size_t parport_ieee1284_epp_read_addr (struct parport *,
 /* IEEE1284.3 functions */
 extern int parport_daisy_init (struct parport *port);
 extern void parport_daisy_fini (struct parport *port);
-extern struct pardevice *parport_open (int devnum, const char *name,
-				       int (*pf) (void *),
-				       void (*kf) (void *),
-				       void (*irqf) (int, void *),
-				       int flags, void *handle);
+extern struct pardevice *parport_open (int devnum, const char *name);
 extern void parport_close (struct pardevice *dev);
 extern ssize_t parport_device_id (int devnum, char *buffer, size_t len);
-extern int parport_device_num (int parport, int mux, int daisy);
 extern void parport_daisy_deselect_all (struct parport *port);
 extern int parport_daisy_select (struct parport *port, int daisy, int mode);
 
 /* Lowlevel drivers _can_ call this support function to handle irqs.  */
-static __inline__ void parport_generic_irq(int irq, struct parport *port)
+static inline void parport_generic_irq(struct parport *port)
 {
-	parport_ieee1284_interrupt (irq, port);
+	parport_ieee1284_interrupt (port);
 	read_lock(&port->cad_lock);
 	if (port->cad && port->cad->irq_func)
-		port->cad->irq_func(irq, port->cad->private);
+		port->cad->irq_func(port->cad->private);
 	read_unlock(&port->cad_lock);
 }
 
@@ -561,5 +475,7 @@ extern int parport_device_proc_unregister(struct pardevice *device);
 
 #endif /*  !CONFIG_PARPORT_NOT_PC  */
 
-#endif /* __KERNEL__ */
+extern unsigned long parport_default_timeslice;
+extern int parport_default_spintime;
+
 #endif /* _PARPORT_H_ */

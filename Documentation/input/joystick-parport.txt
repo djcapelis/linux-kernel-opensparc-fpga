@@ -2,7 +2,6 @@
 	       (c) 1998-2000 Vojtech Pavlik <vojtech@ucw.cz>
 	       (c) 1998 Andree Borrmann <a.borrmann@tu-bs.de>
 			     Sponsored by SuSE
-	$Id: joystick-parport.txt,v 1.6 2001/09/25 09:31:32 vojtech Exp $
 ----------------------------------------------------------------------------
 
 0. Disclaimer
@@ -273,7 +272,7 @@ if you want to use gamecon.c.
 
   Also, the connection is a bit more complex. You'll need a bunch of diodes,
 and one pullup resistor. First, you connect the Directions and the button
-the same as for db9, however with the diodes inbetween.
+the same as for db9, however with the diodes between.
 
 	    Diodes
 (pin 2) -----|<|----> Up

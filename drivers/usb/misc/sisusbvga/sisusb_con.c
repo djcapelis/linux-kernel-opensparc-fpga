@@ -52,12 +52,12 @@
 #include <linux/kernel.h>
 #include <linux/signal.h>
 #include <linux/fs.h>
+#include <linux/usb.h>
 #include <linux/tty.h>
 #include <linux/console.h>
 #include <linux/string.h>
 #include <linux/kd.h>
 #include <linux/init.h>
-#include <linux/slab.h>
 #include <linux/vt_kern.h>
 #include <linux/selection.h>
 #include <linux/spinlock.h>
@@ -214,18 +214,13 @@ sisusbcon_init(struct vc_data *c, int init)
 	 * are set up/restored.
 	 */
 
-	mutex_lock(&disconnect_mutex);
-
-	if (!(sisusb = sisusb_get_sisusb(c->vc_num))) {
-		mutex_unlock(&disconnect_mutex);
+	if (!(sisusb = sisusb_get_sisusb(c->vc_num)))
 		return;
-	}
 
 	mutex_lock(&sisusb->lock);
 
 	if (!sisusb_sisusb_valid(sisusb)) {
 		mutex_unlock(&sisusb->lock);
-		mutex_unlock(&disconnect_mutex);
 		return;
 	}
 
@@ -264,8 +259,6 @@ sisusbcon_init(struct vc_data *c, int init)
 
 	mutex_unlock(&sisusb->lock);
 
-	mutex_unlock(&disconnect_mutex);
-
 	if (init) {
 		c->vc_cols = cols;
 		c->vc_rows = rows;
@@ -284,12 +277,8 @@ sisusbcon_deinit(struct vc_data *c)
 	 * and others, ie not under our control.
 	 */
 
-	mutex_lock(&disconnect_mutex);
-
-	if (!(sisusb = sisusb_get_sisusb(c->vc_num))) {
-		mutex_unlock(&disconnect_mutex);
+	if (!(sisusb = sisusb_get_sisusb(c->vc_num)))
 		return;
-	}
 
 	mutex_lock(&sisusb->lock);
 
@@ -314,8 +303,6 @@ sisusbcon_deinit(struct vc_data *c)
 
 	/* decrement the usage count on our sisusb */
 	kref_put(&sisusb->kref, sisusb_delete);
-
-	mutex_unlock(&disconnect_mutex);
 }
 
 /* interface routine */
@@ -386,14 +373,6 @@ sisusbcon_putc(struct vc_data *c, int ch, int y, int x)
 		return;
 
 	/* sisusb->lock is down */
-
-	/* Don't need to put the character into buffer ourselves,
-	 * because the vt does this BEFORE calling us.
-	 */
-#if 0
-	sisusbcon_writew(ch, SISUSB_VADDR(x, y));
-#endif
-
 	if (sisusb_is_inactive(c, sisusb)) {
 		mutex_unlock(&sisusb->lock);
 		return;
@@ -503,10 +482,6 @@ sisusbcon_bmove(struct vc_data *c, int sy, int sx,
 	struct sisusb_usb_data *sisusb;
 	ssize_t written;
 	int cols, length;
-#if 0
-	u16 *src, *dest;
-	int i;
-#endif
 
 	if (width <= 0 || height <= 0)
 		return;
@@ -517,41 +492,6 @@ sisusbcon_bmove(struct vc_data *c, int sy, int sx,
 	/* sisusb->lock is down */
 
 	cols = sisusb->sisusb_num_columns;
-
-	/* Don't need to move data outselves, because
-	 * vt does this BEFORE calling us.
-	 * This is only used by vt's insert/deletechar.
-	 */
-#if 0
-	if (sx == 0 && dx == 0 && width >= c->vc_cols && width <= cols) {
-
-		sisusbcon_memmovew(SISUSB_VADDR(0, dy), SISUSB_VADDR(0, sy),
-					height * width * 2);
-
-	} else if (dy < sy || (dy == sy && dx < sx)) {
-
-		src  = SISUSB_VADDR(sx, sy);
-		dest = SISUSB_VADDR(dx, dy);
-
-		for (i = height; i > 0; i--) {
-			sisusbcon_memmovew(dest, src, width * 2);
-			src  += cols;
-			dest += cols;
-		}
-
-	} else {
-
-		src  = SISUSB_VADDR(sx, sy + height - 1);
-		dest = SISUSB_VADDR(dx, dy + height - 1);
-
-		for (i = height; i > 0; i--) {
-			sisusbcon_memmovew(dest, src, width * 2);
-			src  -= cols;
-			dest -= cols;
-		}
-
-	}
-#endif
 
 	if (sisusb_is_inactive(c, sisusb)) {
 		mutex_unlock(&sisusb->lock);
@@ -597,7 +537,7 @@ sisusbcon_switch(struct vc_data *c)
 	 */
 	if (c->vc_origin == (unsigned long)c->vc_screenbuf) {
 		mutex_unlock(&sisusb->lock);
-		printk(KERN_DEBUG "sisusb: ASSERT ORIGIN != SCREENBUF!\n");
+		dev_dbg(&sisusb->sisusb_dev->dev, "ASSERT ORIGIN != SCREENBUF!\n");
 		return 0;
 	}
 
@@ -1101,7 +1041,8 @@ sisusbcon_set_origin(struct vc_data *c)
 
 /* Interface routine */
 static int
-sisusbcon_resize(struct vc_data *c, unsigned int newcols, unsigned int newrows)
+sisusbcon_resize(struct vc_data *c, unsigned int newcols, unsigned int newrows,
+		 unsigned int user)
 {
 	struct sisusb_usb_data *sisusb;
 	int fh;
@@ -1246,9 +1187,9 @@ sisusbcon_do_font_op(struct sisusb_usb_data *sisusb, int set, int slot,
 		 * And so is the hi_font_mask.
 		 */
 		for (i = 0; i < MAX_NR_CONSOLES; i++) {
-			struct vc_data *c = vc_cons[i].d;
-			if (c && c->vc_sw == &sisusb_con)
-				c->vc_hi_font_mask = ch512 ? 0x0800 : 0;
+			struct vc_data *d = vc_cons[i].d;
+			if (d && d->vc_sw == &sisusb_con)
+				d->vc_hi_font_mask = ch512 ? 0x0800 : 0;
 		}
 
 		sisusb->current_font_512 = ch512;
@@ -1308,7 +1249,7 @@ sisusbcon_do_font_op(struct sisusb_usb_data *sisusb, int set, int slot,
 		mutex_unlock(&sisusb->lock);
 
 	if (dorecalc && c) {
-		int i, rows = c->vc_scan_lines / fh;
+		int rows = c->vc_scan_lines / fh;
 
 		/* Now adjust our consoles' size */
 
@@ -1488,16 +1429,13 @@ static const struct consw sisusb_dummy_con = {
 int
 sisusb_console_init(struct sisusb_usb_data *sisusb, int first, int last)
 {
-	int i, ret, minor = sisusb->minor;
-
-	mutex_lock(&disconnect_mutex);
+	int i, ret;
 
 	mutex_lock(&sisusb->lock);
 
 	/* Erm.. that should not happen */
 	if (sisusb->haveconsole || !sisusb->SiS_Pr) {
 		mutex_unlock(&sisusb->lock);
-		mutex_unlock(&disconnect_mutex);
 		return 1;
 	}
 
@@ -1508,14 +1446,12 @@ sisusb_console_init(struct sisusb_usb_data *sisusb, int first, int last)
 	    first > MAX_NR_CONSOLES ||
 	    last > MAX_NR_CONSOLES) {
 		mutex_unlock(&sisusb->lock);
-		mutex_unlock(&disconnect_mutex);
 		return 1;
 	}
 
 	/* If gfxcore not initialized or no consoles given, quit graciously */
 	if (!sisusb->gfxinit || first < 1 || last < 1) {
 		mutex_unlock(&sisusb->lock);
-		mutex_unlock(&disconnect_mutex);
 		return 0;
 	}
 
@@ -1526,10 +1462,7 @@ sisusb_console_init(struct sisusb_usb_data *sisusb, int first, int last)
 	/* Set up text mode (and upload  default font) */
 	if (sisusb_reset_text_mode(sisusb, 1)) {
 		mutex_unlock(&sisusb->lock);
-		mutex_unlock(&disconnect_mutex);
-		printk(KERN_ERR
-			"sisusbvga[%d]: Failed to set up text mode\n",
-			minor);
+		dev_err(&sisusb->sisusb_dev->dev, "Failed to set up text mode\n");
 		return 1;
 	}
 
@@ -1550,15 +1483,11 @@ sisusb_console_init(struct sisusb_usb_data *sisusb, int first, int last)
 	/* Allocate screen buffer */
 	if (!(sisusb->scrbuf = (unsigned long)vmalloc(sisusb->scrbuf_size))) {
 		mutex_unlock(&sisusb->lock);
-		mutex_unlock(&disconnect_mutex);
-		printk(KERN_ERR
-			"sisusbvga[%d]: Failed to allocate screen buffer\n",
-			minor);
+		dev_err(&sisusb->sisusb_dev->dev, "Failed to allocate screen buffer\n");
 		return 1;
 	}
 
 	mutex_unlock(&sisusb->lock);
-	mutex_unlock(&disconnect_mutex);
 
 	/* Now grab the desired console(s) */
 	ret = take_over_console(&sisusb_con, first - 1, last - 1, 0);

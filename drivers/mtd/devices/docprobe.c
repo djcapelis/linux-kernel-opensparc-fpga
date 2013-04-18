@@ -4,9 +4,6 @@
 /* (C) 1999 Machine Vision Holdings, Inc.			*/
 /* (C) 1999-2003 David Woodhouse <dwmw2@infradead.org>		*/
 
-/* $Id: docprobe.c,v 1.46 2005/11/07 11:14:25 gleixner Exp $	*/
-
-
 
 /* DOC_PASSIVE_PROBE:
    In order to ensure that the BIOS checksum is correct at boot time, and
@@ -52,12 +49,6 @@
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/nand.h>
 #include <linux/mtd/doc2000.h>
-#include <linux/mtd/compatmac.h>
-
-/* Where to look for the devices? */
-#ifndef CONFIG_MTD_DOCPROBE_ADDRESS
-#define CONFIG_MTD_DOCPROBE_ADDRESS 0
-#endif
 
 
 static unsigned long doc_config_location = CONFIG_MTD_DOCPROBE_ADDRESS;
@@ -79,15 +70,6 @@ static unsigned long __initdata doc_locations[] = {
 	0xe0000, 0xe2000, 0xe4000, 0xe6000,
 	0xe8000, 0xea000, 0xec000, 0xee000,
 #endif /*  CONFIG_MTD_DOCPROBE_HIGH */
-#elif defined(__PPC__)
-	0xe4000000,
-#elif defined(CONFIG_MOMENCO_OCELOT)
-	0x2f000000,
-        0xff000000,
-#elif defined(CONFIG_MOMENCO_OCELOT_G) || defined (CONFIG_MOMENCO_OCELOT_C)
-        0xff000000,
-##else
-#warning Unknown architecture for DiskOnChip. No default probe locations defined
 #endif
 	0xffffffff };
 
@@ -257,8 +239,7 @@ static void __init DoC_Probe(unsigned long physadr)
 			return;
 		}
 		docfound = 1;
-		mtd = kmalloc(sizeof(struct DiskOnChip) + sizeof(struct mtd_info), GFP_KERNEL);
-
+		mtd = kzalloc(sizeof(struct DiskOnChip) + sizeof(struct mtd_info), GFP_KERNEL);
 		if (!mtd) {
 			printk(KERN_WARNING "Cannot allocate memory for data structures. Dropping.\n");
 			iounmap(docptr);
@@ -266,10 +247,6 @@ static void __init DoC_Probe(unsigned long physadr)
 		}
 
 		this = (struct DiskOnChip *)(&mtd[1]);
-
-		memset((char *)mtd,0, sizeof(struct mtd_info));
-		memset((char *)this, 0, sizeof(struct DiskOnChip));
-
 		mtd->priv = this;
 		this->virtadr = docptr;
 		this->physadr = physadr;

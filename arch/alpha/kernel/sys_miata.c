@@ -17,7 +17,6 @@
 #include <linux/reboot.h>
 
 #include <asm/ptrace.h>
-#include <asm/system.h>
 #include <asm/dma.h>
 #include <asm/irq.h>
 #include <asm/mmu_context.h>
@@ -151,7 +150,7 @@ miata_init_irq(void)
  */
 
 static int __init
-miata_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
+miata_map_irq(const struct pci_dev *dev, u8 slot, u8 pin)
 {
         static char irq_tab[18][5] __initdata = {
 		/*INT    INTA   INTB   INTC   INTD */
@@ -219,7 +218,7 @@ miata_swizzle(struct pci_dev *dev, u8 *pinp)
 				slot = PCI_SLOT(dev->devfn) + 9;
 				break;
 			}
-			pin = bridge_swizzle(pin, PCI_SLOT(dev->devfn));
+			pin = pci_swizzle_interrupt_pin(dev, pin);
 
 			/* Move up the chain of bridges.  */
 			dev = dev->bus->self;

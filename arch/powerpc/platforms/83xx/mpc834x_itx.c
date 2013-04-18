@@ -23,25 +23,32 @@
 #include <linux/delay.h>
 #include <linux/seq_file.h>
 #include <linux/root_dev.h>
+#include <linux/of_platform.h>
 
-#include <asm/system.h>
-#include <asm/atomic.h>
+#include <linux/atomic.h>
 #include <asm/time.h>
 #include <asm/io.h>
 #include <asm/machdep.h>
 #include <asm/ipic.h>
-#include <asm/bootinfo.h>
 #include <asm/irq.h>
 #include <asm/prom.h>
 #include <asm/udbg.h>
 #include <sysdev/fsl_soc.h>
+#include <sysdev/fsl_pci.h>
 
 #include "mpc83xx.h"
 
-#ifndef CONFIG_PCI
-unsigned long isa_io_base = 0;
-unsigned long isa_mem_base = 0;
-#endif
+static struct of_device_id __initdata mpc834x_itx_ids[] = {
+	{ .compatible = "fsl,pq2pro-localbus", },
+	{},
+};
+
+static int __init mpc834x_itx_declare_of_platform_devices(void)
+{
+	mpc83xx_declare_of_platform_devices();
+	return of_platform_bus_probe(NULL, mpc834x_itx_ids, NULL);
+}
+machine_device_initcall(mpc834x_itx, mpc834x_itx_declare_of_platform_devices);
 
 /* ************************************************************************
  *
@@ -50,35 +57,12 @@ unsigned long isa_mem_base = 0;
  */
 static void __init mpc834x_itx_setup_arch(void)
 {
-#ifdef CONFIG_PCI
-	struct device_node *np;
-#endif
-
 	if (ppc_md.progress)
 		ppc_md.progress("mpc834x_itx_setup_arch()", 0);
 
-#ifdef CONFIG_PCI
-	for (np = NULL; (np = of_find_node_by_type(np, "pci")) != NULL;)
-		add_bridge(np);
+	mpc83xx_setup_pci();
 
-	ppc_md.pci_exclude_device = mpc83xx_exclude_device;
-#endif
-}
-
-static void __init mpc834x_itx_init_IRQ(void)
-{
-	struct device_node *np;
-
-	np = of_find_node_by_type(NULL, "ipic");
-	if (!np)
-		return;
-
-	ipic_init(np, 0);
-
-	/* Initialize the default interrupt mapping priorities,
-	 * in case the boot rom changed something on us.
-	 */
-	ipic_set_default_priority();
+	mpc834x_usb_cfg();
 }
 
 /*
@@ -95,7 +79,7 @@ define_machine(mpc834x_itx) {
 	.name			= "MPC834x ITX",
 	.probe			= mpc834x_itx_probe,
 	.setup_arch		= mpc834x_itx_setup_arch,
-	.init_IRQ		= mpc834x_itx_init_IRQ,
+	.init_IRQ		= mpc83xx_ipic_init_IRQ,
 	.get_irq		= ipic_get_irq,
 	.restart		= mpc83xx_restart,
 	.time_init		= mpc83xx_time_init,

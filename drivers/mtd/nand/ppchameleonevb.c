@@ -6,8 +6,6 @@
  *  Derived from drivers/mtd/nand/edb7312.c
  *
  *
- * $Id: ppchameleonevb.c,v 1.7 2005/11/07 11:14:31 gleixner Exp $
- *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
@@ -75,7 +73,6 @@ __setup("ppchameleon_fio_pbase=", ppchameleon_fio_pbase);
 __setup("ppchameleonevb_fio_pbase=", ppchameleonevb_fio_pbase);
 #endif
 
-#ifdef CONFIG_MTD_PARTITIONS
 /*
  * Define static partitions for flash devices
  */
@@ -101,9 +98,6 @@ static struct mtd_partition partition_info_evb[] = {
 };
 
 #define NUM_PARTITIONS 1
-
-extern int parse_cmdline_partitions(struct mtd_info *master, struct mtd_partition **pparts, const char *mtd_id);
-#endif
 
 /*
  *	hardware specific access to control-lines
@@ -191,20 +185,12 @@ static int ppchameleonevb_device_ready(struct mtd_info *minfo)
 }
 #endif
 
-#ifdef CONFIG_MTD_PARTITIONS
-const char *part_probes[] = { "cmdlinepart", NULL };
-const char *part_probes_evb[] = { "cmdlinepart", NULL };
-#endif
-
 /*
  * Main initialization routine
  */
 static int __init ppchameleonevb_init(void)
 {
 	struct nand_chip *this;
-	const char *part_type = 0;
-	int mtd_parts_nb = 0;
-	struct mtd_partition *mtd_parts = 0;
 	void __iomem *ppchameleon_fio_base;
 	void __iomem *ppchameleonevb_fio_base;
 
@@ -286,26 +272,13 @@ static int __init ppchameleonevb_init(void)
 		this->chip_delay = NAND_SMALL_DELAY_US;
 #endif
 
-#ifdef CONFIG_MTD_PARTITIONS
 	ppchameleon_mtd->name = "ppchameleon-nand";
-	mtd_parts_nb = parse_mtd_partitions(ppchameleon_mtd, part_probes, &mtd_parts, 0);
-	if (mtd_parts_nb > 0)
-		part_type = "command line";
-	else
-		mtd_parts_nb = 0;
-#endif
-	if (mtd_parts_nb == 0) {
-		if (ppchameleon_mtd->size == NAND_SMALL_SIZE)
-			mtd_parts = partition_info_me;
-		else
-			mtd_parts = partition_info_hi;
-		mtd_parts_nb = NUM_PARTITIONS;
-		part_type = "static";
-	}
 
 	/* Register the partitions */
-	printk(KERN_NOTICE "Using %s partition definition\n", part_type);
-	add_mtd_partitions(ppchameleon_mtd, mtd_parts, mtd_parts_nb);
+	mtd_device_parse_register(ppchameleon_mtd, NULL, NULL,
+				  ppchameleon_mtd->size == NAND_SMALL_SIZE ?
+					partition_info_me : partition_info_hi,
+				  NUM_PARTITIONS);
 
  nand_evb_init:
 	/****************************
@@ -387,23 +360,14 @@ static int __init ppchameleonevb_init(void)
 			iounmap(ppchameleon_fio_base);
 		return -ENXIO;
 	}
-#ifdef CONFIG_MTD_PARTITIONS
+
 	ppchameleonevb_mtd->name = NAND_EVB_MTD_NAME;
-	mtd_parts_nb = parse_mtd_partitions(ppchameleonevb_mtd, part_probes_evb, &mtd_parts, 0);
-	if (mtd_parts_nb > 0)
-		part_type = "command line";
-	else
-		mtd_parts_nb = 0;
-#endif
-	if (mtd_parts_nb == 0) {
-		mtd_parts = partition_info_evb;
-		mtd_parts_nb = NUM_PARTITIONS;
-		part_type = "static";
-	}
 
 	/* Register the partitions */
-	printk(KERN_NOTICE "Using %s partition definition\n", part_type);
-	add_mtd_partitions(ppchameleonevb_mtd, mtd_parts, mtd_parts_nb);
+	mtd_device_parse_register(ppchameleonevb_mtd, NULL, NULL,
+				  ppchameleon_mtd->size == NAND_SMALL_SIZE ?
+				  partition_info_me : partition_info_hi,
+				  NUM_PARTITIONS);
 
 	/* Return happy */
 	return 0;

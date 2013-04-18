@@ -5,14 +5,15 @@
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1996, 97, 98, 99, 2000, 01, 03, 04, 05 by Ralf Baechle
+ * Copyright (C) 1996, 97, 98, 99, 2000, 01, 03, 04, 05, 12 by Ralf Baechle
  * Copyright (C) 1999, 2000, 01 Silicon Graphics, Inc.
  */
 #include <linux/interrupt.h>
-#include <linux/module.h>
+#include <linux/export.h>
 #include <asm/checksum.h>
-#include <asm/pgtable.h>
+#include <linux/mm.h>
 #include <asm/uaccess.h>
+#include <asm/ftrace.h>
 
 extern void *__bzero(void *__s, size_t __count);
 extern long __strncpy_from_user_nocheck_asm(char *__to,
@@ -31,7 +32,11 @@ EXPORT_SYMBOL(memset);
 EXPORT_SYMBOL(memcpy);
 EXPORT_SYMBOL(memmove);
 
-EXPORT_SYMBOL(kernel_thread);
+/*
+ * Functions that operate on entire pages.  Mostly used by memory management.
+ */
+EXPORT_SYMBOL(clear_page);
+EXPORT_SYMBOL(copy_page);
 
 /*
  * Userspace access stuff.
@@ -51,3 +56,7 @@ EXPORT_SYMBOL(csum_partial_copy_nocheck);
 EXPORT_SYMBOL(__csum_partial_copy_user);
 
 EXPORT_SYMBOL(invalid_pte_table);
+#ifdef CONFIG_FUNCTION_TRACER
+/* _mcount is defined in arch/mips/kernel/mcount.S */
+EXPORT_SYMBOL(_mcount);
+#endif

@@ -18,7 +18,6 @@
 #include <linux/interrupt.h>
 #include <asm/irq.h>
 #include <linux/in6.h>
-#include <linux/ide.h>
 
 #include <asm/uaccess.h>
 #include <asm/checksum.h>
@@ -26,7 +25,6 @@
 #include <asm/io.h>
 #include <asm/page.h>
 #include <asm/pgalloc.h>
-#include <asm/semaphore.h>
 #ifdef CONFIG_BLK_DEV_FD
 #include <asm/floppy.h>
 #endif
@@ -41,8 +39,11 @@
 EXPORT_SYMBOL(memset);
 EXPORT_SYMBOL(memcpy);
 EXPORT_SYMBOL(memmove);
+EXPORT_SYMBOL(__strncpy_user);
+EXPORT_SYMBOL(clear_page);
+EXPORT_SYMBOL(copy_page);
 
-EXPORT_SYMBOL(kernel_thread);
+EXPORT_SYMBOL(empty_zero_page);
 
 /*
  * gcc internal math functions
@@ -58,6 +59,7 @@ extern unsigned int __udivsi3(unsigned int, unsigned int);
 extern unsigned int __umodsi3(unsigned int, unsigned int);
 extern unsigned long long __umoddi3(unsigned long long, unsigned long long);
 extern unsigned long long __udivdi3(unsigned long long, unsigned long long);
+extern int __ucmpdi2(int, int);
 
 EXPORT_SYMBOL(__ashldi3);
 EXPORT_SYMBOL(__ashrdi3);
@@ -70,19 +72,31 @@ EXPORT_SYMBOL(__udivsi3);
 EXPORT_SYMBOL(__umodsi3);
 EXPORT_SYMBOL(__udivdi3);
 EXPORT_SYMBOL(__umoddi3);
+EXPORT_SYMBOL(__ucmpdi2);
 
-/*
- * Semaphore operations
- */
-EXPORT_SYMBOL(__down);
-EXPORT_SYMBOL(__down_interruptible);
-EXPORT_SYMBOL(__down_trylock);
-EXPORT_SYMBOL(__up);
+void __xtensa_libgcc_window_spill(void)
+{
+	BUG();
+}
+EXPORT_SYMBOL(__xtensa_libgcc_window_spill);
+
+unsigned long __sync_fetch_and_and_4(unsigned long *p, unsigned long v)
+{
+	BUG();
+}
+EXPORT_SYMBOL(__sync_fetch_and_and_4);
+
+unsigned long __sync_fetch_and_or_4(unsigned long *p, unsigned long v)
+{
+	BUG();
+}
+EXPORT_SYMBOL(__sync_fetch_and_or_4);
 
 #ifdef CONFIG_NET
 /*
  * Networking support
  */
+EXPORT_SYMBOL(csum_partial);
 EXPORT_SYMBOL(csum_partial_copy_generic);
 #endif /* CONFIG_NET */
 

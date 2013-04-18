@@ -11,19 +11,66 @@
 # for more details.
 #
 # Copyright (C) 1994 by Hamish Macdonald
+# Copyright (C) 2002,2011 Greg Ungerer <gerg@snapgear.com>
 #
 
-# test for cross compiling
-COMPILE_ARCH = $(shell uname -m)
+KBUILD_DEFCONFIG := multi_defconfig
 
-# override top level makefile
-AS += -m68020
-LDFLAGS := -m m68kelf
-LDFLAGS_MODULE += -T $(srctree)/arch/m68k/kernel/module.lds
-ifneq ($(COMPILE_ARCH),$(ARCH))
-	# prefix for cross-compiling binaries
-	CROSS_COMPILE = m68k-linux-gnu-
+ifneq ($(SUBARCH),$(ARCH))
+	ifeq ($(CROSS_COMPILE),)
+		CROSS_COMPILE := $(call cc-cross-prefix, \
+			m68k-linux-gnu- m68k-linux- m68k-unknown-linux-gnu-)
+	endif
 endif
+
+#
+#	Enable processor type. Ordering of these is important - we want to
+#	use the minimum processor type of the range we support. The logic
+#	for 680x0 will only allow use of the -m68060 or -m68040 if no other
+#	680x0 type is specified - and no option is specified for 68030 or
+#	68020. The other m68k/ColdFire types always specify some type of
+#	compiler cpu type flag.
+#
+ifndef CONFIG_M68040
+cpuflags-$(CONFIG_M68060)	:= -m68060
+endif
+ifndef CONFIG_M68060
+cpuflags-$(CONFIG_M68040)	:= -m68040
+endif
+cpuflags-$(CONFIG_M68030)	:=
+cpuflags-$(CONFIG_M68020)	:=
+cpuflags-$(CONFIG_M68360)	:= -m68332
+cpuflags-$(CONFIG_M68000)	:= -m68000
+cpuflags-$(CONFIG_M5441x)	:= $(call cc-option,-mcpu=54455,-mcfv4e)
+cpuflags-$(CONFIG_M54xx)	:= $(call cc-option,-mcpu=5475,-m5200)
+cpuflags-$(CONFIG_M5407)	:= $(call cc-option,-mcpu=5407,-m5200)
+cpuflags-$(CONFIG_M532x)	:= $(call cc-option,-mcpu=532x,-m5307)
+cpuflags-$(CONFIG_M5307)	:= $(call cc-option,-mcpu=5307,-m5200)
+cpuflags-$(CONFIG_M528x)	:= $(call cc-option,-mcpu=528x,-m5307)
+cpuflags-$(CONFIG_M5275)	:= $(call cc-option,-mcpu=5275,-m5307)
+cpuflags-$(CONFIG_M5272)	:= $(call cc-option,-mcpu=5272,-m5307)
+cpuflags-$(CONFIG_M5271)	:= $(call cc-option,-mcpu=5271,-m5307)
+cpuflags-$(CONFIG_M523x)	:= $(call cc-option,-mcpu=523x,-m5307)
+cpuflags-$(CONFIG_M525x)	:= $(call cc-option,-mcpu=5253,-m5200)
+cpuflags-$(CONFIG_M5249)	:= $(call cc-option,-mcpu=5249,-m5200)
+cpuflags-$(CONFIG_M520x)	:= $(call cc-option,-mcpu=5208,-m5200)
+cpuflags-$(CONFIG_M5206e)	:= $(call cc-option,-mcpu=5206e,-m5200)
+cpuflags-$(CONFIG_M5206)	:= $(call cc-option,-mcpu=5206,-m5200)
+
+KBUILD_AFLAGS += $(cpuflags-y)
+KBUILD_CFLAGS += $(cpuflags-y) -pipe
+ifdef CONFIG_MMU
+# without -fno-strength-reduce the 53c7xx.c driver fails ;-(
+KBUILD_CFLAGS += -fno-strength-reduce -ffixed-a2
+else
+# we can use a m68k-linux-gcc toolchain with these in place
+KBUILD_CFLAGS += -DUTS_SYSNAME=\"uClinux\"
+KBUILD_CFLAGS += -D__uClinux__
+KBUILD_AFLAGS += -D__uClinux__
+endif
+
+LDFLAGS := -m m68kelf
+KBUILD_LDFLAGS_MODULE += -T $(srctree)/arch/m68k/kernel/module.lds
 
 ifdef CONFIG_SUN3
 LDFLAGS_vmlinux = -N
@@ -31,35 +78,22 @@ endif
 
 CHECKFLAGS += -D__mc68000__
 
-# without -fno-strength-reduce the 53c7xx.c driver fails ;-(
-CFLAGS += -pipe -fno-strength-reduce -ffixed-a2
-
-# enable processor switch if compiled only for a single cpu
-ifndef CONFIG_M68020
-ifndef CONFIG_M68030
-
-ifndef CONFIG_M68060
-CFLAGS := $(CFLAGS) -m68040
-endif
-
-ifndef CONFIG_M68040
-CFLAGS := $(CFLAGS) -m68060
-endif
-
-endif
-endif
 
 ifdef CONFIG_KGDB
 # If configured for kgdb support, include debugging infos and keep the
 # frame pointer
-CFLAGS := $(subst -fomit-frame-pointer,,$(CFLAGS)) -g
+KBUILD_CFLAGS := $(subst -fomit-frame-pointer,,$(KBUILD_CFLAGS)) -g
 endif
 
-ifndef CONFIG_SUN3
-head-y := arch/m68k/kernel/head.o
-else
-head-y := arch/m68k/kernel/sun3-head.o
-endif
+#
+# Select the assembler head startup code. Order is important. The default
+# head code is first, processor specific selections can override it after.
+#
+head-y				:= arch/m68k/kernel/head.o
+head-$(CONFIG_SUN3)		:= arch/m68k/kernel/sun3-head.o
+head-$(CONFIG_M68360)		:= arch/m68k/platform/68360/head.o
+head-$(CONFIG_M68000)		:= arch/m68k/platform/68000/head.o
+head-$(CONFIG_COLDFIRE)		:= arch/m68k/platform/coldfire/head.o
 
 core-y				+= arch/m68k/kernel/	arch/m68k/mm/
 libs-y				+= arch/m68k/lib/
@@ -75,9 +109,14 @@ core-$(CONFIG_MVME16x)		+= arch/m68k/mvme16x/
 core-$(CONFIG_BVME6000)		+= arch/m68k/bvme6000/
 core-$(CONFIG_SUN3X)		+= arch/m68k/sun3x/	arch/m68k/sun3/
 core-$(CONFIG_SUN3)		+= arch/m68k/sun3/	arch/m68k/sun3/prom/
+core-$(CONFIG_NATFEAT)		+= arch/m68k/emu/
 core-$(CONFIG_M68040)		+= arch/m68k/fpsp040/
 core-$(CONFIG_M68060)		+= arch/m68k/ifpsp060/
 core-$(CONFIG_M68KFPU_EMU)	+= arch/m68k/math-emu/
+core-$(CONFIG_M68360)		+= arch/m68k/platform/68360/
+core-$(CONFIG_M68000)		+= arch/m68k/platform/68000/
+core-$(CONFIG_COLDFIRE)		+= arch/m68k/platform/coldfire/
+
 
 all:	zImage
 
@@ -116,3 +155,6 @@ endif
 
 archclean:
 	rm -f vmlinux.gz vmlinux.bz2
+
+install:
+	sh $(srctree)/arch/m68k/install.sh $(KERNELRELEASE) vmlinux.gz System.map "$(INSTALL_PATH)"

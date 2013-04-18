@@ -2,7 +2,7 @@
 *******************************************************************************
 **
 **  Copyright (C) Sistina Software, Inc.  1997-2003  All rights reserved.
-**  Copyright (C) 2004-2007 Red Hat, Inc.  All rights reserved.
+**  Copyright (C) 2004-2011 Red Hat, Inc.  All rights reserved.
 **
 **  This copyrighted material is made available to anyone wishing to use,
 **  modify, copy, or redistribute it subject to the terms and conditions
@@ -37,13 +37,12 @@
 #include <linux/jhash.h>
 #include <linux/miscdevice.h>
 #include <linux/mutex.h>
-#include <asm/semaphore.h>
+#include <linux/idr.h>
+#include <linux/ratelimit.h>
 #include <asm/uaccess.h>
 
 #include <linux/dlm.h>
 #include "config.h"
-
-#define DLM_LOCKSPACE_LEN	64
 
 /* Size of the temp buffer midcomms allocates on the stack.
    We try to make this large enough so most messages fit.
@@ -55,10 +54,7 @@ struct dlm_ls;
 struct dlm_lkb;
 struct dlm_rsb;
 struct dlm_member;
-struct dlm_lkbtable;
 struct dlm_rsbtable;
-struct dlm_dirtable;
-struct dlm_direntry;
 struct dlm_recover;
 struct dlm_header;
 struct dlm_message;
@@ -77,6 +73,13 @@ do { \
 		       (ls)->ls_name , ##args); \
 } while (0)
 
+#define log_limit(ls, fmt, args...) \
+do { \
+	if (dlm_config.ci_log_debug) \
+		printk_ratelimited(KERN_DEBUG "dlm: %s: " fmt "\n", \
+			(ls)->ls_name , ##args); \
+} while (0)
+
 #define DLM_ASSERT(x, do) \
 { \
   if (!(x)) \
@@ -92,32 +95,13 @@ do { \
   } \
 }
 
-#define DLM_FAKE_USER_AST ERR_PTR(-EINVAL)
-
-
-struct dlm_direntry {
-	struct list_head	list;
-	uint32_t		master_nodeid;
-	uint16_t		length;
-	char			name[1];
-};
-
-struct dlm_dirtable {
-	struct list_head	list;
-	rwlock_t		lock;
-};
 
 struct dlm_rsbtable {
-	struct list_head	list;
-	struct list_head	toss;
-	rwlock_t		lock;
+	struct rb_root		keep;
+	struct rb_root		toss;
+	spinlock_t		lock;
 };
 
-struct dlm_lkbtable {
-	struct list_head	list;
-	rwlock_t		lock;
-	uint16_t		counter;
-};
 
 /*
  * Lockspace member (per node in a ls)
@@ -127,6 +111,10 @@ struct dlm_member {
 	struct list_head	list;
 	int			nodeid;
 	int			weight;
+	int			slot;
+	int			slot_prev;
+	int			comm_seq;
+	uint32_t		generation;
 };
 
 /*
@@ -135,8 +123,8 @@ struct dlm_member {
 
 struct dlm_recover {
 	struct list_head	list;
-	int			*nodeids;
-	int			node_count;
+	struct dlm_config_node	*nodes;
+	int			nodes_count;
 	uint64_t		seq;
 };
 
@@ -146,11 +134,12 @@ struct dlm_recover {
 
 struct dlm_args {
 	uint32_t		flags;
-	void			*astaddr;
-	long			astparam;
-	void			*bastaddr;
+	void			(*astfn) (void *astparam);
+	void			*astparam;
+	void			(*bastfn) (void *astparam, int mode);
 	int			mode;
 	struct dlm_lksb		*lksb;
+	unsigned long		timeout;
 };
 
 
@@ -194,11 +183,6 @@ struct dlm_args {
  * lkb is a process copy, the nodeid specifies the lock master.
  */
 
-/* lkb_ast_type */
-
-#define AST_COMP		1
-#define AST_BAST		2
-
 /* lkb_status */
 
 #define DLM_LKSTS_WAITING	1
@@ -213,8 +197,26 @@ struct dlm_args {
 #define DLM_IFL_OVERLAP_UNLOCK  0x00080000
 #define DLM_IFL_OVERLAP_CANCEL  0x00100000
 #define DLM_IFL_ENDOFLIFE	0x00200000
+#define DLM_IFL_WATCH_TIMEWARN	0x00400000
+#define DLM_IFL_TIMEOUT_CANCEL	0x00800000
+#define DLM_IFL_DEADLOCK_CANCEL	0x01000000
+#define DLM_IFL_STUB_MS		0x02000000 /* magic number for m_flags */
 #define DLM_IFL_USER		0x00000001
 #define DLM_IFL_ORPHAN		0x00000002
+
+#define DLM_CALLBACKS_SIZE	6
+
+#define DLM_CB_CAST		0x00000001
+#define DLM_CB_BAST		0x00000002
+#define DLM_CB_SKIP		0x00000004
+
+struct dlm_callback {
+	uint64_t		seq;
+	uint32_t		flags;		/* DLM_CBF_ */
+	int			sb_status;	/* copy to lksb status */
+	uint8_t			sb_flags;	/* copy to lksb flags */
+	int8_t			mode; /* rq mode of bast, gr mode of cast */
+};
 
 struct dlm_lkb {
 	struct dlm_rsb		*lkb_resource;	/* the rsb */
@@ -231,26 +233,51 @@ struct dlm_lkb {
 	int8_t			lkb_status;     /* granted, waiting, convert */
 	int8_t			lkb_rqmode;	/* requested lock mode */
 	int8_t			lkb_grmode;	/* granted lock mode */
-	int8_t			lkb_bastmode;	/* requested mode */
 	int8_t			lkb_highbast;	/* highest mode bast sent for */
+
 	int8_t			lkb_wait_type;	/* type of reply waiting for */
 	int8_t			lkb_wait_count;
-	int8_t			lkb_ast_type;	/* type of ast queued for */
+	int			lkb_wait_nodeid; /* for debugging */
 
-	struct list_head	lkb_idtbl_list;	/* lockspace lkbtbl */
 	struct list_head	lkb_statequeue;	/* rsb g/c/w list */
 	struct list_head	lkb_rsb_lookup;	/* waiting for rsb lookup */
 	struct list_head	lkb_wait_reply;	/* waiting for remote reply */
-	struct list_head	lkb_astqueue;	/* need ast to be sent */
 	struct list_head	lkb_ownqueue;	/* list of locks for a process */
+	struct list_head	lkb_time_list;
+	ktime_t			lkb_timestamp;
+	ktime_t			lkb_wait_time;
+	unsigned long		lkb_timeout_cs;
+
+	struct mutex		lkb_cb_mutex;
+	struct work_struct	lkb_cb_work;
+	struct list_head	lkb_cb_list; /* for ls_cb_delay or proc->asts */
+	struct dlm_callback	lkb_callbacks[DLM_CALLBACKS_SIZE];
+	struct dlm_callback	lkb_last_cast;
+	struct dlm_callback	lkb_last_bast;
+	ktime_t			lkb_last_cast_time;	/* for debugging */
+	ktime_t			lkb_last_bast_time;	/* for debugging */
+
+	uint64_t		lkb_recover_seq; /* from ls_recover_seq */
 
 	char			*lkb_lvbptr;
 	struct dlm_lksb		*lkb_lksb;      /* caller's status block */
-	void			*lkb_astaddr;	/* caller's ast function */
-	void			*lkb_bastaddr;	/* caller's bast function */
-	long			lkb_astparam;	/* caller's ast arg */
+	void			(*lkb_astfn) (void *astparam);
+	void			(*lkb_bastfn) (void *astparam, int mode);
+	union {
+		void			*lkb_astparam;	/* caller's ast arg */
+		struct dlm_user_args	*lkb_ua;
+	};
 };
 
+/*
+ * res_master_nodeid is "normal": 0 is unset/invalid, non-zero is the real
+ * nodeid, even when nodeid is our_nodeid.
+ *
+ * res_nodeid is "odd": -1 is unset/invalid, zero means our_nodeid,
+ * greater than zero when another nodeid.
+ *
+ * (TODO: remove res_nodeid and only use res_master_nodeid)
+ */
 
 struct dlm_rsb {
 	struct dlm_ls		*res_ls;	/* the lockspace */
@@ -259,13 +286,19 @@ struct dlm_rsb {
 	unsigned long		res_flags;
 	int			res_length;	/* length of rsb name */
 	int			res_nodeid;
+	int			res_master_nodeid;
+	int			res_dir_nodeid;
+	int			res_id;		/* for ls_recover_idr */
 	uint32_t                res_lvbseq;
 	uint32_t		res_hash;
 	uint32_t		res_bucket;	/* rsbtbl */
 	unsigned long		res_toss_time;
 	uint32_t		res_first_lkid;
 	struct list_head	res_lookup;	/* lkbs waiting on first */
-	struct list_head	res_hashchain;	/* rsbtbl */
+	union {
+		struct list_head	res_hashchain;
+		struct rb_node		res_hashnode;	/* rsbtbl */
+	};
 	struct list_head	res_grantqueue;
 	struct list_head	res_convertqueue;
 	struct list_head	res_waitqueue;
@@ -275,13 +308,24 @@ struct dlm_rsb {
 	int			res_recover_locks_count;
 
 	char			*res_lvbptr;
-	char			res_name[1];
+	char			res_name[DLM_RESNAME_MAXLEN+1];
 };
+
+/* dlm_master_lookup() flags */
+
+#define DLM_LU_RECOVER_DIR	1
+#define DLM_LU_RECOVER_MASTER	2
+
+/* dlm_master_lookup() results */
+
+#define DLM_LU_MATCH		1
+#define DLM_LU_ADD		2
 
 /* find_rsb() flags */
 
-#define R_MASTER		1	/* only return rsb if it's a master */
-#define R_CREATE		2	/* create/add rsb if not found */
+#define R_REQUEST		0x00000001
+#define R_RECEIVE_REQUEST	0x00000002
+#define R_RECEIVE_RECOVER	0x00000004
 
 /* rsb_flags */
 
@@ -292,7 +336,8 @@ enum rsb_flags {
 	RSB_NEW_MASTER,
 	RSB_NEW_MASTER2,
 	RSB_RECOVER_CONVERT,
-	RSB_LOCKS_PURGED,
+	RSB_RECOVER_GRANT,
+	RSB_RECOVER_LVB_INVAL,
 };
 
 static inline void rsb_set_flag(struct dlm_rsb *r, enum rsb_flags flag)
@@ -314,7 +359,9 @@ static inline int rsb_flag(struct dlm_rsb *r, enum rsb_flags flag)
 /* dlm_header is first element of all structs sent between nodes */
 
 #define DLM_HEADER_MAJOR	0x00030000
-#define DLM_HEADER_MINOR	0x00000000
+#define DLM_HEADER_MINOR	0x00000001
+
+#define DLM_HEADER_SLOTS	0x00000001
 
 #define DLM_MSG			1
 #define DLM_RCOM		2
@@ -396,56 +443,107 @@ struct dlm_rcom {
 	char			rc_buf[0];
 };
 
+union dlm_packet {
+	struct dlm_header	header;		/* common to other two */
+	struct dlm_message	message;
+	struct dlm_rcom		rcom;
+};
+
+#define DLM_RSF_NEED_SLOTS	0x00000001
+
+/* RCOM_STATUS data */
+struct rcom_status {
+	__le32			rs_flags;
+	__le32			rs_unused1;
+	__le64			rs_unused2;
+};
+
+/* RCOM_STATUS_REPLY data */
 struct rcom_config {
-	uint32_t		rf_lvblen;
-	uint32_t		rf_lsflags;
-	uint64_t		rf_unused;
+	__le32			rf_lvblen;
+	__le32			rf_lsflags;
+
+	/* DLM_HEADER_SLOTS adds: */
+	__le32			rf_flags;
+	__le16			rf_our_slot;
+	__le16			rf_num_slots;
+	__le32			rf_generation;
+	__le32			rf_unused1;
+	__le64			rf_unused2;
+};
+
+struct rcom_slot {
+	__le32			ro_nodeid;
+	__le16			ro_slot;
+	__le16			ro_unused1;
+	__le64			ro_unused2;
 };
 
 struct rcom_lock {
-	uint32_t		rl_ownpid;
-	uint32_t		rl_lkid;
-	uint32_t		rl_remid;
-	uint32_t		rl_parent_lkid;
-	uint32_t		rl_parent_remid;
-	uint32_t		rl_exflags;
-	uint32_t		rl_flags;
-	uint32_t		rl_lvbseq;
-	int			rl_result;
+	__le32			rl_ownpid;
+	__le32			rl_lkid;
+	__le32			rl_remid;
+	__le32			rl_parent_lkid;
+	__le32			rl_parent_remid;
+	__le32			rl_exflags;
+	__le32			rl_flags;
+	__le32			rl_lvbseq;
+	__le32			rl_result;
 	int8_t			rl_rqmode;
 	int8_t			rl_grmode;
 	int8_t			rl_status;
 	int8_t			rl_asts;
-	uint16_t		rl_wait_type;
-	uint16_t		rl_namelen;
+	__le16			rl_wait_type;
+	__le16			rl_namelen;
 	char			rl_name[DLM_RESNAME_MAXLEN];
 	char			rl_lvb[0];
 };
+
+/*
+ * The max number of resources per rsbtbl bucket that shrink will attempt
+ * to remove in each iteration.
+ */
+
+#define DLM_REMOVE_NAMES_MAX 8
 
 struct dlm_ls {
 	struct list_head	ls_list;	/* list of lockspaces */
 	dlm_lockspace_t		*ls_local_handle;
 	uint32_t		ls_global_id;	/* global unique lockspace ID */
+	uint32_t		ls_generation;
 	uint32_t		ls_exflags;
 	int			ls_lvblen;
-	int			ls_count;	/* reference count */
+	int			ls_count;	/* refcount of processes in
+						   the dlm using this ls */
+	int			ls_create_count; /* create/release refcount */
 	unsigned long		ls_flags;	/* LSFL_ */
+	unsigned long		ls_scan_time;
 	struct kobject		ls_kobj;
+
+	struct idr		ls_lkbidr;
+	spinlock_t		ls_lkbidr_spin;
 
 	struct dlm_rsbtable	*ls_rsbtbl;
 	uint32_t		ls_rsbtbl_size;
-
-	struct dlm_lkbtable	*ls_lkbtbl;
-	uint32_t		ls_lkbtbl_size;
-
-	struct dlm_dirtable	*ls_dirtbl;
-	uint32_t		ls_dirtbl_size;
 
 	struct mutex		ls_waiters_mutex;
 	struct list_head	ls_waiters;	/* lkbs needing a reply */
 
 	struct mutex		ls_orphans_mutex;
 	struct list_head	ls_orphans;
+
+	struct mutex		ls_timeout_mutex;
+	struct list_head	ls_timeout;
+
+	spinlock_t		ls_new_rsb_spin;
+	int			ls_new_rsb_count;
+	struct list_head	ls_new_rsb;	/* new rsb structs */
+
+	spinlock_t		ls_remove_spin;
+	char			ls_remove_name[DLM_RESNAME_MAXLEN+1];
+	char			*ls_remove_names[DLM_REMOVE_NAMES_MAX];
+	int			ls_remove_len;
+	int			ls_remove_lens[DLM_REMOVE_NAMES_MAX];
 
 	struct list_head	ls_nodes;	/* current nodes in ls */
 	struct list_head	ls_nodes_gone;	/* dead node list, recovery */
@@ -454,53 +552,106 @@ struct dlm_ls {
 	int			ls_total_weight;
 	int			*ls_node_array;
 
+	int			ls_slot;
+	int			ls_num_slots;
+	int			ls_slots_size;
+	struct dlm_slot		*ls_slots;
+
 	struct dlm_rsb		ls_stub_rsb;	/* for returning errors */
 	struct dlm_lkb		ls_stub_lkb;	/* for returning errors */
 	struct dlm_message	ls_stub_ms;	/* for faking a reply */
 
 	struct dentry		*ls_debug_rsb_dentry; /* debugfs */
 	struct dentry		*ls_debug_waiters_dentry; /* debugfs */
+	struct dentry		*ls_debug_locks_dentry; /* debugfs */
+	struct dentry		*ls_debug_all_dentry; /* debugfs */
+	struct dentry		*ls_debug_toss_dentry; /* debugfs */
 
 	wait_queue_head_t	ls_uevent_wait;	/* user part of join/leave */
 	int			ls_uevent_result;
+	struct completion	ls_members_done;
+	int			ls_members_result;
 
 	struct miscdevice       ls_device;
 
+	struct workqueue_struct	*ls_callback_wq;
+
 	/* recovery related */
 
+	struct mutex		ls_cb_mutex;
+	struct list_head	ls_cb_delay; /* save for queue_work later */
 	struct timer_list	ls_timer;
 	struct task_struct	*ls_recoverd_task;
 	struct mutex		ls_recoverd_active;
 	spinlock_t		ls_recover_lock;
+	unsigned long		ls_recover_begin; /* jiffies timestamp */
 	uint32_t		ls_recover_status; /* DLM_RS_ */
 	uint64_t		ls_recover_seq;
 	struct dlm_recover	*ls_recover_args;
 	struct rw_semaphore	ls_in_recovery;	/* block local requests */
+	struct rw_semaphore	ls_recv_active;	/* block dlm_recv */
 	struct list_head	ls_requestqueue;/* queue remote requests */
 	struct mutex		ls_requestqueue_mutex;
-	char			*ls_recover_buf;
+	struct dlm_rcom		*ls_recover_buf;
 	int			ls_recover_nodeid; /* for debugging */
+	unsigned int		ls_recover_dir_sent_res; /* for log info */
+	unsigned int		ls_recover_dir_sent_msg; /* for log info */
+	unsigned int		ls_recover_locks_in; /* for log info */
 	uint64_t		ls_rcom_seq;
 	spinlock_t		ls_rcom_spin;
 	struct list_head	ls_recover_list;
 	spinlock_t		ls_recover_list_lock;
 	int			ls_recover_list_count;
+	struct idr		ls_recover_idr;
+	spinlock_t		ls_recover_idr_lock;
 	wait_queue_head_t	ls_wait_general;
+	wait_queue_head_t	ls_recover_lock_wait;
 	struct mutex		ls_clear_proc_locks;
 
 	struct list_head	ls_root_list;	/* root resources */
 	struct rw_semaphore	ls_root_sem;	/* protect root_list */
 
+	const struct dlm_lockspace_ops *ls_ops;
+	void			*ls_ops_arg;
+
 	int			ls_namelen;
 	char			ls_name[1];
 };
 
-#define LSFL_WORK		0
-#define LSFL_RUNNING		1
-#define LSFL_RECOVERY_STOP	2
-#define LSFL_RCOM_READY		3
-#define LSFL_RCOM_WAIT		4
-#define LSFL_UEVENT_WAIT	5
+/*
+ * LSFL_RECOVER_STOP - dlm_ls_stop() sets this to tell dlm recovery routines
+ * that they should abort what they're doing so new recovery can be started.
+ *
+ * LSFL_RECOVER_DOWN - dlm_ls_stop() sets this to tell dlm_recoverd that it
+ * should do down_write() on the in_recovery rw_semaphore. (doing down_write
+ * within dlm_ls_stop causes complaints about the lock acquired/released
+ * in different contexts.)
+ *
+ * LSFL_RECOVER_LOCK - dlm_recoverd holds the in_recovery rw_semaphore.
+ * It sets this after it is done with down_write() on the in_recovery
+ * rw_semaphore and clears it after it has released the rw_semaphore.
+ *
+ * LSFL_RECOVER_WORK - dlm_ls_start() sets this to tell dlm_recoverd that it
+ * should begin recovery of the lockspace.
+ *
+ * LSFL_RUNNING - set when normal locking activity is enabled.
+ * dlm_ls_stop() clears this to tell dlm locking routines that they should
+ * quit what they are doing so recovery can run.  dlm_recoverd sets
+ * this after recovery is finished.
+ */
+
+#define LSFL_RECOVER_STOP	0
+#define LSFL_RECOVER_DOWN	1
+#define LSFL_RECOVER_LOCK	2
+#define LSFL_RECOVER_WORK	3
+#define LSFL_RUNNING		4
+
+#define LSFL_RCOM_READY		5
+#define LSFL_RCOM_WAIT		6
+#define LSFL_UEVENT_WAIT	7
+#define LSFL_TIMEWARN		8
+#define LSFL_CB_DELAY		9
+#define LSFL_NODIR		10
 
 /* much of this is just saving user space pointers associated with the
    lock that we pass back to the user lib with an ast */
@@ -511,13 +662,12 @@ struct dlm_user_args {
 					  (dlm_user_proc) on the struct file,
 					  the process's locks point back to it*/
 	struct dlm_lksb		lksb;
-	int			old_mode;
-	int			update_user_lvb;
 	struct dlm_lksb __user	*user_lksb;
 	void __user		*castparam;
 	void __user		*castaddr;
 	void __user		*bastparam;
 	void __user		*bastaddr;
+	uint64_t		xid;
 };
 
 #define DLM_PROC_FLAGS_CLOSING 1
@@ -544,13 +694,31 @@ static inline int dlm_locking_stopped(struct dlm_ls *ls)
 
 static inline int dlm_recovery_stopped(struct dlm_ls *ls)
 {
-	return test_bit(LSFL_RECOVERY_STOP, &ls->ls_flags);
+	return test_bit(LSFL_RECOVER_STOP, &ls->ls_flags);
 }
 
 static inline int dlm_no_directory(struct dlm_ls *ls)
 {
-	return (ls->ls_exflags & DLM_LSFL_NODIR) ? 1 : 0;
+	return test_bit(LSFL_NODIR, &ls->ls_flags);
 }
+
+int dlm_netlink_init(void);
+void dlm_netlink_exit(void);
+void dlm_timeout_warn(struct dlm_lkb *lkb);
+int dlm_plock_init(void);
+void dlm_plock_exit(void);
+
+#ifdef CONFIG_DLM_DEBUG
+int dlm_register_debugfs(void);
+void dlm_unregister_debugfs(void);
+int dlm_create_debug_file(struct dlm_ls *ls);
+void dlm_delete_debug_file(struct dlm_ls *ls);
+#else
+static inline int dlm_register_debugfs(void) { return 0; }
+static inline void dlm_unregister_debugfs(void) { }
+static inline int dlm_create_debug_file(struct dlm_ls *ls) { return 0; }
+static inline void dlm_delete_debug_file(struct dlm_ls *ls) { }
+#endif
 
 #endif				/* __DLM_INTERNAL_DOT_H__ */
 

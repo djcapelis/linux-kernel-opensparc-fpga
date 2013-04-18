@@ -24,7 +24,8 @@
 %{
 
 #include <assert.h>
-#include <malloc.h>
+#include <stdlib.h>
+#include <string.h>
 #include "genksyms.h"
 
 static int is_typedef;
@@ -50,6 +51,25 @@ remove_list(struct string_list **pb, struct string_list **pe)
   free_list(b, e);
 }
 
+/* Record definition of a struct/union/enum */
+static void record_compound(struct string_list **keyw,
+		       struct string_list **ident,
+		       struct string_list **body,
+		       enum symbol_type type)
+{
+	struct string_list *b = *body, *i = *ident, *r;
+
+	if (i->in_source_file) {
+		remove_node(keyw);
+		(*ident)->tag = type;
+		remove_list(body, ident);
+		return;
+	}
+	r = copy_node(i); r->tag = type;
+	r->next = (*keyw)->next; *body = r; (*keyw)->next = NULL;
+	add_symbol(i->string, type, b, is_extern);
+}
+
 %}
 
 %token ASM_KEYW
@@ -61,6 +81,7 @@ remove_list(struct string_list **pb, struct string_list **pe)
 %token DOUBLE_KEYW
 %token ENUM_KEYW
 %token EXTERN_KEYW
+%token EXTENSION_KEYW
 %token FLOAT_KEYW
 %token INLINE_KEYW
 %token INT_KEYW
@@ -110,7 +131,9 @@ declaration:
 	;
 
 declaration1:
-	TYPEDEF_KEYW { is_typedef = 1; } simple_declaration
+	EXTENSION_KEYW TYPEDEF_KEYW { is_typedef = 1; } simple_declaration
+		{ $$ = $4; }
+	| TYPEDEF_KEYW { is_typedef = 1; } simple_declaration
 		{ $$ = $3; }
 	| simple_declaration
 	| function_definition
@@ -211,29 +234,17 @@ type_specifier:
 
 	/* Full definitions of an s/u/e.  Record it.  */
 	| STRUCT_KEYW IDENT class_body
-		{ struct string_list *s = *$3, *i = *$2, *r;
-		  r = copy_node(i); r->tag = SYM_STRUCT;
-		  r->next = (*$1)->next; *$3 = r; (*$1)->next = NULL;
-		  add_symbol(i->string, SYM_STRUCT, s, is_extern);
-		  $$ = $3;
-		}
+		{ record_compound($1, $2, $3, SYM_STRUCT); $$ = $3; }
 	| UNION_KEYW IDENT class_body
-		{ struct string_list *s = *$3, *i = *$2, *r;
-		  r = copy_node(i); r->tag = SYM_UNION;
-		  r->next = (*$1)->next; *$3 = r; (*$1)->next = NULL;
-		  add_symbol(i->string, SYM_UNION, s, is_extern);
-		  $$ = $3;
-		}
-	| ENUM_KEYW IDENT BRACE_PHRASE
-		{ struct string_list *s = *$3, *i = *$2, *r;
-		  r = copy_node(i); r->tag = SYM_ENUM;
-		  r->next = (*$1)->next; *$3 = r; (*$1)->next = NULL;
-		  add_symbol(i->string, SYM_ENUM, s, is_extern);
-		  $$ = $3;
-		}
-
-	/* Anonymous s/u/e definitions.  Nothing needs doing.  */
-	| ENUM_KEYW BRACE_PHRASE			{ $$ = $2; }
+		{ record_compound($1, $2, $3, SYM_UNION); $$ = $3; }
+	| ENUM_KEYW IDENT enum_body
+		{ record_compound($1, $2, $3, SYM_ENUM); $$ = $3; }
+	/*
+	 * Anonymous enum definition. Tell add_symbol() to restart its counter.
+	 */
+	| ENUM_KEYW enum_body
+		{ add_symbol(NULL, SYM_ENUM, NULL, 0); $$ = $2; }
+	/* Anonymous s/u definitions.  Nothing needs doing.  */
 	| STRUCT_KEYW class_body			{ $$ = $2; }
 	| UNION_KEYW class_body				{ $$ = $2; }
 	;
@@ -443,8 +454,30 @@ member_bitfield_declarator:
 
 attribute_opt:
 	/* empty */					{ $$ = NULL; }
-	| ATTRIBUTE_PHRASE
+	| attribute_opt ATTRIBUTE_PHRASE
 	;
+
+enum_body:
+	'{' enumerator_list '}'				{ $$ = $3; }
+	| '{' enumerator_list ',' '}'			{ $$ = $4; }
+	 ;
+
+enumerator_list:
+	enumerator
+	| enumerator_list ',' enumerator
+
+enumerator:
+	IDENT
+		{
+			const char *name = strdup((*$1)->string);
+			add_symbol(name, SYM_ENUM_CONST, NULL, 0);
+		}
+	| IDENT '=' EXPRESSION_PHRASE
+		{
+			const char *name = strdup((*$1)->string);
+			struct string_list *expr = copy_list_range(*$3, *$2);
+			add_symbol(name, SYM_ENUM_CONST, expr, 0);
+		}
 
 asm_definition:
 	ASM_PHRASE ';'					{ $$ = $2; }

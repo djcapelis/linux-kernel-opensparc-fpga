@@ -3,8 +3,6 @@
  * Linux driver for Disk-On-Chip 2000 and Millennium
  * (c) 1999 Machine Vision Holdings, Inc.
  * (c) 1999, 2000 David Woodhouse <dwmw2@infradead.org>
- *
- * $Id: doc2000.c,v 1.67 2005/11/07 11:14:24 gleixner Exp $
  */
 
 #include <linux/kernel.h>
@@ -12,7 +10,6 @@
 #include <asm/errno.h>
 #include <asm/io.h>
 #include <asm/uaccess.h>
-#include <linux/miscdevice.h>
 #include <linux/delay.h>
 #include <linux/slab.h>
 #include <linux/sched.h>
@@ -85,8 +82,7 @@ static int _DoC_WaitReady(struct DiskOnChip *doc)
 	void __iomem *docptr = doc->virtadr;
 	unsigned long timeo = jiffies + (HZ * 10);
 
-	DEBUG(MTD_DEBUG_LEVEL3,
-	      "_DoC_WaitReady called for out-of-line wait\n");
+	pr_debug("_DoC_WaitReady called for out-of-line wait\n");
 
 	/* Out-of-line routine to wait for chip response */
 	while (!(ReadDOC(docptr, CDSNControl) & CDSN_CTRL_FR_B)) {
@@ -95,7 +91,7 @@ static int _DoC_WaitReady(struct DiskOnChip *doc)
 		DoC_Delay(doc, 2);
 
 		if (time_after(jiffies, timeo)) {
-			DEBUG(MTD_DEBUG_LEVEL2, "_DoC_WaitReady timed out.\n");
+			pr_debug("_DoC_WaitReady timed out.\n");
 			return -EIO;
 		}
 		udelay(1);
@@ -326,8 +322,7 @@ static int DoC_IdentChip(struct DiskOnChip *doc, int floor, int chip)
 
 	/* Reset the chip */
 	if (DoC_Command(doc, NAND_CMD_RESET, CDSN_CTRL_WP)) {
-		DEBUG(MTD_DEBUG_LEVEL2,
-		      "DoC_Command (reset) for %d,%d returned true\n",
+		pr_debug("DoC_Command (reset) for %d,%d returned true\n",
 		      floor, chip);
 		return 0;
 	}
@@ -335,8 +330,7 @@ static int DoC_IdentChip(struct DiskOnChip *doc, int floor, int chip)
 
 	/* Read the NAND chip ID: 1. Send ReadID command */
 	if (DoC_Command(doc, NAND_CMD_READID, CDSN_CTRL_WP)) {
-		DEBUG(MTD_DEBUG_LEVEL2,
-		      "DoC_Command (ReadID) for %d,%d returned true\n",
+		pr_debug("DoC_Command (ReadID) for %d,%d returned true\n",
 		      floor, chip);
 		return 0;
 	}
@@ -376,7 +370,7 @@ static int DoC_IdentChip(struct DiskOnChip *doc, int floor, int chip)
 	 * hardware restriction. */
 	if (doc->mfr) {
 		if (doc->mfr == mfr && doc->id == id)
-			return 1;	/* This is another the same the first */
+			return 1;	/* This is the same as the first */
 		else
 			printk(KERN_WARNING
 			       "Flash chip at floor %d, chip %d is different:\n",
@@ -568,23 +562,15 @@ void DoC2k_init(struct mtd_info *mtd)
 
 	mtd->type = MTD_NANDFLASH;
 	mtd->flags = MTD_CAP_NANDFLASH;
-	mtd->size = 0;
-	mtd->erasesize = 0;
-	mtd->writesize = 512;
+	mtd->writebufsize = mtd->writesize = 512;
 	mtd->oobsize = 16;
+	mtd->ecc_strength = 2;
 	mtd->owner = THIS_MODULE;
-	mtd->erase = doc_erase;
-	mtd->point = NULL;
-	mtd->unpoint = NULL;
-	mtd->read = doc_read;
-	mtd->write = doc_write;
-	mtd->read_oob = doc_read_oob;
-	mtd->write_oob = doc_write_oob;
-	mtd->sync = NULL;
-
-	this->totlen = 0;
-	this->numchips = 0;
-
+	mtd->_erase = doc_erase;
+	mtd->_read = doc_read;
+	mtd->_write = doc_write;
+	mtd->_read_oob = doc_read_oob;
+	mtd->_write_oob = doc_write_oob;
 	this->curfloor = -1;
 	this->curchip = -1;
 	mutex_init(&this->lock);
@@ -600,7 +586,7 @@ void DoC2k_init(struct mtd_info *mtd)
 		doc2klist = mtd;
 		mtd->size = this->totlen;
 		mtd->erasesize = this->erasesize;
-		add_mtd_device(mtd);
+		mtd_device_register(mtd, NULL, 0);
 		return;
 	}
 }
@@ -617,13 +603,7 @@ static int doc_read(struct mtd_info *mtd, loff_t from, size_t len,
 	int i, len256 = 0, ret=0;
 	size_t left = len;
 
-	/* Don't allow read past end of device */
-	if (from >= this->totlen)
-		return -EINVAL;
-
 	mutex_lock(&this->lock);
-
-	*retlen = 0;
 	while (left) {
 		len = left;
 
@@ -632,7 +612,7 @@ static int doc_read(struct mtd_info *mtd, loff_t from, size_t len,
 			len = ((from | 0x1ff) + 1) - from;
 
 		/* The ECC will not be calculated correctly if less than 512 is read */
-		if (len != 0x200 && eccbuf)
+		if (len != 0x200)
 			printk(KERN_WARNING
 			       "ECC needs a full sector read (adr: %lx size %lx)\n",
 			       (long) from, (long) len);
@@ -702,7 +682,7 @@ static int doc_read(struct mtd_info *mtd, loff_t from, size_t len,
 #ifdef ECC_DEBUG
 			printk(KERN_ERR "DiskOnChip ECC Error: Read at %lx\n", (long)from);
 #endif
-			/* Read the ECC syndrom through the DiskOnChip ECC
+			/* Read the ECC syndrome through the DiskOnChip ECC
 			   logic.  These syndrome will be all ZERO when there
 			   is no error */
 			for (i = 0; i < 6; i++) {
@@ -763,13 +743,7 @@ static int doc_write(struct mtd_info *mtd, loff_t to, size_t len,
 	size_t left = len;
 	int status;
 
-	/* Don't allow write past end of device */
-	if (to >= this->totlen)
-		return -EINVAL;
-
 	mutex_lock(&this->lock);
-
-	*retlen = 0;
 	while (left) {
 		len = left;
 
@@ -896,7 +870,7 @@ static int doc_write(struct mtd_info *mtd, loff_t to, size_t len,
 		/* Let the caller know we completed it */
 		*retlen += len;
 
-		if (eccbuf) {
+		{
 			unsigned char x[8];
 			size_t dummy;
 			int ret;
@@ -933,7 +907,7 @@ static int doc_read_oob(struct mtd_info *mtd, loff_t ofs,
 	uint8_t *buf = ops->oobbuf;
 	size_t len = ops->len;
 
-	BUG_ON(ops->mode != MTD_OOB_PLACE);
+	BUG_ON(ops->mode != MTD_OPS_PLACE_OOB);
 
 	ofs += ops->ooboffs;
 
@@ -1097,7 +1071,7 @@ static int doc_write_oob(struct mtd_info *mtd, loff_t ofs,
 	struct DiskOnChip *this = mtd->priv;
 	int ret;
 
-	BUG_ON(ops->mode != MTD_OOB_PLACE);
+	BUG_ON(ops->mode != MTD_OPS_PLACE_OOB);
 
 	mutex_lock(&this->lock);
 	ret = doc_write_oob_nolock(mtd, ofs + ops->ooboffs, ops->len,
@@ -1188,7 +1162,7 @@ static void __exit cleanup_doc2000(void)
 		this = mtd->priv;
 		doc2klist = this->nextdoc;
 
-		del_mtd_device(mtd);
+		mtd_device_unregister(mtd);
 
 		iounmap(this->virtadr);
 		kfree(this->chips);

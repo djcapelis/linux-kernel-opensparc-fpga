@@ -6,20 +6,21 @@
  *	This program is free software; you can redistribute it and/or
  *	modify it under the terms of the GNU General Public License version
  *	2 as published by the Free Software Foundation.
- * 
+ *
  * Thanks to Randy Dunlap for the original version of this code.
  *
  */
+
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/tty.h>
 #include <linux/console.h>
+#include <linux/serial.h>
 #include <linux/usb.h>
 #include <linux/usb/serial.h>
-
-static int debug;
 
 struct usbcons_info {
 	int			magic;
@@ -63,11 +64,9 @@ static int usb_console_setup(struct console *co, char *options)
 	char *s;
 	struct usb_serial *serial;
 	struct usb_serial_port *port;
-	int retval = 0;
-	struct tty_struct *tty;
-	struct ktermios *termios;
-
-	dbg ("%s", __FUNCTION__);
+	int retval;
+	struct tty_struct *tty = NULL;
+	struct ktermios dummy;
 
 	if (options) {
 		baud = simple_strtoul(options, NULL, 10);
@@ -81,117 +80,123 @@ static int usb_console_setup(struct console *co, char *options)
 		if (*s)
 			doflow = (*s++ == 'r');
 	}
+	
+	/* Sane default */
+	if (baud == 0)
+		baud = 9600;
 
-	/* build a cflag setting */
-	switch (baud) {
-		case 1200:
-			cflag |= B1200;
-			break;
-		case 2400:
-			cflag |= B2400;
-			break;
-		case 4800:
-			cflag |= B4800;
-			break;
-		case 19200:
-			cflag |= B19200;
-			break;
-		case 38400:
-			cflag |= B38400;
-			break;
-		case 57600:
-			cflag |= B57600;
-			break;
-		case 115200:
-			cflag |= B115200;
-			break;
-		case 9600:
-		default:
-			cflag |= B9600;
-			/*
-			 * Set this to a sane value to prevent a divide error
-			 */
-			baud  = 9600;
-			break;
-	}
 	switch (bits) {
-		case 7:
-			cflag |= CS7;
-			break;
-		default:
-		case 8:
-			cflag |= CS8;
-			break;
+	case 7:
+		cflag |= CS7;
+		break;
+	default:
+	case 8:
+		cflag |= CS8;
+		break;
 	}
 	switch (parity) {
-		case 'o': case 'O':
-			cflag |= PARODD;
-			break;
-		case 'e': case 'E':
-			cflag |= PARENB;
-			break;
+	case 'o': case 'O':
+		cflag |= PARODD;
+		break;
+	case 'e': case 'E':
+		cflag |= PARENB;
+		break;
 	}
 	co->cflag = cflag;
 
-	/* grab the first serial port that happens to be connected */
-	serial = usb_serial_get_by_index(0);
+	/*
+	 * no need to check the index here: if the index is wrong, console
+	 * code won't call us
+	 */
+	serial = usb_serial_get_by_index(co->index);
 	if (serial == NULL) {
 		/* no device is connected yet, sorry :( */
-		err ("No USB device connected to ttyUSB0");
+		pr_err("No USB device connected to ttyUSB%i\n", co->index);
 		return -ENODEV;
 	}
 
-	port = serial->port[0];
-	port->tty = NULL;
+	retval = usb_autopm_get_interface(serial->interface);
+	if (retval)
+		goto error_get_interface;
+
+	port = serial->port[co->index - serial->minor];
+	tty_port_tty_set(&port->port, NULL);
 
 	info->port = port;
-	 
-	++port->open_count;
-	if (port->open_count == 1) {
-		/* only call the device specific open if this 
+
+	++port->port.count;
+	if (!test_bit(ASYNCB_INITIALIZED, &port->port.flags)) {
+		if (serial->type->set_termios) {
+			/*
+			 * allocate a fake tty so the driver can initialize
+			 * the termios structure, then later call set_termios to
+			 * configure according to command line arguments
+			 */
+			tty = kzalloc(sizeof(*tty), GFP_KERNEL);
+			if (!tty) {
+				retval = -ENOMEM;
+				dev_err(&port->dev, "no more memory\n");
+				goto reset_open_count;
+			}
+			kref_init(&tty->kref);
+			tty_port_tty_set(&port->port, tty);
+			tty->driver = usb_serial_tty_driver;
+			tty->index = co->index;
+			if (tty_init_termios(tty)) {
+				retval = -ENOMEM;
+				dev_err(&port->dev, "no more memory\n");
+				goto free_tty;
+			}
+		}
+
+		/* only call the device specific open if this
 		 * is the first time the port is opened */
 		if (serial->type->open)
-			retval = serial->type->open(port, NULL);
+			retval = serial->type->open(NULL, port);
 		else
-			retval = usb_serial_generic_open(port, NULL);
-		if (retval)
-			port->open_count = 0;
-	}
+			retval = usb_serial_generic_open(NULL, port);
 
-	if (retval) {
-		err ("could not open USB console port");
-		return retval;
-	}
-
-	if (serial->type->set_termios) {
-		/* build up a fake tty structure so that the open call has something
-		 * to look at to get the cflag value */
-		tty = kzalloc(sizeof(*tty), GFP_KERNEL);
-		if (!tty) {
-			err ("no more memory");
-			return -ENOMEM;
+		if (retval) {
+			dev_err(&port->dev, "could not open USB console port\n");
+			goto fail;
 		}
-		termios = kzalloc(sizeof(*termios), GFP_KERNEL);
-		if (!termios) {
-			err ("no more memory");
-			kfree (tty);
-			return -ENOMEM;
+
+		if (serial->type->set_termios) {
+			tty->termios.c_cflag = cflag;
+			tty_termios_encode_baud_rate(&tty->termios, baud, baud);
+			memset(&dummy, 0, sizeof(struct ktermios));
+			serial->type->set_termios(tty, port, &dummy);
+
+			tty_port_tty_set(&port->port, NULL);
+			kfree(tty);
 		}
-		termios->c_cflag = cflag;
-		tty->termios = termios;
-		port->tty = tty;
-
-		/* set up the initial termios settings */
-		serial->type->set_termios(port, NULL);
-		port->tty = NULL;
-		kfree (termios);
-		kfree (tty);
+		set_bit(ASYNCB_INITIALIZED, &port->port.flags);
 	}
+	/* Now that any required fake tty operations are completed restore
+	 * the tty port count */
+	--port->port.count;
+	/* The console is special in terms of closing the device so
+	 * indicate this port is now acting as a system console. */
+	port->port.console = 1;
 
+	mutex_unlock(&serial->disc_mutex);
+	return retval;
+
+ fail:
+	tty_port_tty_set(&port->port, NULL);
+ free_tty:
+	kfree(tty);
+ reset_open_count:
+	port->port.count = 0;
+	usb_autopm_put_interface(serial->interface);
+ error_get_interface:
+	usb_serial_put(serial);
+	mutex_unlock(&serial->disc_mutex);
 	return retval;
 }
 
-static void usb_console_write(struct console *co, const char *buf, unsigned count)
+static void usb_console_write(struct console *co,
+					const char *buf, unsigned count)
 {
 	static struct usbcons_info *info = &usbcons_info;
 	struct usb_serial_port *port = info->port;
@@ -205,10 +210,10 @@ static void usb_console_write(struct console *co, const char *buf, unsigned coun
 	if (count == 0)
 		return;
 
-	dbg("%s - port %d, %d byte(s)", __FUNCTION__, port->number, count);
+	pr_debug("%s - port %d, %d byte(s)\n", __func__, port->number, count);
 
-	if (!port->open_count) {
-		dbg ("%s - port not opened", __FUNCTION__);
+	if (!port->port.console) {
+		pr_debug("%s - port not opened\n", __func__);
 		return;
 	}
 
@@ -216,55 +221,70 @@ static void usb_console_write(struct console *co, const char *buf, unsigned coun
 		unsigned int i;
 		unsigned int lf;
 		/* search for LF so we can insert CR if necessary */
-		for (i=0, lf=0 ; i < count ; i++) {
+		for (i = 0, lf = 0 ; i < count ; i++) {
 			if (*(buf + i) == 10) {
 				lf = 1;
 				i++;
 				break;
 			}
 		}
-		/* pass on to the driver specific version of this function if it is available */
+		/* pass on to the driver specific version of this function if
+		   it is available */
 		if (serial->type->write)
-			retval = serial->type->write(port, buf, i);
+			retval = serial->type->write(NULL, port, buf, i);
 		else
-			retval = usb_serial_generic_write(port, buf, i);
-		dbg("%s - return value : %d", __FUNCTION__, retval);
+			retval = usb_serial_generic_write(NULL, port, buf, i);
+		pr_debug("%s - return value : %d\n", __func__, retval);
 		if (lf) {
 			/* append CR after LF */
 			unsigned char cr = 13;
 			if (serial->type->write)
-				retval = serial->type->write(port, &cr, 1);
+				retval = serial->type->write(NULL,
+								port, &cr, 1);
 			else
-				retval = usb_serial_generic_write(port, &cr, 1);
-			dbg("%s - return value : %d", __FUNCTION__, retval);
+				retval = usb_serial_generic_write(NULL,
+								port, &cr, 1);
+			pr_debug("%s - return value : %d\n", __func__, retval);
 		}
 		buf += i;
 		count -= i;
 	}
 }
 
+static struct tty_driver *usb_console_device(struct console *co, int *index)
+{
+	struct tty_driver **p = (struct tty_driver **)co->data;
+
+	if (!*p)
+		return NULL;
+
+	*index = co->index;
+	return *p;
+}
+
 static struct console usbcons = {
 	.name =		"ttyUSB",
 	.write =	usb_console_write,
+	.device =	usb_console_device,
 	.setup =	usb_console_setup,
 	.flags =	CON_PRINTBUFFER,
 	.index =	-1,
+	.data = 	&usb_serial_tty_driver,
 };
 
 void usb_serial_console_disconnect(struct usb_serial *serial)
 {
-	if (serial && serial->port && serial->port[0] && serial->port[0] == usbcons_info.port) {
+	if (serial && serial->port && serial->port[0]
+				&& serial->port[0] == usbcons_info.port) {
 		usb_serial_console_exit();
 		usb_serial_put(serial);
 	}
 }
 
-void usb_serial_console_init (int serial_debug, int minor)
+void usb_serial_console_init(int minor)
 {
-	debug = serial_debug;
-
 	if (minor == 0) {
-		/* 
+		/*
 		 * Call register_console() if this is the first device plugged
 		 * in.  If we call it earlier, then the callback to
 		 * console_setup() will fail, as there is not a device seen by
@@ -273,21 +293,20 @@ void usb_serial_console_init (int serial_debug, int minor)
 		/*
 		 * Register console.
 		 * NOTES:
-		 * console_setup() is called (back) immediately (from register_console).
-		 * console_write() is called immediately from register_console iff
-		 * CON_PRINTBUFFER is set in flags.
+		 * console_setup() is called (back) immediately (from
+		 * register_console). console_write() is called immediately
+		 * from register_console iff CON_PRINTBUFFER is set in flags.
 		 */
-		dbg ("registering the USB serial console.");
+		pr_debug("registering the USB serial console.\n");
 		register_console(&usbcons);
 	}
 }
 
-void usb_serial_console_exit (void)
+void usb_serial_console_exit(void)
 {
 	if (usbcons_info.port) {
 		unregister_console(&usbcons);
-		if (usbcons_info.port->open_count)
-			usbcons_info.port->open_count--;
+		usbcons_info.port->port.console = 0;
 		usbcons_info.port = NULL;
 	}
 }

@@ -62,16 +62,16 @@
 #include <linux/errno.h>
 #include <linux/init.h>
 #include <linux/list.h>
+#include <linux/slab.h>
 #include <linux/usb.h>
 #include <linux/usb/isp116x.h>
+#include <linux/usb/hcd.h>
 #include <linux/platform_device.h>
 
 #include <asm/io.h>
 #include <asm/irq.h>
-#include <asm/system.h>
 #include <asm/byteorder.h>
 
-#include "../core/hcd.h"
 #include "isp116x.h"
 
 #define DRIVER_VERSION	"03 Nov 2005"
@@ -94,6 +94,10 @@ static void write_ptddata_to_fifo(struct isp116x *isp116x, void *buf, int len)
 	u16 w;
 	int quot = len % 4;
 
+	/* buffer is already in 'usb data order', which is LE. */
+	/* When reading buffer as u16, we have to take care byte order */
+	/* doesn't get mixed up */
+
 	if ((unsigned long)dp2 & 1) {
 		/* not aligned */
 		for (; len > 1; len -= 2) {
@@ -105,8 +109,11 @@ static void write_ptddata_to_fifo(struct isp116x *isp116x, void *buf, int len)
 			isp116x_write_data16(isp116x, (u16) * dp);
 	} else {
 		/* aligned */
-		for (; len > 1; len -= 2)
-			isp116x_raw_write_data16(isp116x, *dp2++);
+		for (; len > 1; len -= 2) {
+			/* Keep byte order ! */
+			isp116x_raw_write_data16(isp116x, cpu_to_le16(*dp2++));
+		}
+
 		if (len)
 			isp116x_write_data16(isp116x, 0xff & *((u8 *) dp2));
 	}
@@ -124,6 +131,10 @@ static void read_ptddata_from_fifo(struct isp116x *isp116x, void *buf, int len)
 	u16 w;
 	int quot = len % 4;
 
+	/* buffer is already in 'usb data order', which is LE. */
+	/* When reading buffer as u16, we have to take care byte order */
+	/* doesn't get mixed up */
+
 	if ((unsigned long)dp2 & 1) {
 		/* not aligned */
 		for (; len > 1; len -= 2) {
@@ -131,12 +142,16 @@ static void read_ptddata_from_fifo(struct isp116x *isp116x, void *buf, int len)
 			*dp++ = w & 0xff;
 			*dp++ = (w >> 8) & 0xff;
 		}
+
 		if (len)
 			*dp = 0xff & isp116x_read_data16(isp116x);
 	} else {
 		/* aligned */
-		for (; len > 1; len -= 2)
-			*dp2++ = isp116x_raw_read_data16(isp116x);
+		for (; len > 1; len -= 2) {
+			/* Keep byte order! */
+			*dp2++ = le16_to_cpu(isp116x_raw_read_data16(isp116x));
+		}
+
 		if (len)
 			*(u8 *) dp2 = 0xff & isp116x_read_data16(isp116x);
 	}
@@ -228,7 +243,6 @@ static void preproc_atl_queue(struct isp116x *isp116x)
 				   struct urb, urb_list);
 		ptd = &ep->ptd;
 		len = ep->length;
-		spin_lock(&urb->lock);
 		ep->data = (unsigned char *)urb->transfer_buffer
 		    + urb->actual_length;
 
@@ -264,13 +278,67 @@ static void preproc_atl_queue(struct isp116x *isp116x)
 		    | PTD_EP(ep->epnum);
 		ptd->len = PTD_LEN(len) | PTD_DIR(dir);
 		ptd->faddr = PTD_FA(usb_pipedevice(urb->pipe));
-		spin_unlock(&urb->lock);
 		if (!ep->active) {
 			ptd->mps |= PTD_LAST_MSK;
 			isp116x->atl_last_dir = dir;
 		}
 		isp116x->atl_bufshrt = sizeof(struct ptd) + isp116x->atl_buflen;
 		isp116x->atl_buflen = isp116x->atl_bufshrt + ALIGN(len, 4);
+	}
+}
+
+/*
+  Take done or failed requests out of schedule. Give back
+  processed urbs.
+*/
+static void finish_request(struct isp116x *isp116x, struct isp116x_ep *ep,
+			   struct urb *urb, int status)
+__releases(isp116x->lock) __acquires(isp116x->lock)
+{
+	unsigned i;
+
+	ep->error_count = 0;
+
+	if (usb_pipecontrol(urb->pipe))
+		ep->nextpid = USB_PID_SETUP;
+
+	urb_dbg(urb, "Finish");
+
+	usb_hcd_unlink_urb_from_ep(isp116x_to_hcd(isp116x), urb);
+	spin_unlock(&isp116x->lock);
+	usb_hcd_giveback_urb(isp116x_to_hcd(isp116x), urb, status);
+	spin_lock(&isp116x->lock);
+
+	/* take idle endpoints out of the schedule */
+	if (!list_empty(&ep->hep->urb_list))
+		return;
+
+	/* async deschedule */
+	if (!list_empty(&ep->schedule)) {
+		list_del_init(&ep->schedule);
+		return;
+	}
+
+	/* periodic deschedule */
+	DBG("deschedule qh%d/%p branch %d\n", ep->period, ep, ep->branch);
+	for (i = ep->branch; i < PERIODIC_SIZE; i += ep->period) {
+		struct isp116x_ep *temp;
+		struct isp116x_ep **prev = &isp116x->periodic[i];
+
+		while (*prev && ((temp = *prev) != ep))
+			prev = &temp->next;
+		if (*prev)
+			*prev = ep->next;
+		isp116x->load[i] -= ep->load;
+	}
+	ep->branch = PERIODIC_SIZE;
+	isp116x_to_hcd(isp116x)->self.bandwidth_allocated -=
+	    ep->load / ep->period;
+
+	/* switch irq type? */
+	if (!--isp116x->periodic_count) {
+		isp116x->irqenb &= ~HCuPINT_SOF;
+		isp116x->irqenb |= HCuPINT_ATL;
 	}
 }
 
@@ -284,6 +352,7 @@ static void postproc_atl_queue(struct isp116x *isp116x)
 	struct usb_device *udev;
 	struct ptd *ptd;
 	int short_not_ok;
+	int status;
 	u8 cc;
 
 	for (ep = isp116x->atl_active; ep; ep = ep->active) {
@@ -294,7 +363,7 @@ static void postproc_atl_queue(struct isp116x *isp116x)
 		ptd = &ep->ptd;
 		cc = PTD_GET_CC(ptd);
 		short_not_ok = 1;
-		spin_lock(&urb->lock);
+		status = -EINPROGRESS;
 
 		/* Data underrun is special. For allowed underrun
 		   we clear the error and continue as normal. For
@@ -302,47 +371,36 @@ static void postproc_atl_queue(struct isp116x *isp116x)
 		   immediately while for control transfer,
 		   we do a STATUS stage. */
 		if (cc == TD_DATAUNDERRUN) {
-			if (!(urb->transfer_flags & URB_SHORT_NOT_OK)) {
-				DBG("Allowed data underrun\n");
+			if (!(urb->transfer_flags & URB_SHORT_NOT_OK) ||
+					usb_pipecontrol(urb->pipe)) {
+				DBG("Allowed or control data underrun\n");
 				cc = TD_CC_NOERROR;
 				short_not_ok = 0;
 			} else {
 				ep->error_count = 1;
-				if (usb_pipecontrol(urb->pipe))
-					ep->nextpid = USB_PID_ACK;
-				else
-					usb_settoggle(udev, ep->epnum,
-						      ep->nextpid ==
-						      USB_PID_OUT,
-						      PTD_GET_TOGGLE(ptd));
+				usb_settoggle(udev, ep->epnum,
+					      ep->nextpid == USB_PID_OUT,
+					      PTD_GET_TOGGLE(ptd));
 				urb->actual_length += PTD_GET_COUNT(ptd);
-				urb->status = cc_to_error[TD_DATAUNDERRUN];
-				spin_unlock(&urb->lock);
-				continue;
+				status = cc_to_error[TD_DATAUNDERRUN];
+				goto done;
 			}
 		}
-		/* Keep underrun error through the STATUS stage */
-		if (urb->status == cc_to_error[TD_DATAUNDERRUN])
-			cc = TD_DATAUNDERRUN;
 
 		if (cc != TD_CC_NOERROR && cc != TD_NOTACCESSED
 		    && (++ep->error_count >= 3 || cc == TD_CC_STALL
 			|| cc == TD_DATAOVERRUN)) {
-			if (urb->status == -EINPROGRESS)
-				urb->status = cc_to_error[cc];
+			status = cc_to_error[cc];
 			if (ep->nextpid == USB_PID_ACK)
 				ep->nextpid = 0;
-			spin_unlock(&urb->lock);
-			continue;
+			goto done;
 		}
 		/* According to usb spec, zero-length Int transfer signals
 		   finishing of the urb. Hey, does this apply only
 		   for IN endpoints? */
 		if (usb_pipeint(urb->pipe) && !PTD_GET_LEN(ptd)) {
-			if (urb->status == -EINPROGRESS)
-				urb->status = 0;
-			spin_unlock(&urb->lock);
-			continue;
+			status = 0;
+			goto done;
 		}
 
 		/* Relax after previously failed, but later succeeded
@@ -381,8 +439,8 @@ static void postproc_atl_queue(struct isp116x *isp116x)
 			/* All data for this URB is transferred, let's finish */
 			if (usb_pipecontrol(urb->pipe))
 				ep->nextpid = USB_PID_ACK;
-			else if (urb->status == -EINPROGRESS)
-				urb->status = 0;
+			else
+				status = 0;
 			break;
 		case USB_PID_SETUP:
 			if (PTD_GET_ACTIVE(ptd)
@@ -402,69 +460,16 @@ static void postproc_atl_queue(struct isp116x *isp116x)
 			if (PTD_GET_ACTIVE(ptd)
 			    || (cc != TD_CC_NOERROR && cc < 0x0E))
 				break;
-			if (urb->status == -EINPROGRESS)
-				urb->status = 0;
+			status = 0;
 			ep->nextpid = 0;
 			break;
 		default:
 			BUG();
 		}
-		spin_unlock(&urb->lock);
-	}
-}
 
-/*
-  Take done or failed requests out of schedule. Give back
-  processed urbs.
-*/
-static void finish_request(struct isp116x *isp116x, struct isp116x_ep *ep,
-			   struct urb *urb)
-__releases(isp116x->lock) __acquires(isp116x->lock)
-{
-	unsigned i;
-
-	urb->hcpriv = NULL;
-	ep->error_count = 0;
-
-	if (usb_pipecontrol(urb->pipe))
-		ep->nextpid = USB_PID_SETUP;
-
-	urb_dbg(urb, "Finish");
-
-	spin_unlock(&isp116x->lock);
-	usb_hcd_giveback_urb(isp116x_to_hcd(isp116x), urb);
-	spin_lock(&isp116x->lock);
-
-	/* take idle endpoints out of the schedule */
-	if (!list_empty(&ep->hep->urb_list))
-		return;
-
-	/* async deschedule */
-	if (!list_empty(&ep->schedule)) {
-		list_del_init(&ep->schedule);
-		return;
-	}
-
-	/* periodic deschedule */
-	DBG("deschedule qh%d/%p branch %d\n", ep->period, ep, ep->branch);
-	for (i = ep->branch; i < PERIODIC_SIZE; i += ep->period) {
-		struct isp116x_ep *temp;
-		struct isp116x_ep **prev = &isp116x->periodic[i];
-
-		while (*prev && ((temp = *prev) != ep))
-			prev = &temp->next;
-		if (*prev)
-			*prev = ep->next;
-		isp116x->load[i] -= ep->load;
-	}
-	ep->branch = PERIODIC_SIZE;
-	isp116x_to_hcd(isp116x)->self.bandwidth_allocated -=
-	    ep->load / ep->period;
-
-	/* switch irq type? */
-	if (!--isp116x->periodic_count) {
-		isp116x->irqenb &= ~HCuPINT_SOF;
-		isp116x->irqenb |= HCuPINT_ATL;
+ done:
+		if (status != -EINPROGRESS || urb->unlinked)
+			finish_request(isp116x, ep, urb, status);
 	}
 }
 
@@ -570,9 +575,6 @@ static void start_atl_transfers(struct isp116x *isp116x)
 */
 static void finish_atl_transfers(struct isp116x *isp116x)
 {
-	struct isp116x_ep *ep;
-	struct urb *urb;
-
 	if (!isp116x->atl_active)
 		return;
 	/* Fifo not ready? */
@@ -582,16 +584,6 @@ static void finish_atl_transfers(struct isp116x *isp116x)
 	atomic_inc(&isp116x->atl_finishing);
 	unpack_fifo(isp116x);
 	postproc_atl_queue(isp116x);
-	for (ep = isp116x->atl_active; ep; ep = ep->active) {
-		urb =
-		    container_of(ep->hep->urb_list.next, struct urb, urb_list);
-		/* USB_PID_ACK check here avoids finishing of
-		   control transfers, for which TD_DATAUNDERRUN
-		   occured, while URB_SHORT_NOT_OK was set */
-		if (urb && urb->status != -EINPROGRESS
-		    && ep->nextpid != USB_PID_ACK)
-			finish_request(isp116x, ep, urb);
-	}
 	atomic_dec(&isp116x->atl_finishing);
 }
 
@@ -619,6 +611,7 @@ static irqreturn_t isp116x_irq(struct usb_hcd *hcd)
 			/* IRQ's are off, we do no DMA,
 			   perfectly ready to die ... */
 			hcd->state = HC_STATE_HALT;
+			usb_hc_died(hcd);
 			ret = IRQ_HANDLED;
 			goto done;
 		}
@@ -685,7 +678,7 @@ static int balance(struct isp116x *isp116x, u16 period, u16 load)
 /*-----------------------------------------------------------------*/
 
 static int isp116x_urb_enqueue(struct usb_hcd *hcd,
-			       struct usb_host_endpoint *hep, struct urb *urb,
+			       struct urb *urb,
 			       gfp_t mem_flags)
 {
 	struct isp116x *isp116x = hcd_to_isp116x(hcd);
@@ -694,6 +687,7 @@ static int isp116x_urb_enqueue(struct usb_hcd *hcd,
 	int is_out = !usb_pipein(pipe);
 	int type = usb_pipetype(pipe);
 	int epnum = usb_pipeendpoint(pipe);
+	struct usb_host_endpoint *hep = urb->ep;
 	struct isp116x_ep *ep = NULL;
 	unsigned long flags;
 	int i;
@@ -717,7 +711,12 @@ static int isp116x_urb_enqueue(struct usb_hcd *hcd,
 	if (!HC_IS_RUNNING(hcd->state)) {
 		kfree(ep);
 		ret = -ENODEV;
-		goto fail;
+		goto fail_not_linked;
+	}
+	ret = usb_hcd_link_urb_to_ep(hcd, urb);
+	if (ret) {
+		kfree(ep);
+		goto fail_not_linked;
 	}
 
 	if (hep->hcpriv)
@@ -774,7 +773,7 @@ static int isp116x_urb_enqueue(struct usb_hcd *hcd,
 		break;
 	case PIPE_INTERRUPT:
 		urb->interval = ep->period;
-		ep->length = min((int)ep->maxpacket,
+		ep->length = min_t(u32, ep->maxpacket,
 				 urb->transfer_buffer_length);
 
 		/* urb submitted for already existing endpoint */
@@ -820,19 +819,13 @@ static int isp116x_urb_enqueue(struct usb_hcd *hcd,
 		}
 	}
 
-	/* in case of unlink-during-submit */
-	spin_lock(&urb->lock);
-	if (urb->status != -EINPROGRESS) {
-		spin_unlock(&urb->lock);
-		finish_request(isp116x, ep, urb);
-		ret = 0;
-		goto fail;
-	}
 	urb->hcpriv = hep;
-	spin_unlock(&urb->lock);
 	start_atl_transfers(isp116x);
 
       fail:
+	if (ret)
+		usb_hcd_unlink_urb_from_ep(hcd, urb);
+      fail_not_linked:
 	spin_unlock_irqrestore(&isp116x->lock, flags);
 	return ret;
 }
@@ -840,20 +833,21 @@ static int isp116x_urb_enqueue(struct usb_hcd *hcd,
 /*
    Dequeue URBs.
 */
-static int isp116x_urb_dequeue(struct usb_hcd *hcd, struct urb *urb)
+static int isp116x_urb_dequeue(struct usb_hcd *hcd, struct urb *urb,
+		int status)
 {
 	struct isp116x *isp116x = hcd_to_isp116x(hcd);
 	struct usb_host_endpoint *hep;
 	struct isp116x_ep *ep, *ep_act;
 	unsigned long flags;
+	int rc;
 
 	spin_lock_irqsave(&isp116x->lock, flags);
+	rc = usb_hcd_check_unlink_urb(hcd, urb, status);
+	if (rc)
+		goto done;
+
 	hep = urb->hcpriv;
-	/* URB already unlinked (or never linked)? */
-	if (!hep) {
-		spin_unlock_irqrestore(&isp116x->lock, flags);
-		return 0;
-	}
 	ep = hep->hcpriv;
 	WARN_ON(hep != ep->hep);
 
@@ -870,10 +864,10 @@ static int isp116x_urb_dequeue(struct usb_hcd *hcd, struct urb *urb)
 			}
 
 	if (urb)
-		finish_request(isp116x, ep, urb);
-
+		finish_request(isp116x, ep, urb, status);
+ done:
 	spin_unlock_irqrestore(&isp116x->lock, flags);
-	return 0;
+	return rc;
 }
 
 static void isp116x_endpoint_disable(struct usb_hcd *hcd,
@@ -889,7 +883,7 @@ static void isp116x_endpoint_disable(struct usb_hcd *hcd,
 	for (i = 0; i < 100 && !list_empty(&hep->urb_list); i++)
 		msleep(3);
 	if (!list_empty(&hep->urb_list))
-		WARN("ep %p not empty?\n", ep);
+		WARNING("ep %p not empty?\n", ep);
 
 	kfree(ep);
 	hep->hcpriv = NULL;
@@ -933,14 +927,12 @@ static int isp116x_hub_status_data(struct usb_hcd *hcd, char *buf)
 		buf[0] = 0;
 
 	for (i = 0; i < ports; i++) {
-		u32 status = isp116x->rhport[i] =
-		    isp116x_read_reg32(isp116x, i ? HCRHPORT2 : HCRHPORT1);
+		u32 status = isp116x_read_reg32(isp116x, i ? HCRHPORT2 : HCRHPORT1);
 
 		if (status & (RH_PS_CSC | RH_PS_PESC | RH_PS_PSSC
 			      | RH_PS_OCIC | RH_PS_PRSC)) {
 			changed = 1;
 			buf[0] |= 1 << (i + 1);
-			continue;
 		}
 	}
 	spin_unlock_irqrestore(&isp116x->lock, flags);
@@ -959,9 +951,9 @@ static void isp116x_hub_descriptor(struct isp116x *isp116x,
 	/* Power switching, device type, overcurrent. */
 	desc->wHubCharacteristics = cpu_to_le16((u16) ((reg >> 8) & 0x1f));
 	desc->bPwrOn2PwrGood = (u8) ((reg >> 24) & 0xff);
-	/* two bitmaps:  ports removable, and legacy PortPwrCtrlMask */
-	desc->bitmap[0] = 0;
-	desc->bitmap[1] = ~0;
+	/* ports removable, and legacy PortPwrCtrlMask */
+	desc->u.hs.DeviceRemovable[0] = 0;
+	desc->u.hs.DeviceRemovable[1] = ~0;
 }
 
 /* Perform reset of a given port.
@@ -1054,7 +1046,9 @@ static int isp116x_hub_control(struct usb_hcd *hcd,
 		DBG("GetPortStatus\n");
 		if (!wIndex || wIndex > ports)
 			goto error;
-		tmp = isp116x->rhport[--wIndex];
+		spin_lock_irqsave(&isp116x->lock, flags);
+		tmp = isp116x_read_reg32(isp116x, (--wIndex) ? HCRHPORT2 : HCRHPORT1);
+		spin_unlock_irqrestore(&isp116x->lock, flags);
 		*(__le32 *) buf = cpu_to_le32(tmp);
 		DBG("GetPortStatus: port[%d]  %08x\n", wIndex + 1, tmp);
 		break;
@@ -1103,8 +1097,6 @@ static int isp116x_hub_control(struct usb_hcd *hcd,
 		spin_lock_irqsave(&isp116x->lock, flags);
 		isp116x_write_reg32(isp116x, wIndex
 				    ? HCRHPORT2 : HCRHPORT1, tmp);
-		isp116x->rhport[wIndex] =
-		    isp116x_read_reg32(isp116x, wIndex ? HCRHPORT2 : HCRHPORT1);
 		spin_unlock_irqrestore(&isp116x->lock, flags);
 		break;
 	case SetPortFeature:
@@ -1118,24 +1110,22 @@ static int isp116x_hub_control(struct usb_hcd *hcd,
 			spin_lock_irqsave(&isp116x->lock, flags);
 			isp116x_write_reg32(isp116x, wIndex
 					    ? HCRHPORT2 : HCRHPORT1, RH_PS_PSS);
+			spin_unlock_irqrestore(&isp116x->lock, flags);
 			break;
 		case USB_PORT_FEAT_POWER:
 			DBG("USB_PORT_FEAT_POWER\n");
 			spin_lock_irqsave(&isp116x->lock, flags);
 			isp116x_write_reg32(isp116x, wIndex
 					    ? HCRHPORT2 : HCRHPORT1, RH_PS_PPS);
+			spin_unlock_irqrestore(&isp116x->lock, flags);
 			break;
 		case USB_PORT_FEAT_RESET:
 			DBG("USB_PORT_FEAT_RESET\n");
 			root_port_reset(isp116x, wIndex);
-			spin_lock_irqsave(&isp116x->lock, flags);
 			break;
 		default:
 			goto error;
 		}
-		isp116x->rhport[wIndex] =
-		    isp116x_read_reg32(isp116x, wIndex ? HCRHPORT2 : HCRHPORT1);
-		spin_unlock_irqrestore(&isp116x->lock, flags);
 		break;
 
 	default:
@@ -1426,7 +1416,7 @@ static int isp116x_bus_suspend(struct usb_hcd *hcd)
 		spin_unlock_irqrestore(&isp116x->lock, flags);
 		val &= (~HCCONTROL_HCFS & ~HCCONTROL_RWE);
 		val |= HCCONTROL_USB_SUSPEND;
-		if (device_may_wakeup(&hcd->self.root_hub->dev))
+		if (hcd->self.root_hub->do_remote_wakeup)
 			val |= HCCONTROL_RWE;
 		/* Wait for usb transfers to finish */
 		msleep(2);
@@ -1468,11 +1458,6 @@ static int isp116x_bus_resume(struct usb_hcd *hcd)
 		break;
 	case HCCONTROL_USB_OPER:
 		spin_unlock_irq(&isp116x->lock);
-		/* Without setting power_state here the
-		   SUSPENDED state won't be removed from
-		   sysfs/usbN/power.state as a response to remote
-		   wakeup. Maybe in the future. */
-		hcd->self.root_hub->dev.power.power_state = PMSG_ON;
 		return 0;
 	default:
 		/* HCCONTROL_USB_RESET: this may happen, when during
@@ -1486,7 +1471,6 @@ static int isp116x_bus_resume(struct usb_hcd *hcd)
 		if ((isp116x->rhdesca & RH_A_NDP) == 2)
 			isp116x_hub_control(hcd, SetPortFeature,
 					    USB_PORT_FEAT_POWER, 2, NULL, 0);
-		hcd->self.root_hub->dev.power.power_state = PMSG_ON;
 		return 0;
 	}
 
@@ -1512,8 +1496,6 @@ static int isp116x_bus_resume(struct usb_hcd *hcd)
 	isp116x_write_reg32(isp116x, HCCONTROL,
 			    (val & ~HCCONTROL_HCFS) | HCCONTROL_USB_OPER);
 	spin_unlock_irq(&isp116x->lock);
-	/* see analogous comment above */
-	hcd->self.root_hub->dev.power.power_state = PMSG_ON;
 	hcd->state = HC_STATE_RUNNING;
 
 	return 0;
@@ -1575,17 +1557,19 @@ static int isp116x_remove(struct platform_device *pdev)
 	return 0;
 }
 
-#define resource_len(r) (((r)->end - (r)->start) + 1)
-
-static int __devinit isp116x_probe(struct platform_device *pdev)
+static int isp116x_probe(struct platform_device *pdev)
 {
 	struct usb_hcd *hcd;
 	struct isp116x *isp116x;
-	struct resource *addr, *data;
+	struct resource *addr, *data, *ires;
 	void __iomem *addr_reg;
 	void __iomem *data_reg;
 	int irq;
 	int ret = 0;
+	unsigned long irqflags;
+
+	if (usb_disabled())
+		return -ENODEV;
 
 	if (pdev->num_resources < 3) {
 		ret = -ENODEV;
@@ -1594,11 +1578,15 @@ static int __devinit isp116x_probe(struct platform_device *pdev)
 
 	data = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	addr = platform_get_resource(pdev, IORESOURCE_MEM, 1);
-	irq = platform_get_irq(pdev, 0);
-	if (!addr || !data || irq < 0) {
+	ires = platform_get_resource(pdev, IORESOURCE_IRQ, 0);
+
+	if (!addr || !data || !ires) {
 		ret = -ENODEV;
 		goto err1;
 	}
+
+	irq = ires->start;
+	irqflags = ires->flags & IRQF_TRIGGER_MASK;
 
 	if (pdev->dev.dma_mask) {
 		DBG("DMA not supported\n");
@@ -1610,7 +1598,7 @@ static int __devinit isp116x_probe(struct platform_device *pdev)
 		ret = -EBUSY;
 		goto err1;
 	}
-	addr_reg = ioremap(addr->start, resource_len(addr));
+	addr_reg = ioremap(addr->start, resource_size(addr));
 	if (addr_reg == NULL) {
 		ret = -ENOMEM;
 		goto err2;
@@ -1619,14 +1607,14 @@ static int __devinit isp116x_probe(struct platform_device *pdev)
 		ret = -EBUSY;
 		goto err3;
 	}
-	data_reg = ioremap(data->start, resource_len(data));
+	data_reg = ioremap(data->start, resource_size(data));
 	if (data_reg == NULL) {
 		ret = -ENOMEM;
 		goto err4;
 	}
 
 	/* allocate and initialize hcd */
-	hcd = usb_create_hcd(&isp116x_hc_driver, &pdev->dev, pdev->dev.bus_id);
+	hcd = usb_create_hcd(&isp116x_hc_driver, &pdev->dev, dev_name(&pdev->dev));
 	if (!hcd) {
 		ret = -ENOMEM;
 		goto err5;
@@ -1653,7 +1641,7 @@ static int __devinit isp116x_probe(struct platform_device *pdev)
 		goto err6;
 	}
 
-	ret = usb_add_hcd(hcd, irq, IRQF_DISABLED);
+	ret = usb_add_hcd(hcd, irq, irqflags);
 	if (ret)
 		goto err6;
 
@@ -1689,7 +1677,6 @@ static int __devinit isp116x_probe(struct platform_device *pdev)
 static int isp116x_suspend(struct platform_device *dev, pm_message_t state)
 {
 	VDBG("%s: state %x\n", __func__, state.event);
-	dev->dev.power.power_state = state;
 	return 0;
 }
 
@@ -1698,8 +1685,7 @@ static int isp116x_suspend(struct platform_device *dev, pm_message_t state)
 */
 static int isp116x_resume(struct platform_device *dev)
 {
-	VDBG("%s:  state %x\n", __func__, dev->power.power_state.event);
-	dev->dev.power.power_state = PMSG_ON;
+	VDBG("%s\n", __func__);
 	return 0;
 }
 
@@ -1710,32 +1696,18 @@ static int isp116x_resume(struct platform_device *dev)
 
 #endif
 
+/* work with hotplug and coldplug */
+MODULE_ALIAS("platform:isp116x-hcd");
+
 static struct platform_driver isp116x_driver = {
 	.probe = isp116x_probe,
 	.remove = isp116x_remove,
 	.suspend = isp116x_suspend,
 	.resume = isp116x_resume,
 	.driver = {
-		   .name = (char *)hcd_name,
-		   },
+		.name = (char *)hcd_name,
+		.owner	= THIS_MODULE,
+	},
 };
 
-/*-----------------------------------------------------------------*/
-
-static int __init isp116x_init(void)
-{
-	if (usb_disabled())
-		return -ENODEV;
-
-	INFO("driver %s, %s\n", hcd_name, DRIVER_VERSION);
-	return platform_driver_register(&isp116x_driver);
-}
-
-module_init(isp116x_init);
-
-static void __exit isp116x_cleanup(void)
-{
-	platform_driver_unregister(&isp116x_driver);
-}
-
-module_exit(isp116x_cleanup);
+module_platform_driver(isp116x_driver);

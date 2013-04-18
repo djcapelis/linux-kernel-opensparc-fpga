@@ -35,6 +35,8 @@ config PREEMPT_VOLUNTARY
 
 config PREEMPT
 	bool "Preemptible Kernel (Low-Latency Desktop)"
+	select PREEMPT_COUNT
+	select UNINLINE_SPIN_UNLOCK if !ARCH_INLINE_SPIN_UNLOCK
 	help
 	  This option reduces the latency of the kernel by making
 	  all kernel code (that is not executing in a critical section)
@@ -52,14 +54,5 @@ config PREEMPT
 
 endchoice
 
-config PREEMPT_BKL
-	bool "Preempt The Big Kernel Lock"
-	depends on SMP || PREEMPT
-	default y
-	help
-	  This option reduces the latency of the kernel by making the
-	  big kernel lock preemptible.
-
-	  Say Y here if you are building a kernel for a desktop system.
-	  Say N if you are unsure.
-
+config PREEMPT_COUNT
+       bool

@@ -25,86 +25,168 @@
 
 #include <linux/fs.h>
 #include <linux/types.h>
-#include <linux/slab.h>
 #include <linux/highmem.h>
 #include <linux/pagemap.h>
 #include <linux/uio.h>
 #include <linux/signal.h>
 #include <linux/rbtree.h>
 
-#define MLOG_MASK_PREFIX ML_FILE_IO
 #include <cluster/masklog.h>
 
 #include "ocfs2.h"
 
+#include "aops.h"
 #include "dlmglue.h"
 #include "file.h"
 #include "inode.h"
 #include "mmap.h"
+#include "super.h"
+#include "ocfs2_trace.h"
 
-static struct page *ocfs2_nopage(struct vm_area_struct * area,
-				 unsigned long address,
-				 int *type)
+
+static int ocfs2_fault(struct vm_area_struct *area, struct vm_fault *vmf)
 {
-	struct page *page = NOPAGE_SIGBUS;
-	sigset_t blocked, oldset;
+	sigset_t oldset;
 	int ret;
 
-	mlog_entry("(area=%p, address=%lu, type=%p)\n", area, address,
-		   type);
+	ocfs2_block_signals(&oldset);
+	ret = filemap_fault(area, vmf);
+	ocfs2_unblock_signals(&oldset);
 
-	/* The best way to deal with signals in this path is
-	 * to block them upfront, rather than allowing the
-	 * locking paths to return -ERESTARTSYS. */
-	sigfillset(&blocked);
+	trace_ocfs2_fault(OCFS2_I(area->vm_file->f_mapping->host)->ip_blkno,
+			  area, vmf->page, vmf->pgoff);
+	return ret;
+}
 
-	/* We should technically never get a bad ret return
-	 * from sigprocmask */
-	ret = sigprocmask(SIG_BLOCK, &blocked, &oldset);
+static int __ocfs2_page_mkwrite(struct file *file, struct buffer_head *di_bh,
+				struct page *page)
+{
+	int ret = VM_FAULT_NOPAGE;
+	struct inode *inode = file->f_path.dentry->d_inode;
+	struct address_space *mapping = inode->i_mapping;
+	loff_t pos = page_offset(page);
+	unsigned int len = PAGE_CACHE_SIZE;
+	pgoff_t last_index;
+	struct page *locked_page = NULL;
+	void *fsdata;
+	loff_t size = i_size_read(inode);
+
+	last_index = (size - 1) >> PAGE_CACHE_SHIFT;
+
+	/*
+	 * There are cases that lead to the page no longer bebongs to the
+	 * mapping.
+	 * 1) pagecache truncates locally due to memory pressure.
+	 * 2) pagecache truncates when another is taking EX lock against 
+	 * inode lock. see ocfs2_data_convert_worker.
+	 * 
+	 * The i_size check doesn't catch the case where nodes truncated and
+	 * then re-extended the file. We'll re-check the page mapping after
+	 * taking the page lock inside of ocfs2_write_begin_nolock().
+	 *
+	 * Let VM retry with these cases.
+	 */
+	if ((page->mapping != inode->i_mapping) ||
+	    (!PageUptodate(page)) ||
+	    (page_offset(page) >= size))
+		goto out;
+
+	/*
+	 * Call ocfs2_write_begin() and ocfs2_write_end() to take
+	 * advantage of the allocation code there. We pass a write
+	 * length of the whole page (chopped to i_size) to make sure
+	 * the whole thing is allocated.
+	 *
+	 * Since we know the page is up to date, we don't have to
+	 * worry about ocfs2_write_begin() skipping some buffer reads
+	 * because the "write" would invalidate their data.
+	 */
+	if (page->index == last_index)
+		len = ((size - 1) & ~PAGE_CACHE_MASK) + 1;
+
+	ret = ocfs2_write_begin_nolock(file, mapping, pos, len, 0, &locked_page,
+				       &fsdata, di_bh, page);
+	if (ret) {
+		if (ret != -ENOSPC)
+			mlog_errno(ret);
+		if (ret == -ENOMEM)
+			ret = VM_FAULT_OOM;
+		else
+			ret = VM_FAULT_SIGBUS;
+		goto out;
+	}
+
+	if (!locked_page) {
+		ret = VM_FAULT_NOPAGE;
+		goto out;
+	}
+	ret = ocfs2_write_end_nolock(mapping, pos, len, len, locked_page,
+				     fsdata);
+	BUG_ON(ret != len);
+	ret = VM_FAULT_LOCKED;
+out:
+	return ret;
+}
+
+static int ocfs2_page_mkwrite(struct vm_area_struct *vma, struct vm_fault *vmf)
+{
+	struct page *page = vmf->page;
+	struct inode *inode = vma->vm_file->f_path.dentry->d_inode;
+	struct buffer_head *di_bh = NULL;
+	sigset_t oldset;
+	int ret;
+
+	sb_start_pagefault(inode->i_sb);
+	ocfs2_block_signals(&oldset);
+
+	/*
+	 * The cluster locks taken will block a truncate from another
+	 * node. Taking the data lock will also ensure that we don't
+	 * attempt page truncation as part of a downconvert.
+	 */
+	ret = ocfs2_inode_lock(inode, &di_bh, 1);
 	if (ret < 0) {
 		mlog_errno(ret);
 		goto out;
 	}
 
-	page = filemap_nopage(area, address, type);
+	/*
+	 * The alloc sem should be enough to serialize with
+	 * ocfs2_truncate_file() changing i_size as well as any thread
+	 * modifying the inode btree.
+	 */
+	down_write(&OCFS2_I(inode)->ip_alloc_sem);
 
-	ret = sigprocmask(SIG_SETMASK, &oldset, NULL);
-	if (ret < 0)
-		mlog_errno(ret);
+	ret = __ocfs2_page_mkwrite(vma->vm_file, di_bh, page);
+
+	up_write(&OCFS2_I(inode)->ip_alloc_sem);
+
+	brelse(di_bh);
+	ocfs2_inode_unlock(inode, 1);
+
 out:
-	mlog_exit_ptr(page);
-	return page;
+	ocfs2_unblock_signals(&oldset);
+	sb_end_pagefault(inode->i_sb);
+	return ret;
 }
 
-static struct vm_operations_struct ocfs2_file_vm_ops = {
-	.nopage = ocfs2_nopage,
+static const struct vm_operations_struct ocfs2_file_vm_ops = {
+	.fault		= ocfs2_fault,
+	.page_mkwrite	= ocfs2_page_mkwrite,
+	.remap_pages	= generic_file_remap_pages,
 };
 
 int ocfs2_mmap(struct file *file, struct vm_area_struct *vma)
 {
 	int ret = 0, lock_level = 0;
-	struct ocfs2_super *osb = OCFS2_SB(file->f_dentry->d_inode->i_sb);
 
-	/*
-	 * Only support shared writeable mmap for local mounts which
-	 * don't know about holes.
-	 */
-	if ((!ocfs2_mount_local(osb) || ocfs2_sparse_alloc(osb)) &&
-	    ((vma->vm_flags & VM_SHARED) || (vma->vm_flags & VM_MAYSHARE)) &&
-	    ((vma->vm_flags & VM_WRITE) || (vma->vm_flags & VM_MAYWRITE))) {
-		mlog(0, "disallow shared writable mmaps %lx\n", vma->vm_flags);
-		/* This is -EINVAL because generic_file_readonly_mmap
-		 * returns it in a similar situation. */
-		return -EINVAL;
-	}
-
-	ret = ocfs2_meta_lock_atime(file->f_dentry->d_inode,
+	ret = ocfs2_inode_lock_atime(file->f_dentry->d_inode,
 				    file->f_vfsmnt, &lock_level);
 	if (ret < 0) {
 		mlog_errno(ret);
 		goto out;
 	}
-	ocfs2_meta_unlock(file->f_dentry->d_inode, lock_level);
+	ocfs2_inode_unlock(file->f_dentry->d_inode, lock_level);
 out:
 	vma->vm_ops = &ocfs2_file_vm_ops;
 	return 0;

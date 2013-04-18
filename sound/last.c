@@ -1,6 +1,6 @@
 /*
  *  Advanced Linux Sound Architecture
- *  Copyright (c) by Jaroslav Kysela <perex@suse.cz>
+ *  Copyright (c) by Jaroslav Kysela <perex@perex.cz>
  *
  *
  *   This program is free software; you can redistribute it and/or modify
@@ -19,8 +19,6 @@
  *
  */
 
-#define SNDRV_MAIN_OBJECT_FILE
-#include <sound/driver.h>
 #include <linux/init.h>
 #include <sound/core.h>
 
@@ -39,4 +37,4 @@ static int __init alsa_sound_last_init(void)
 	return 0;
 }
 
-__initcall(alsa_sound_last_init);
+late_initcall_sync(alsa_sound_last_init);

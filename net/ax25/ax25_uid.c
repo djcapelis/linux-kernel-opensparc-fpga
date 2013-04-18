@@ -18,6 +18,7 @@
 #include <linux/sockios.h>
 #include <linux/net.h>
 #include <linux/spinlock.h>
+#include <linux/slab.h>
 #include <net/ax25.h>
 #include <linux/inet.h>
 #include <linux/netdevice.h>
@@ -25,7 +26,6 @@
 #include <linux/skbuff.h>
 #include <net/sock.h>
 #include <asm/uaccess.h>
-#include <asm/system.h>
 #include <linux/fcntl.h>
 #include <linux/mm.h>
 #include <linux/interrupt.h>
@@ -36,6 +36,7 @@
 #include <linux/stat.h>
 #include <linux/netfilter.h>
 #include <linux/sysctl.h>
+#include <linux/export.h>
 #include <net/ip.h>
 #include <net/arp.h>
 
@@ -43,21 +44,21 @@
  *	Callsign/UID mapper. This is in kernel space for security on multi-amateur machines.
  */
 
-HLIST_HEAD(ax25_uid_list);
+static HLIST_HEAD(ax25_uid_list);
 static DEFINE_RWLOCK(ax25_uid_lock);
 
-int ax25_uid_policy = 0;
+int ax25_uid_policy;
 
 EXPORT_SYMBOL(ax25_uid_policy);
 
-ax25_uid_assoc *ax25_findbyuid(uid_t uid)
+ax25_uid_assoc *ax25_findbyuid(kuid_t uid)
 {
 	ax25_uid_assoc *ax25_uid, *res = NULL;
 	struct hlist_node *node;
 
 	read_lock(&ax25_uid_lock);
 	ax25_uid_for_each(ax25_uid, node, &ax25_uid_list) {
-		if (ax25_uid->uid == uid) {
+		if (uid_eq(ax25_uid->uid, uid)) {
 			ax25_uid_hold(ax25_uid);
 			res = ax25_uid;
 			break;
@@ -83,7 +84,7 @@ int ax25_uid_ioctl(int cmd, struct sockaddr_ax25 *sax)
 		read_lock(&ax25_uid_lock);
 		ax25_uid_for_each(ax25_uid, node, &ax25_uid_list) {
 			if (ax25cmp(&sax->sax25_call, &ax25_uid->call) == 0) {
-				res = ax25_uid->uid;
+				res = from_kuid_munged(current_user_ns(), ax25_uid->uid);
 				break;
 			}
 		}
@@ -92,9 +93,14 @@ int ax25_uid_ioctl(int cmd, struct sockaddr_ax25 *sax)
 		return res;
 
 	case SIOCAX25ADDUID:
+	{
+		kuid_t sax25_kuid;
 		if (!capable(CAP_NET_ADMIN))
 			return -EPERM;
-		user = ax25_findbyuid(sax->sax25_uid);
+		sax25_kuid = make_kuid(current_user_ns(), sax->sax25_uid);
+		if (!uid_valid(sax25_kuid))
+			return -EINVAL;
+		user = ax25_findbyuid(sax25_kuid);
 		if (user) {
 			ax25_uid_put(user);
 			return -EEXIST;
@@ -105,7 +111,7 @@ int ax25_uid_ioctl(int cmd, struct sockaddr_ax25 *sax)
 			return -ENOMEM;
 
 		atomic_set(&ax25_uid->refcount, 1);
-		ax25_uid->uid  = sax->sax25_uid;
+		ax25_uid->uid  = sax25_kuid;
 		ax25_uid->call = sax->sax25_call;
 
 		write_lock(&ax25_uid_lock);
@@ -113,7 +119,7 @@ int ax25_uid_ioctl(int cmd, struct sockaddr_ax25 *sax)
 		write_unlock(&ax25_uid_lock);
 
 		return 0;
-
+	}
 	case SIOCAX25DELUID:
 		if (!capable(CAP_NET_ADMIN))
 			return -EPERM;
@@ -144,29 +150,19 @@ int ax25_uid_ioctl(int cmd, struct sockaddr_ax25 *sax)
 #ifdef CONFIG_PROC_FS
 
 static void *ax25_uid_seq_start(struct seq_file *seq, loff_t *pos)
+	__acquires(ax25_uid_lock)
 {
-	struct ax25_uid_assoc *pt;
-	struct hlist_node *node;
-	int i = 0;
-
 	read_lock(&ax25_uid_lock);
-	ax25_uid_for_each(pt, node, &ax25_uid_list) {
-		if (i == *pos)
-			return pt;
-		++i;
-	}
-	return NULL;
+	return seq_hlist_start_head(&ax25_uid_list, *pos);
 }
 
 static void *ax25_uid_seq_next(struct seq_file *seq, void *v, loff_t *pos)
 {
-	++*pos;
-
-	return hlist_entry(((ax25_uid_assoc *)v)->uid_node.next,
-			   ax25_uid_assoc, uid_node);
+	return seq_hlist_next(v, &ax25_uid_list, pos);
 }
 
 static void ax25_uid_seq_stop(struct seq_file *seq, void *v)
+	__releases(ax25_uid_lock)
 {
 	read_unlock(&ax25_uid_lock);
 }
@@ -178,14 +174,17 @@ static int ax25_uid_seq_show(struct seq_file *seq, void *v)
 	if (v == SEQ_START_TOKEN)
 		seq_printf(seq, "Policy: %d\n", ax25_uid_policy);
 	else {
-		struct ax25_uid_assoc *pt = v;
+		struct ax25_uid_assoc *pt;
 
-		seq_printf(seq, "%6d %s\n", pt->uid, ax2asc(buf, &pt->call));
+		pt = hlist_entry(v, struct ax25_uid_assoc, uid_node);
+		seq_printf(seq, "%6d %s\n",
+			from_kuid_munged(seq_user_ns(seq), pt->uid),
+			ax2asc(buf, &pt->call));
 	}
 	return 0;
 }
 
-static struct seq_operations ax25_uid_seqops = {
+static const struct seq_operations ax25_uid_seqops = {
 	.start = ax25_uid_seq_start,
 	.next = ax25_uid_seq_next,
 	.stop = ax25_uid_seq_stop,
@@ -216,9 +215,11 @@ void __exit ax25_uid_free(void)
 	struct hlist_node *node;
 
 	write_lock(&ax25_uid_lock);
+again:
 	ax25_uid_for_each(ax25_uid, node, &ax25_uid_list) {
 		hlist_del_init(&ax25_uid->uid_node);
 		ax25_uid_put(ax25_uid);
+		goto again;
 	}
 	write_unlock(&ax25_uid_lock);
 }

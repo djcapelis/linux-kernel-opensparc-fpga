@@ -28,12 +28,16 @@ case "${1}" in
 		file_ext=""
 		;;
 	targz-pkg)
-		compress="gzip -c9"
+		compress="gzip"
 		file_ext=".gz"
 		;;
 	tarbz2-pkg)
-		compress="bzip2 -c9"
+		compress="bzip2"
 		file_ext=".bz2"
+		;;
+	tarxz-pkg)
+		compress="xz"
+		file_ext=".xz"
 		;;
 	*)
 		echo "Unknown tarball target \"${1}\" requested, please add it to ${0}." >&2
@@ -69,11 +73,15 @@ cp -v -- "${objtree}/vmlinux" "${tmpdir}/boot/vmlinux-${KERNELRELEASE}"
 # Install arch-specific kernel image(s)
 #
 case "${ARCH}" in
-	i386|x86_64)
-		[ -f "${objtree}/arch/$ARCH/boot/bzImage" ] && cp -v -- "${objtree}/arch/$ARCH/boot/bzImage" "${tmpdir}/boot/vmlinuz-${KERNELRELEASE}"
+	x86|i386|x86_64)
+		[ -f "${objtree}/arch/x86/boot/bzImage" ] && cp -v -- "${objtree}/arch/x86/boot/bzImage" "${tmpdir}/boot/vmlinuz-${KERNELRELEASE}"
 		;;
 	alpha)
 		[ -f "${objtree}/arch/alpha/boot/vmlinux.gz" ] && cp -v -- "${objtree}/arch/alpha/boot/vmlinux.gz" "${tmpdir}/boot/vmlinuz-${KERNELRELEASE}"
+		;;
+	parisc*)
+		[ -f "${KBUILD_IMAGE}" ] && cp -v -- "${KBUILD_IMAGE}" "${tmpdir}/boot/vmlinux-${KERNELRELEASE}"
+		[ -f "${objtree}/lifimage" ] && cp -v -- "${objtree}/lifimage" "${tmpdir}/boot/lifimage-${KERNELRELEASE}"
 		;;
 	vax)
 		[ -f "${objtree}/vmlinux.SYS" ] && cp -v -- "${objtree}/vmlinux.SYS" "${tmpdir}/boot/vmlinux-${KERNELRELEASE}.SYS"
@@ -84,7 +92,7 @@ case "${ARCH}" in
 		echo "" >&2
 		echo '** ** **  WARNING  ** ** **' >&2
 		echo "" >&2
-		echo "Your architecture did not define any architecture-dependant files" >&2
+		echo "Your architecture did not define any architecture-dependent files" >&2
 		echo "to be placed into the tarball. Please add those to ${0} ..." >&2
 		echo "" >&2
 		sleep 5
@@ -97,7 +105,11 @@ esac
 #
 (
 	cd "${tmpdir}"
-	tar cf - . | ${compress} > "${tarball}${file_ext}"
+	opts=
+	if tar --owner=root --group=root --help >/dev/null 2>&1; then
+		opts="--owner=root --group=root"
+	fi
+	tar cf - boot/* lib/* $opts | ${compress} > "${tarball}${file_ext}"
 )
 
 echo "Tarball successfully created in ${tarball}${file_ext}"

@@ -11,15 +11,6 @@
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation; either version 2 of the License, or
  * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #include <linux/usb/net2280.h>
@@ -109,6 +100,7 @@ struct net2280_ep {
 						in_fifo_validate : 1,
 						out_overflow : 1,
 						stopped : 1,
+						wedged : 1,
 						is_in : 1,
 						is_iso : 1,
 						responded : 1;
@@ -272,7 +264,7 @@ static inline void net2280_led_shutdown (struct net2280 *dev)
 
 #define ERROR(dev,fmt,args...) \
 	xprintk(dev , KERN_ERR , fmt , ## args)
-#define WARN(dev,fmt,args...) \
+#define WARNING(dev,fmt,args...) \
 	xprintk(dev , KERN_WARNING , fmt , ## args)
 #define INFO(dev,fmt,args...) \
 	xprintk(dev , KERN_INFO , fmt , ## args)
@@ -299,7 +291,7 @@ static inline void assert_out_naking (struct net2280_ep *ep, const char *where)
 			&ep->regs->ep_rsp);
 	}
 }
-#define ASSERT_OUT_NAKING(ep) assert_out_naking(ep,__FUNCTION__)
+#define ASSERT_OUT_NAKING(ep) assert_out_naking(ep,__func__)
 #else
 #define ASSERT_OUT_NAKING(ep) do {} while (0)
 #endif

@@ -219,18 +219,9 @@ static void esp_reset_esp(struct esp *esp)
 	/* Now reset the ESP chip */
 	scsi_esp_cmd(esp, ESP_CMD_RC);
 	scsi_esp_cmd(esp, ESP_CMD_NULL | ESP_CMD_DMA);
+	if (esp->rev == FAST)
+		esp_write8(ESP_CONFIG2_FENAB, ESP_CFG2);
 	scsi_esp_cmd(esp, ESP_CMD_NULL | ESP_CMD_DMA);
-
-	/* Reload the configuration registers */
-	esp_write8(esp->cfact, ESP_CFACT);
-
-	esp->prev_stp = 0;
-	esp_write8(esp->prev_stp, ESP_STP);
-
-	esp->prev_soff = 0;
-	esp_write8(esp->prev_soff, ESP_SOFF);
-
-	esp_write8(esp->neg_defp, ESP_TIMEO);
 
 	/* This is the only point at which it is reliable to read
 	 * the ID-code for a fast ESP chip variants.
@@ -316,6 +307,17 @@ static void esp_reset_esp(struct esp *esp)
 		break;
 	}
 
+	/* Reload the configuration registers */
+	esp_write8(esp->cfact, ESP_CFACT);
+
+	esp->prev_stp = 0;
+	esp_write8(esp->prev_stp, ESP_STP);
+
+	esp->prev_soff = 0;
+	esp_write8(esp->prev_soff, ESP_SOFF);
+
+	esp_write8(esp->neg_defp, ESP_TIMEO);
+
 	/* Eat any bitrot in the chip */
 	esp_read8(ESP_INTRPT);
 	udelay(100);
@@ -324,17 +326,14 @@ static void esp_reset_esp(struct esp *esp)
 static void esp_map_dma(struct esp *esp, struct scsi_cmnd *cmd)
 {
 	struct esp_cmd_priv *spriv = ESP_CMD_PRIV(cmd);
-	struct scatterlist *sg = cmd->request_buffer;
+	struct scatterlist *sg = scsi_sglist(cmd);
 	int dir = cmd->sc_data_direction;
 	int total, i;
 
 	if (dir == DMA_NONE)
 		return;
 
-	BUG_ON(cmd->use_sg == 0);
-
-	spriv->u.num_sg = esp->ops->map_sg(esp, sg,
-					   cmd->use_sg, dir);
+	spriv->u.num_sg = esp->ops->map_sg(esp, sg, scsi_sg_count(cmd), dir);
 	spriv->cur_residue = sg_dma_len(sg);
 	spriv->cur_sg = sg;
 
@@ -407,8 +406,7 @@ static void esp_unmap_dma(struct esp *esp, struct scsi_cmnd *cmd)
 	if (dir == DMA_NONE)
 		return;
 
-	esp->ops->unmap_sg(esp, cmd->request_buffer,
-			   spriv->u.num_sg, dir);
+	esp->ops->unmap_sg(esp, scsi_sglist(cmd), spriv->u.num_sg, dir);
 }
 
 static void esp_save_pointers(struct esp *esp, struct esp_cmd_entry *ent)
@@ -710,8 +708,7 @@ static void esp_maybe_execute_command(struct esp *esp)
 	tp = &esp->target[tgt];
 	lp = dev->hostdata;
 
-	list_del(&ent->list);
-	list_add(&ent->list, &esp->active_cmds);
+	list_move(&ent->list, &esp->active_cmds);
 
 	esp->active_cmd = ent;
 
@@ -918,10 +915,10 @@ static void esp_event_queue_full(struct esp *esp, struct esp_cmd_entry *ent)
 	scsi_track_queue_full(dev, lp->num_tagged - 1);
 }
 
-static int esp_queuecommand(struct scsi_cmnd *cmd, void (*done)(struct scsi_cmnd *))
+static int esp_queuecommand_lck(struct scsi_cmnd *cmd, void (*done)(struct scsi_cmnd *))
 {
 	struct scsi_device *dev = cmd->device;
-	struct esp *esp = host_to_esp(dev->host);
+	struct esp *esp = shost_priv(dev->host);
 	struct esp_cmd_priv *spriv;
 	struct esp_cmd_entry *ent;
 
@@ -942,6 +939,8 @@ static int esp_queuecommand(struct scsi_cmnd *cmd, void (*done)(struct scsi_cmnd
 
 	return 0;
 }
+
+static DEF_SCSI_QCMD(esp_queuecommand)
 
 static int esp_check_gross_error(struct esp *esp)
 {
@@ -982,7 +981,7 @@ static int esp_check_spur_intr(struct esp *esp)
 			 */
 			if (!esp->ops->dma_error(esp)) {
 				printk(KERN_ERR PFX "esp%d: Spurious irq, "
-				       "sreg=%x.\n",
+				       "sreg=%02x.\n",
 				       esp->host->unique_id, esp->sreg);
 				return -1;
 			}
@@ -1001,7 +1000,7 @@ static int esp_check_spur_intr(struct esp *esp)
 
 static void esp_schedule_reset(struct esp *esp)
 {
-	esp_log_reset("ESP: esp_schedule_reset() from %p\n",
+	esp_log_reset("ESP: esp_schedule_reset() from %pf\n",
 		      __builtin_return_address(0));
 	esp->flags |= ESP_FLAG_RESETTING;
 	esp_event(esp, ESP_EVENT_RESET);
@@ -1059,7 +1058,7 @@ static struct esp_cmd_entry *esp_reconnect_with_tag(struct esp *esp,
 	esp->ops->send_dma_cmd(esp, esp->command_block_dma,
 			       2, 2, 1, ESP_CMD_DMA | ESP_CMD_TI);
 
-	/* ACK the msssage.  */
+	/* ACK the message.  */
 	scsi_esp_cmd(esp, ESP_CMD_MOK);
 
 	for (i = 0; i < ESP_RESELECT_TAG_LIMIT; i++) {
@@ -1244,8 +1243,7 @@ static int esp_finish_select(struct esp *esp)
 		/* Now that the state is unwound properly, put back onto
 		 * the issue queue.  This command is no longer active.
 		 */
-		list_del(&ent->list);
-		list_add(&ent->list, &esp->queued_cmds);
+		list_move(&ent->list, &esp->queued_cmds);
 		esp->active_cmd = NULL;
 
 		/* Return value ignored by caller, it directly invokes
@@ -1452,7 +1450,7 @@ static void esp_msgin_sdtr(struct esp *esp, struct esp_target_data *tp)
 		goto do_reject;
 
 	if (offset) {
-		int rounded_up, one_clock;
+		int one_clock;
 
 		if (period > esp->max_period) {
 			period = offset = 0;
@@ -1462,9 +1460,7 @@ static void esp_msgin_sdtr(struct esp *esp, struct esp_target_data *tp)
 			goto do_reject;
 
 		one_clock = esp->ccycle / 1000;
-		rounded_up = (period << 2);
-		rounded_up = (rounded_up + one_clock - 1) / one_clock;
-		stp = rounded_up;
+		stp = DIV_ROUND_UP(period << 2, one_clock);
 		if (stp && esp->rev >= FAS236) {
 			if (stp >= 50)
 				stp--;
@@ -1701,7 +1697,12 @@ again:
 		else
 			ent->flags &= ~ESP_CMD_FLAG_WRITE;
 
-		dma_len = esp_dma_length_limit(esp, dma_addr, dma_len);
+		if (esp->ops->dma_length_limit)
+			dma_len = esp->ops->dma_length_limit(esp, dma_addr,
+							     dma_len);
+		else
+			dma_len = esp_dma_length_limit(esp, dma_addr, dma_len);
+
 		esp->data_dma_len = dma_len;
 
 		if (!dma_len) {
@@ -1765,7 +1766,6 @@ again:
 		esp_advance_dma(esp, ent, cmd, bytes_sent);
 		esp_event(esp, ESP_EVENT_CHECK_PHASE);
 		goto again;
-		break;
 	}
 
 	case ESP_EVENT_STATUS: {
@@ -2030,8 +2030,8 @@ static void esp_reset_cleanup(struct esp *esp)
 		tp->flags |= ESP_TGT_CHECK_NEGO;
 
 		if (tp->starget)
-			starget_for_each_device(tp->starget, NULL,
-						esp_clear_hold);
+			__starget_for_each_device(tp->starget, NULL,
+						  esp_clear_hold);
 	}
 	esp->flags &= ~ESP_FLAG_RESETTING;
 }
@@ -2142,7 +2142,7 @@ irqreturn_t scsi_esp_intr(int irq, void *dev_id)
 }
 EXPORT_SYMBOL(scsi_esp_intr);
 
-static void __devinit esp_get_revision(struct esp *esp)
+static void esp_get_revision(struct esp *esp)
 {
 	u8 val;
 
@@ -2191,7 +2191,7 @@ static void __devinit esp_get_revision(struct esp *esp)
 	}
 }
 
-static void __devinit esp_init_swstate(struct esp *esp)
+static void esp_init_swstate(struct esp *esp)
 {
 	int i;
 
@@ -2237,9 +2237,9 @@ static void esp_bootup_reset(struct esp *esp)
 	esp_read8(ESP_INTRPT);
 }
 
-static void __devinit esp_set_clock_params(struct esp *esp)
+static void esp_set_clock_params(struct esp *esp)
 {
-	int fmhz;
+	int fhz;
 	u8 ccf;
 
 	/* This is getting messy but it has to be done correctly or else
@@ -2274,9 +2274,9 @@ static void __devinit esp_set_clock_params(struct esp *esp)
 	 *    This entails the smallest and largest sync period we could ever
 	 *    handle on this ESP.
 	 */
-	fmhz = esp->cfreq;
+	fhz = esp->cfreq;
 
-	ccf = ((fmhz / 1000000) + 4) / 5;
+	ccf = ((fhz / 1000000) + 4) / 5;
 	if (ccf == 1)
 		ccf = 2;
 
@@ -2285,16 +2285,16 @@ static void __devinit esp_set_clock_params(struct esp *esp)
 	 * been unable to find the clock-frequency PROM property.  All
 	 * other machines provide useful values it seems.
 	 */
-	if (fmhz <= 5000000 || ccf < 1 || ccf > 8) {
-		fmhz = 20000000;
+	if (fhz <= 5000000 || ccf < 1 || ccf > 8) {
+		fhz = 20000000;
 		ccf = 4;
 	}
 
 	esp->cfact = (ccf == 8 ? 0 : ccf);
-	esp->cfreq = fmhz;
-	esp->ccycle = ESP_MHZ_TO_CYCLE(fmhz);
+	esp->cfreq = fhz;
+	esp->ccycle = ESP_HZ_TO_CYCLE(fhz);
 	esp->ctick = ESP_TICK(ccf, esp->ccycle);
-	esp->neg_defp = ESP_NEG_DEFP(fmhz, ccf);
+	esp->neg_defp = ESP_NEG_DEFP(fhz, ccf);
 	esp->sync_defp = SYNC_DEFP_SLOW;
 }
 
@@ -2310,7 +2310,7 @@ static const char *esp_chip_names[] = {
 
 static struct scsi_transport_template *esp_transport_template;
 
-int __devinit scsi_esp_register(struct esp *esp, struct device *dev)
+int scsi_esp_register(struct esp *esp, struct device *dev)
 {
 	static int instance;
 	int err;
@@ -2318,6 +2318,7 @@ int __devinit scsi_esp_register(struct esp *esp, struct device *dev)
 	esp->host->transportt = esp_transport_template;
 	esp->host->max_lun = ESP_MAX_LUN;
 	esp->host->cmd_per_lun = 2;
+	esp->host->unique_id = instance;
 
 	esp_set_clock_params(esp);
 
@@ -2341,7 +2342,7 @@ int __devinit scsi_esp_register(struct esp *esp, struct device *dev)
 	if (err)
 		return err;
 
-	esp->host->unique_id = instance++;
+	instance++;
 
 	scsi_scan_host(esp->host);
 
@@ -2349,15 +2350,33 @@ int __devinit scsi_esp_register(struct esp *esp, struct device *dev)
 }
 EXPORT_SYMBOL(scsi_esp_register);
 
-void __devexit scsi_esp_unregister(struct esp *esp)
+void scsi_esp_unregister(struct esp *esp)
 {
 	scsi_remove_host(esp->host);
 }
 EXPORT_SYMBOL(scsi_esp_unregister);
 
+static int esp_target_alloc(struct scsi_target *starget)
+{
+	struct esp *esp = shost_priv(dev_to_shost(&starget->dev));
+	struct esp_target_data *tp = &esp->target[starget->id];
+
+	tp->starget = starget;
+
+	return 0;
+}
+
+static void esp_target_destroy(struct scsi_target *starget)
+{
+	struct esp *esp = shost_priv(dev_to_shost(&starget->dev));
+	struct esp_target_data *tp = &esp->target[starget->id];
+
+	tp->starget = NULL;
+}
+
 static int esp_slave_alloc(struct scsi_device *dev)
 {
-	struct esp *esp = host_to_esp(dev->host);
+	struct esp *esp = shost_priv(dev->host);
 	struct esp_target_data *tp = &esp->target[dev->id];
 	struct esp_lun_data *lp;
 
@@ -2365,8 +2384,6 @@ static int esp_slave_alloc(struct scsi_device *dev)
 	if (!lp)
 		return -ENOMEM;
 	dev->hostdata = lp;
-
-	tp->starget = dev->sdev_target;
 
 	spi_min_period(tp->starget) = esp->min_period;
 	spi_max_offset(tp->starget) = 15;
@@ -2381,7 +2398,7 @@ static int esp_slave_alloc(struct scsi_device *dev)
 
 static int esp_slave_configure(struct scsi_device *dev)
 {
-	struct esp *esp = host_to_esp(dev->host);
+	struct esp *esp = shost_priv(dev->host);
 	struct esp_target_data *tp = &esp->target[dev->id];
 	int goal_tags, queue_depth;
 
@@ -2423,7 +2440,7 @@ static void esp_slave_destroy(struct scsi_device *dev)
 
 static int esp_eh_abort_handler(struct scsi_cmnd *cmd)
 {
-	struct esp *esp = host_to_esp(cmd->device->host);
+	struct esp *esp = shost_priv(cmd->device->host);
 	struct esp_cmd_entry *ent, *tmp;
 	struct completion eh_done;
 	unsigned long flags;
@@ -2539,7 +2556,7 @@ out_failure:
 
 static int esp_eh_bus_reset_handler(struct scsi_cmnd *cmd)
 {
-	struct esp *esp = host_to_esp(cmd->device->host);
+	struct esp *esp = shost_priv(cmd->device->host);
 	struct completion eh_reset;
 	unsigned long flags;
 
@@ -2575,7 +2592,7 @@ static int esp_eh_bus_reset_handler(struct scsi_cmnd *cmd)
 /* All bets are off, reset the entire device.  */
 static int esp_eh_host_reset_handler(struct scsi_cmnd *cmd)
 {
-	struct esp *esp = host_to_esp(cmd->device->host);
+	struct esp *esp = shost_priv(cmd->device->host);
 	unsigned long flags;
 
 	spin_lock_irqsave(esp->host->host_lock, flags);
@@ -2598,6 +2615,8 @@ struct scsi_host_template scsi_esp_template = {
 	.name			= "esp",
 	.info			= esp_info,
 	.queuecommand		= esp_queuecommand,
+	.target_alloc		= esp_target_alloc,
+	.target_destroy		= esp_target_destroy,
 	.slave_alloc		= esp_slave_alloc,
 	.slave_configure	= esp_slave_configure,
 	.slave_destroy		= esp_slave_destroy,
@@ -2615,7 +2634,7 @@ EXPORT_SYMBOL(scsi_esp_template);
 
 static void esp_get_signalling(struct Scsi_Host *host)
 {
-	struct esp *esp = host_to_esp(host);
+	struct esp *esp = shost_priv(host);
 	enum spi_signal_type type;
 
 	if (esp->flags & ESP_FLAG_DIFFERENTIAL)
@@ -2629,17 +2648,20 @@ static void esp_get_signalling(struct Scsi_Host *host)
 static void esp_set_offset(struct scsi_target *target, int offset)
 {
 	struct Scsi_Host *host = dev_to_shost(target->dev.parent);
-	struct esp *esp = host_to_esp(host);
+	struct esp *esp = shost_priv(host);
 	struct esp_target_data *tp = &esp->target[target->id];
 
-	tp->nego_goal_offset = offset;
+	if (esp->flags & ESP_FLAG_DISABLE_SYNC)
+		tp->nego_goal_offset = 0;
+	else
+		tp->nego_goal_offset = offset;
 	tp->flags |= ESP_TGT_CHECK_NEGO;
 }
 
 static void esp_set_period(struct scsi_target *target, int period)
 {
 	struct Scsi_Host *host = dev_to_shost(target->dev.parent);
-	struct esp *esp = host_to_esp(host);
+	struct esp *esp = shost_priv(host);
 	struct esp_target_data *tp = &esp->target[target->id];
 
 	tp->nego_goal_period = period;
@@ -2649,7 +2671,7 @@ static void esp_set_period(struct scsi_target *target, int period)
 static void esp_set_width(struct scsi_target *target, int width)
 {
 	struct Scsi_Host *host = dev_to_shost(target->dev.parent);
-	struct esp *esp = host_to_esp(host);
+	struct esp *esp = shost_priv(host);
 	struct esp_target_data *tp = &esp->target[target->id];
 
 	tp->nego_goal_width = (width ? 1 : 0);

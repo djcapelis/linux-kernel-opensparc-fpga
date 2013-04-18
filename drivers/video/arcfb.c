@@ -2,7 +2,6 @@
  * linux/drivers/video/arcfb.c -- FB driver for Arc monochrome LCD board
  *
  * Copyright (C) 2005, Jaya Kumar <jayalk@intworks.biz>
- * http://www.intworks.biz/arclcd
  *
  * This file is subject to the terms and conditions of the GNU General Public
  * License. See the file COPYING in the main directory of this archive for
@@ -39,7 +38,6 @@
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/mm.h>
-#include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
@@ -48,7 +46,7 @@
 #include <linux/arcfb.h>
 #include <linux/platform_device.h>
 
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
 #define floor8(a) (a&(~0x07))
 #define floorXres(a,xres) (a&(~(xres - 1)))
@@ -81,7 +79,7 @@ struct arcfb_par {
 	spinlock_t lock;
 };
 
-static struct fb_fix_screeninfo arcfb_fix __initdata = {
+static struct fb_fix_screeninfo arcfb_fix = {
 	.id =		"arcfb",
 	.type =		FB_TYPE_PACKED_PIXELS,
 	.visual =	FB_VISUAL_MONO01,
@@ -91,7 +89,7 @@ static struct fb_fix_screeninfo arcfb_fix __initdata = {
 	.accel =	FB_ACCEL_NONE,
 };
 
-static struct fb_var_screeninfo arcfb_var __initdata = {
+static struct fb_var_screeninfo arcfb_var = {
 	.xres		= 128,
 	.yres		= 64,
 	.xres_virtual	= 128,
@@ -338,8 +336,8 @@ static void arcfb_lcd_update_horiz(struct arcfb_par *par, unsigned int left,
 }
 
 /*
- * here we start the process of spliting out the fb update into
- * individual blocks of pixels. we end up spliting into 64x64 blocks
+ * here we start the process of splitting out the fb update into
+ * individual blocks of pixels. we end up splitting into 64x64 blocks
  * and finally down to 64x8 pages.
  */
 static void arcfb_lcd_update(struct arcfb_par *par, unsigned int dx,
@@ -504,7 +502,7 @@ static struct fb_ops arcfb_ops = {
 	.fb_ioctl 	= arcfb_ioctl,
 };
 
-static int __init arcfb_probe(struct platform_device *dev)
+static int arcfb_probe(struct platform_device *dev)
 {
 	struct fb_info *info;
 	int retval = -ENOMEM;
@@ -517,10 +515,9 @@ static int __init arcfb_probe(struct platform_device *dev)
 
 	/* We need a flat backing store for the Arc's
 	   less-flat actual paged framebuffer */
-	if (!(videomemory = vmalloc(videomemorysize)))
+	videomemory = vzalloc(videomemorysize);
+	if (!videomemory)
 		return retval;
-
-	memset(videomemory, 0, videomemorysize);
 
 	info = framebuffer_alloc(sizeof(struct arcfb_par), &dev->dev);
 	if (!info)
@@ -555,6 +552,7 @@ static int __init arcfb_probe(struct platform_device *dev)
 				"arcfb", info)) {
 			printk(KERN_INFO
 				"arcfb: Failed req IRQ %d\n", par->irq);
+			retval = -EBUSY;
 			goto err1;
 		}
 	}

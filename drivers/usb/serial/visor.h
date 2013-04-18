@@ -9,8 +9,9 @@
  *	the Free Software Foundation; either version 2 of the License, or
  *	(at your option) any later version.
  *
- * See Documentation/usb/usb-serial.txt for more information on using this driver
- * 
+ * See Documentation/usb/usb-serial.txt for more information on using this
+ * driver.
+ *
  */
 
 #ifndef __LINUX_USB_SERIAL_VISOR_H
@@ -48,6 +49,9 @@
 #define SONY_CLIE_UX50_ID		0x0144
 #define SONY_CLIE_TJ25_ID		0x0169
 
+#define ACER_VENDOR_ID			0x0502
+#define ACER_S10_ID			0x0001
+
 #define SAMSUNG_VENDOR_ID		0x04E8
 #define SAMSUNG_SCH_I330_ID		0x8001
 #define SAMSUNG_SPH_I500_ID		0x6601
@@ -62,7 +66,7 @@
 #define ACEECA_MEZ1000_ID		0x0001
 
 #define KYOCERA_VENDOR_ID		0x0C88
-#define KYOCERA_7135_ID			0x0021 
+#define KYOCERA_7135_ID			0x0021
 
 #define FOSSIL_VENDOR_ID		0x0E67
 #define FOSSIL_ABACUS_ID		0x0002
@@ -142,7 +146,7 @@ struct visor_connection_info {
  * The maximum number of connections currently supported is 2
  */
 struct palm_ext_connection_info {
-	__u8 num_ports;		
+	__u8 num_ports;
 	__u8 endpoint_numbers_different;
 	__le16 reserved1;
 	struct {

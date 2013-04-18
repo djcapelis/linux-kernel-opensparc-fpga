@@ -26,12 +26,13 @@
 #include <linux/namei.h>
 #include <linux/mount.h>
 #include <linux/fs_stack.h>
+#include <linux/slab.h>
 #include "ecryptfs_kernel.h"
 
 /**
  * ecryptfs_d_revalidate - revalidate an ecryptfs dentry
  * @dentry: The ecryptfs dentry
- * @nd: The associated nameidata
+ * @flags: lookup flags
  *
  * Called when the VFS needs to revalidate a dentry. This
  * is called whenever a name lookup finds a dentry in the
@@ -41,28 +42,25 @@
  * Returns 1 if valid, 0 otherwise.
  *
  */
-static int ecryptfs_d_revalidate(struct dentry *dentry, struct nameidata *nd)
+static int ecryptfs_d_revalidate(struct dentry *dentry, unsigned int flags)
 {
-	struct dentry *lower_dentry = ecryptfs_dentry_to_lower(dentry);
-	struct vfsmount *lower_mnt = ecryptfs_dentry_to_lower_mnt(dentry);
-	struct dentry *dentry_save;
-	struct vfsmount *vfsmount_save;
+	struct dentry *lower_dentry;
+	struct vfsmount *lower_mnt;
 	int rc = 1;
 
+	if (flags & LOOKUP_RCU)
+		return -ECHILD;
+
+	lower_dentry = ecryptfs_dentry_to_lower(dentry);
+	lower_mnt = ecryptfs_dentry_to_lower_mnt(dentry);
 	if (!lower_dentry->d_op || !lower_dentry->d_op->d_revalidate)
 		goto out;
-	dentry_save = nd->dentry;
-	vfsmount_save = nd->mnt;
-	nd->dentry = lower_dentry;
-	nd->mnt = lower_mnt;
-	rc = lower_dentry->d_op->d_revalidate(lower_dentry, nd);
-	nd->dentry = dentry_save;
-	nd->mnt = vfsmount_save;
+	rc = lower_dentry->d_op->d_revalidate(lower_dentry, flags);
 	if (dentry->d_inode) {
 		struct inode *lower_inode =
 			ecryptfs_inode_to_lower(dentry->d_inode);
 
-		fsstack_copy_attr_all(dentry->d_inode, lower_inode, NULL);
+		fsstack_copy_attr_all(dentry->d_inode, lower_inode);
 	}
 out:
 	return rc;
@@ -80,8 +78,8 @@ static void ecryptfs_d_release(struct dentry *dentry)
 {
 	if (ecryptfs_dentry_to_private(dentry)) {
 		if (ecryptfs_dentry_to_lower(dentry)) {
-			mntput(ecryptfs_dentry_to_lower_mnt(dentry));
 			dput(ecryptfs_dentry_to_lower(dentry));
+			mntput(ecryptfs_dentry_to_lower_mnt(dentry));
 		}
 		kmem_cache_free(ecryptfs_dentry_info_cache,
 				ecryptfs_dentry_to_private(dentry));
@@ -89,7 +87,7 @@ static void ecryptfs_d_release(struct dentry *dentry)
 	return;
 }
 
-struct dentry_operations ecryptfs_dops = {
+const struct dentry_operations ecryptfs_dops = {
 	.d_revalidate = ecryptfs_d_revalidate,
 	.d_release = ecryptfs_d_release,
 };

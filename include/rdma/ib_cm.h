@@ -31,14 +31,15 @@
  * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
  * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
- *
- * $Id: ib_cm.h 4311 2005-12-05 18:42:01Z sean.hefty $
  */
 #if !defined(IB_CM_H)
 #define IB_CM_H
 
 #include <rdma/ib_mad.h>
 #include <rdma/ib_sa.h>
+
+/* ib_cm and ib_user_cm modules share /sys/class/infiniband_cm */
+extern struct class cm_class;
 
 enum ib_cm_state {
 	IB_CM_IDLE,
@@ -261,6 +262,18 @@ struct ib_cm_event {
 	void			*private_data;
 };
 
+#define CM_REQ_ATTR_ID		cpu_to_be16(0x0010)
+#define CM_MRA_ATTR_ID		cpu_to_be16(0x0011)
+#define CM_REJ_ATTR_ID		cpu_to_be16(0x0012)
+#define CM_REP_ATTR_ID		cpu_to_be16(0x0013)
+#define CM_RTU_ATTR_ID		cpu_to_be16(0x0014)
+#define CM_DREQ_ATTR_ID		cpu_to_be16(0x0015)
+#define CM_DREP_ATTR_ID		cpu_to_be16(0x0016)
+#define CM_SIDR_REQ_ATTR_ID	cpu_to_be16(0x0017)
+#define CM_SIDR_REP_ATTR_ID	cpu_to_be16(0x0018)
+#define CM_LAP_ATTR_ID		cpu_to_be16(0x0019)
+#define CM_APR_ATTR_ID		cpu_to_be16(0x001A)
+
 /**
  * ib_cm_handler - User-defined callback to process communication events.
  * @cm_id: Communication identifier associated with the reported event.
@@ -316,12 +329,12 @@ struct ib_cm_id *ib_create_cm_id(struct ib_device *device,
  */
 void ib_destroy_cm_id(struct ib_cm_id *cm_id);
 
-#define IB_SERVICE_ID_AGN_MASK	__constant_cpu_to_be64(0xFF00000000000000ULL)
-#define IB_CM_ASSIGN_SERVICE_ID __constant_cpu_to_be64(0x0200000000000000ULL)
-#define IB_CMA_SERVICE_ID	__constant_cpu_to_be64(0x0000000001000000ULL)
-#define IB_CMA_SERVICE_ID_MASK	__constant_cpu_to_be64(0xFFFFFFFFFF000000ULL)
-#define IB_SDP_SERVICE_ID	__constant_cpu_to_be64(0x0000000000010000ULL)
-#define IB_SDP_SERVICE_ID_MASK	__constant_cpu_to_be64(0xFFFFFFFFFFFF0000ULL)
+#define IB_SERVICE_ID_AGN_MASK	cpu_to_be64(0xFF00000000000000ULL)
+#define IB_CM_ASSIGN_SERVICE_ID	cpu_to_be64(0x0200000000000000ULL)
+#define IB_CMA_SERVICE_ID	cpu_to_be64(0x0000000001000000ULL)
+#define IB_CMA_SERVICE_ID_MASK	cpu_to_be64(0xFFFFFFFFFF000000ULL)
+#define IB_SDP_SERVICE_ID	cpu_to_be64(0x0000000000010000ULL)
+#define IB_SDP_SERVICE_ID_MASK	cpu_to_be64(0xFFFFFFFFFFFF0000ULL)
 
 struct ib_cm_compare_data {
 	u8  data[IB_CM_COMPARE_SIZE];
@@ -385,7 +398,6 @@ struct ib_cm_rep_param {
 	u8		private_data_len;
 	u8		responder_resources;
 	u8		initiator_depth;
-	u8		target_ack_delay;
 	u8		failover_accepted;
 	u8		flow_control;
 	u8		rnr_retry_count;
@@ -478,12 +490,15 @@ int ib_send_cm_rej(struct ib_cm_id *cm_id,
 		   const void *private_data,
 		   u8 private_data_len);
 
+#define IB_CM_MRA_FLAG_DELAY 0x80  /* Send MRA only after a duplicate msg */
+
 /**
  * ib_send_cm_mra - Sends a message receipt acknowledgement to a connection
  *   message.
  * @cm_id: Connection identifier associated with the connection message.
- * @service_timeout: The maximum time required for the sender to reply to
- *   to the connection message.
+ * @service_timeout: The lower 5-bits specify the maximum time required for
+ *   the sender to reply to the connection message.  The upper 3-bits
+ *   specify additional control flags.
  * @private_data: Optional user-defined private data sent with the
  *   message receipt acknowledgement.
  * @private_data_len: Size of the private data buffer, in bytes.

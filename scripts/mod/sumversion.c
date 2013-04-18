@@ -290,9 +290,18 @@ static int parse_file(const char *fname, struct md4_ctx *md)
 	release_file(file, len);
 	return 1;
 }
+/* Check whether the file is a static library or not */
+static int is_static_library(const char *objfile)
+{
+	int len = strlen(objfile);
+	if (objfile[len - 2] == '.' && objfile[len - 1] == 'a')
+		return 1;
+	else
+		return 0;
+}
 
-/* We have dir/file.o.  Open dir/.file.o.cmd, look for deps_ line to
- * figure out source file. */
+/* We have dir/file.o.  Open dir/.file.o.cmd, look for source_ and deps_ line
+ * to figure out source files. */
 static int parse_source_files(const char *objfile, struct md4_ctx *md)
 {
 	char *cmd, *file, *line, *dir;
@@ -325,14 +334,27 @@ static int parse_source_files(const char *objfile, struct md4_ctx *md)
 		deps_drivers/net/dummy.o := \
 		  drivers/net/dummy.c \
 		    $(wildcard include/config/net/fastroute.h) \
-		  include/linux/config.h \
-		    $(wildcard include/config/h.h) \
 		  include/linux/module.h \
 
 	   Sum all files in the same dir or subdirs.
 	*/
 	while ((line = get_next_line(&pos, file, flen)) != NULL) {
 		char* p = line;
+
+		if (strncmp(line, "source_", sizeof("source_")-1) == 0) {
+			p = strrchr(line, ' ');
+			if (!p) {
+				warn("malformed line: %s\n", line);
+				goto out_file;
+			}
+			p++;
+			if (!parse_file(p, md)) {
+				warn("could not open %s: %s\n",
+				     p, strerror(errno));
+				goto out_file;
+			}
+			continue;
+		}
 		if (strncmp(line, "deps_", sizeof("deps_")-1) == 0) {
 			check_files = 1;
 			continue;
@@ -420,7 +442,8 @@ void get_src_version(const char *modname, char sum[], unsigned sumlen)
 	while ((fname = strsep(&sources, " ")) != NULL) {
 		if (!*fname)
 			continue;
-		if (!parse_source_files(fname, &md))
+		if (!(is_static_library(fname)) &&
+				!parse_source_files(fname, &md))
 			goto release;
 	}
 

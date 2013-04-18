@@ -13,7 +13,6 @@
  */
 
 #include <linux/if_ether.h>
-#include <linux/if_tr.h>
 
 /* Lengths of frame formats */
 #define LLC_PDU_LEN_I	4       /* header and 2 control bytes */
@@ -199,7 +198,7 @@ struct llc_pdu_sn {
 	u8 ssap;
 	u8 ctrl_1;
 	u8 ctrl_2;
-};
+} __packed;
 
 static inline struct llc_pdu_sn *llc_pdu_sn_hdr(struct sk_buff *skb)
 {
@@ -211,7 +210,7 @@ struct llc_pdu_un {
 	u8 dsap;
 	u8 ssap;
 	u8 ctrl_1;
-};
+} __packed;
 
 static inline struct llc_pdu_un *llc_pdu_un_hdr(struct sk_buff *skb)
 {
@@ -253,10 +252,6 @@ static inline void llc_pdu_decode_sa(struct sk_buff *skb, u8 *sa)
 {
 	if (skb->protocol == htons(ETH_P_802_2))
 		memcpy(sa, eth_hdr(skb)->h_source, ETH_ALEN);
-	else if (skb->protocol == htons(ETH_P_TR_802_2)) {
-		memcpy(sa, tr_hdr(skb)->saddr, ETH_ALEN);
-		*sa &= 0x7F;
-	}
 }
 
 /**
@@ -270,8 +265,6 @@ static inline void llc_pdu_decode_da(struct sk_buff *skb, u8 *da)
 {
 	if (skb->protocol == htons(ETH_P_802_2))
 		memcpy(da, eth_hdr(skb)->h_dest, ETH_ALEN);
-	else if (skb->protocol == htons(ETH_P_TR_802_2))
-		memcpy(da, tr_hdr(skb)->daddr, ETH_ALEN);
 }
 
 /**
@@ -359,7 +352,7 @@ struct llc_xid_info {
 	u8 fmt_id;	/* always 0x81 for LLC */
 	u8 type;	/* different if NULL/non-NULL LSAP */
 	u8 rw;		/* sender receive window */
-};
+} __packed;
 
 /**
  *	llc_pdu_init_as_xid_cmd - sets bytes 3, 4 & 5 of LLC header as XID
@@ -381,7 +374,7 @@ static inline void llc_pdu_init_as_xid_cmd(struct sk_buff *skb,
 	xid_info->fmt_id = LLC_XID_FMT_ID;	/* 0x81 */
 	xid_info->type	 = svcs_supported;
 	xid_info->rw	 = rx_window << 1;	/* size of receive window */
-	skb_put(skb, 3);
+	skb_put(skb, sizeof(struct llc_xid_info));
 }
 
 /**
@@ -406,7 +399,7 @@ static inline void llc_pdu_init_as_xid_rsp(struct sk_buff *skb,
 	xid_info->fmt_id = LLC_XID_FMT_ID;
 	xid_info->type	 = svcs_supported;
 	xid_info->rw	 = rx_window << 1;
-	skb_put(skb, 3);
+	skb_put(skb, sizeof(struct llc_xid_info));
 }
 
 /* LLC Type 2 FRMR response information field format */
@@ -415,7 +408,7 @@ struct llc_frmr_info {
 	u8  curr_ssv;		/* current send state variable val */
 	u8  curr_rsv;		/* current receive state variable */
 	u8  ind_bits;		/* indicator bits set with macro */
-};
+} __packed;
 
 extern void llc_pdu_set_cmd_rsp(struct sk_buff *skb, u8 type);
 extern void llc_pdu_set_pf_bit(struct sk_buff *skb, u8 bit_value);

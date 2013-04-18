@@ -1,19 +1,19 @@
-/* SCTP kernel reference Implementation
+/* SCTP kernel implementation
  * (C) Copyright IBM Corp. 2001, 2004
  * Copyright (c) 1999-2000 Cisco, Inc.
  * Copyright (c) 1999-2001 Motorola, Inc.
  *
- * This file is part of the SCTP kernel reference Implementation
+ * This file is part of the SCTP kernel implementation
  *
  * These functions handle output processing.
  *
- * The SCTP reference implementation is free software;
+ * This SCTP implementation is free software;
  * you can redistribute it and/or modify it under the terms of
  * the GNU General Public License as published by
  * the Free Software Foundation; either version 2, or (at your option)
  * any later version.
  *
- * The SCTP reference implementation is distributed in the hope that it
+ * This SCTP implementation is distributed in the hope that it
  * will be useful, but WITHOUT ANY WARRANTY; without even the implied
  *                 ************************
  * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
@@ -41,6 +41,8 @@
  * be incorporated into the next SCTP release.
  */
 
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/wait.h>
@@ -48,22 +50,40 @@
 #include <linux/ip.h>
 #include <linux/ipv6.h>
 #include <linux/init.h>
+#include <linux/slab.h>
 #include <net/inet_ecn.h>
+#include <net/ip.h>
 #include <net/icmp.h>
-
-#ifndef TEST_FRAME
-#include <net/tcp.h>
-#endif /* TEST_FRAME (not defined) */
+#include <net/net_namespace.h>
 
 #include <linux/socket.h> /* for sa_family_t */
 #include <net/sock.h>
 
 #include <net/sctp/sctp.h>
 #include <net/sctp/sm.h>
+#include <net/sctp/checksum.h>
 
 /* Forward declarations for private helpers. */
-static sctp_xmit_t sctp_packet_append_data(struct sctp_packet *packet,
+static sctp_xmit_t __sctp_packet_append_chunk(struct sctp_packet *packet,
+					      struct sctp_chunk *chunk);
+static sctp_xmit_t sctp_packet_can_append_data(struct sctp_packet *packet,
 					   struct sctp_chunk *chunk);
+static void sctp_packet_append_data(struct sctp_packet *packet,
+					   struct sctp_chunk *chunk);
+static sctp_xmit_t sctp_packet_will_fit(struct sctp_packet *packet,
+					struct sctp_chunk *chunk,
+					u16 chunk_len);
+
+static void sctp_packet_reset(struct sctp_packet *packet)
+{
+	packet->size = packet->overhead;
+	packet->has_cookie_echo = 0;
+	packet->has_sack = 0;
+	packet->has_data = 0;
+	packet->has_auth = 0;
+	packet->ipfragok = 0;
+	packet->auth = NULL;
+}
 
 /* Config a packet.
  * This appears to be a followup set of initializations.
@@ -73,13 +93,10 @@ struct sctp_packet *sctp_packet_config(struct sctp_packet *packet,
 {
 	struct sctp_chunk *chunk = NULL;
 
-	SCTP_DEBUG_PRINTK("%s: packet:%p vtag:0x%x\n", __FUNCTION__,
+	SCTP_DEBUG_PRINTK("%s: packet:%p vtag:0x%x\n", __func__,
 			  packet, vtag);
 
 	packet->vtag = vtag;
-	packet->has_cookie_echo = 0;
-	packet->has_sack = 0;
-	packet->ipfragok = 0;
 
 	if (ecn_capable && sctp_packet_empty(packet)) {
 		chunk = sctp_get_ecne_prepend(packet->transport->asoc);
@@ -102,7 +119,7 @@ struct sctp_packet *sctp_packet_init(struct sctp_packet *packet,
 	struct sctp_association *asoc = transport->asoc;
 	size_t overhead;
 
-	SCTP_DEBUG_PRINTK("%s: packet:%p transport:%p\n", __FUNCTION__,
+	SCTP_DEBUG_PRINTK("%s: packet:%p transport:%p\n", __func__,
 			  packet, transport);
 
 	packet->transport = transport;
@@ -117,11 +134,8 @@ struct sctp_packet *sctp_packet_init(struct sctp_packet *packet,
 	}
 	overhead += sizeof(struct sctphdr);
 	packet->overhead = overhead;
-	packet->size = overhead;
+	sctp_packet_reset(packet);
 	packet->vtag = 0;
-	packet->has_cookie_echo = 0;
-	packet->has_sack = 0;
-	packet->ipfragok = 0;
 	packet->malloced = 0;
 	return packet;
 }
@@ -131,7 +145,7 @@ void sctp_packet_free(struct sctp_packet *packet)
 {
 	struct sctp_chunk *chunk, *tmp;
 
-	SCTP_DEBUG_PRINTK("%s: packet:%p\n", __FUNCTION__, packet);
+	SCTP_DEBUG_PRINTK("%s: packet:%p\n", __func__, packet);
 
 	list_for_each_entry_safe(chunk, tmp, &packet->chunk_list, list) {
 		list_del_init(&chunk->list);
@@ -150,12 +164,13 @@ void sctp_packet_free(struct sctp_packet *packet)
  * packet can be sent only after receiving the COOKIE_ACK.
  */
 sctp_xmit_t sctp_packet_transmit_chunk(struct sctp_packet *packet,
-				       struct sctp_chunk *chunk)
+				       struct sctp_chunk *chunk,
+				       int one_packet)
 {
 	sctp_xmit_t retval;
 	int error = 0;
 
-	SCTP_DEBUG_PRINTK("%s: packet:%p chunk:%p\n", __FUNCTION__,
+	SCTP_DEBUG_PRINTK("%s: packet:%p chunk:%p\n", __func__,
 			  packet, chunk);
 
 	switch ((retval = (sctp_packet_append_chunk(packet, chunk)))) {
@@ -168,7 +183,9 @@ sctp_xmit_t sctp_packet_transmit_chunk(struct sctp_packet *packet,
 			/* If we have an empty packet, then we can NOT ever
 			 * return PMTU_FULL.
 			 */
-			retval = sctp_packet_append_chunk(packet, chunk);
+			if (!one_packet)
+				retval = sctp_packet_append_chunk(packet,
+								  chunk);
 		}
 		break;
 
@@ -177,6 +194,42 @@ sctp_xmit_t sctp_packet_transmit_chunk(struct sctp_packet *packet,
 	case SCTP_XMIT_NAGLE_DELAY:
 		break;
 	}
+
+	return retval;
+}
+
+/* Try to bundle an auth chunk into the packet. */
+static sctp_xmit_t sctp_packet_bundle_auth(struct sctp_packet *pkt,
+					   struct sctp_chunk *chunk)
+{
+	struct sctp_association *asoc = pkt->transport->asoc;
+	struct sctp_chunk *auth;
+	sctp_xmit_t retval = SCTP_XMIT_OK;
+
+	/* if we don't have an association, we can't do authentication */
+	if (!asoc)
+		return retval;
+
+	/* See if this is an auth chunk we are bundling or if
+	 * auth is already bundled.
+	 */
+	if (chunk->chunk_hdr->type == SCTP_CID_AUTH || pkt->has_auth)
+		return retval;
+
+	/* if the peer did not request this chunk to be authenticated,
+	 * don't do it
+	 */
+	if (!chunk->auth)
+		return retval;
+
+	auth = sctp_make_auth(asoc);
+	if (!auth)
+		return retval;
+
+	retval = __sctp_packet_append_chunk(pkt, auth);
+
+	if (retval != SCTP_XMIT_OK)
+		sctp_chunk_free(auth);
 
 	return retval;
 }
@@ -193,22 +246,86 @@ static sctp_xmit_t sctp_packet_bundle_sack(struct sctp_packet *pkt,
 	if (sctp_chunk_is_data(chunk) && !pkt->has_sack &&
 	    !pkt->has_cookie_echo) {
 		struct sctp_association *asoc;
+		struct timer_list *timer;
 		asoc = pkt->transport->asoc;
+		timer = &asoc->timers[SCTP_EVENT_TIMEOUT_SACK];
 
-		if (asoc->a_rwnd > asoc->rwnd) {
+		/* If the SACK timer is running, we have a pending SACK */
+		if (timer_pending(timer)) {
 			struct sctp_chunk *sack;
+
+			if (pkt->transport->sack_generation !=
+			    pkt->transport->asoc->peer.sack_generation)
+				return retval;
+
 			asoc->a_rwnd = asoc->rwnd;
 			sack = sctp_make_sack(asoc);
 			if (sack) {
-				struct timer_list *timer;
-				retval = sctp_packet_append_chunk(pkt, sack);
+				retval = __sctp_packet_append_chunk(pkt, sack);
+				if (retval != SCTP_XMIT_OK) {
+					sctp_chunk_free(sack);
+					goto out;
+				}
 				asoc->peer.sack_needed = 0;
-				timer = &asoc->timers[SCTP_EVENT_TIMEOUT_SACK];
-				if (timer_pending(timer) && del_timer(timer))
+				if (del_timer(timer))
 					sctp_association_put(asoc);
 			}
 		}
 	}
+out:
+	return retval;
+}
+
+
+/* Append a chunk to the offered packet reporting back any inability to do
+ * so.
+ */
+static sctp_xmit_t __sctp_packet_append_chunk(struct sctp_packet *packet,
+					      struct sctp_chunk *chunk)
+{
+	sctp_xmit_t retval = SCTP_XMIT_OK;
+	__u16 chunk_len = WORD_ROUND(ntohs(chunk->chunk_hdr->length));
+
+	/* Check to see if this chunk will fit into the packet */
+	retval = sctp_packet_will_fit(packet, chunk, chunk_len);
+	if (retval != SCTP_XMIT_OK)
+		goto finish;
+
+	/* We believe that this chunk is OK to add to the packet */
+	switch (chunk->chunk_hdr->type) {
+	    case SCTP_CID_DATA:
+		/* Account for the data being in the packet */
+		sctp_packet_append_data(packet, chunk);
+		/* Disallow SACK bundling after DATA. */
+		packet->has_sack = 1;
+		/* Disallow AUTH bundling after DATA */
+		packet->has_auth = 1;
+		/* Let it be knows that packet has DATA in it */
+		packet->has_data = 1;
+		/* timestamp the chunk for rtx purposes */
+		chunk->sent_at = jiffies;
+		break;
+	    case SCTP_CID_COOKIE_ECHO:
+		packet->has_cookie_echo = 1;
+		break;
+
+	    case SCTP_CID_SACK:
+		packet->has_sack = 1;
+		if (chunk->asoc)
+			chunk->asoc->stats.osacks++;
+		break;
+
+	    case SCTP_CID_AUTH:
+		packet->has_auth = 1;
+		packet->auth = chunk;
+		break;
+	}
+
+	/* It is OK to send this chunk.  */
+	list_add_tail(&chunk->list, &packet->chunk_list);
+	packet->size += chunk_len;
+	chunk->transport = packet->transport;
+finish:
 	return retval;
 }
 
@@ -219,70 +336,53 @@ sctp_xmit_t sctp_packet_append_chunk(struct sctp_packet *packet,
 				     struct sctp_chunk *chunk)
 {
 	sctp_xmit_t retval = SCTP_XMIT_OK;
-	__u16 chunk_len = WORD_ROUND(ntohs(chunk->chunk_hdr->length));
-	size_t psize;
-	size_t pmtu;
-	int too_big;
 
-	SCTP_DEBUG_PRINTK("%s: packet:%p chunk:%p\n", __FUNCTION__, packet,
+	SCTP_DEBUG_PRINTK("%s: packet:%p chunk:%p\n", __func__, packet,
 			  chunk);
 
-	retval = sctp_packet_bundle_sack(packet, chunk);
-	psize = packet->size;
+	/* Data chunks are special.  Before seeing what else we can
+	 * bundle into this packet, check to see if we are allowed to
+	 * send this DATA.
+	 */
+	if (sctp_chunk_is_data(chunk)) {
+		retval = sctp_packet_can_append_data(packet, chunk);
+		if (retval != SCTP_XMIT_OK)
+			goto finish;
+	}
 
+	/* Try to bundle AUTH chunk */
+	retval = sctp_packet_bundle_auth(packet, chunk);
 	if (retval != SCTP_XMIT_OK)
 		goto finish;
 
-	pmtu  = ((packet->transport->asoc) ?
-		 (packet->transport->asoc->pathmtu) :
-		 (packet->transport->pathmtu));
+	/* Try to bundle SACK chunk */
+	retval = sctp_packet_bundle_sack(packet, chunk);
+	if (retval != SCTP_XMIT_OK)
+		goto finish;
 
-	too_big = (psize + chunk_len > pmtu);
+	retval = __sctp_packet_append_chunk(packet, chunk);
 
-	/* Decide if we need to fragment or resubmit later. */
-	if (too_big) {
-		/* Both control chunks and data chunks with TSNs are
-		 * non-fragmentable.
-		 */
-		if (sctp_packet_empty(packet) || !sctp_chunk_is_data(chunk)) {
-			/* We no longer do re-fragmentation.
-			 * Just fragment at the IP layer, if we
-			 * actually hit this condition
-			 */
-			packet->ipfragok = 1;
-			goto append;
-
-		} else {
-			retval = SCTP_XMIT_PMTU_FULL;
-			goto finish;
-		}
-	}
-
-append:
-	/* We believe that this chunk is OK to add to the packet (as
-	 * long as we have the cwnd for it).
-	 */
-
-	/* DATA is a special case since we must examine both rwnd and cwnd
-	 * before we send DATA.
-	 */
-	if (sctp_chunk_is_data(chunk)) {
-		retval = sctp_packet_append_data(packet, chunk);
-		/* Disallow SACK bundling after DATA. */
-		packet->has_sack = 1;
-		if (SCTP_XMIT_OK != retval)
-			goto finish;
-	} else if (SCTP_CID_COOKIE_ECHO == chunk->chunk_hdr->type)
-		packet->has_cookie_echo = 1;
-	else if (SCTP_CID_SACK == chunk->chunk_hdr->type)
-		packet->has_sack = 1;
-
-	/* It is OK to send this chunk.  */
-	list_add_tail(&chunk->list, &packet->chunk_list);
-	packet->size += chunk_len;
-	chunk->transport = packet->transport;
 finish:
 	return retval;
+}
+
+static void sctp_packet_release_owner(struct sk_buff *skb)
+{
+	sk_free(skb->sk);
+}
+
+static void sctp_packet_set_owner_w(struct sk_buff *skb, struct sock *sk)
+{
+	skb_orphan(skb);
+	skb->sk = sk;
+	skb->destructor = sctp_packet_release_owner;
+
+	/*
+	 * The data chunks have already been accounted for in sctp_sendmsg(),
+	 * therefore only reserve a single byte to keep socket around until
+	 * the packet has been transmitted.
+	 */
+	atomic_inc(&sk->sk_wmem_alloc);
 }
 
 /* All packets are sent to the network through this function from
@@ -295,7 +395,6 @@ int sctp_packet_transmit(struct sctp_packet *packet)
 	struct sctp_transport *tp = packet->transport;
 	struct sctp_association *asoc = tp->asoc;
 	struct sctphdr *sh;
-	__u32 crc32 = 0;
 	struct sk_buff *nskb;
 	struct sctp_chunk *chunk, *tmp;
 	struct sock *sk;
@@ -303,8 +402,10 @@ int sctp_packet_transmit(struct sctp_packet *packet)
 	int padding;		/* How much padding do we need?  */
 	__u8 has_data = 0;
 	struct dst_entry *dst = tp->dst;
+	unsigned char *auth = NULL;	/* pointer to auth in skb data */
+	__u32 cksum_buf_len = sizeof(struct sctphdr);
 
-	SCTP_DEBUG_PRINTK("%s: packet:%p\n", __FUNCTION__, packet);
+	SCTP_DEBUG_PRINTK("%s: packet:%p\n", __func__, packet);
 
 	/* Do NOT generate a chunkless packet. */
 	if (list_empty(&packet->chunk_list))
@@ -325,23 +426,22 @@ int sctp_packet_transmit(struct sctp_packet *packet)
 	/* Set the owning socket so that we know where to get the
 	 * destination IP address.
 	 */
-	skb_set_owner_w(nskb, sk);
+	sctp_packet_set_owner_w(nskb, sk);
 
-	/* The 'obsolete' field of dst is set to 2 when a dst is freed. */
-	if (!dst || (dst->obsolete > 1)) {
-		dst_release(dst);
+	if (!sctp_transport_dst_check(tp)) {
 		sctp_transport_route(tp, NULL, sctp_sk(sk));
 		if (asoc && (asoc->param_flags & SPP_PMTUD_ENABLE)) {
-			sctp_assoc_sync_pmtu(asoc);
+			sctp_assoc_sync_pmtu(sk, asoc);
 		}
 	}
-	nskb->dst = dst_clone(tp->dst);
-	if (!nskb->dst)
+	dst = dst_clone(tp->dst);
+	skb_dst_set(nskb, dst);
+	if (!dst)
 		goto no_route;
-	dst = nskb->dst;
 
 	/* Build the SCTP header.  */
 	sh = (struct sctphdr *)skb_push(nskb, sizeof(struct sctphdr));
+	skb_reset_transport_header(nskb);
 	sh->source = htons(packet->source_port);
 	sh->dest   = htons(packet->destination_port);
 
@@ -355,16 +455,6 @@ int sctp_packet_transmit(struct sctp_packet *packet)
 	 */
 	sh->vtag     = htonl(packet->vtag);
 	sh->checksum = 0;
-
-	/* 2) Calculate the Adler-32 checksum of the whole packet,
-	 *    including the SCTP common header and all the
-	 *    chunks.
-	 *
-	 * Note: Adler-32 is no longer applicable, as has been replaced
-	 * by CRC32-C as described in <draft-ietf-tsvwg-sctpcsum-02.txt>.
-	 */
-	if (!(dst->dev->features & NETIF_F_NO_CSUM))
-		crc32 = sctp_start_cksum((__u8 *)sh, sizeof(struct sctphdr));
 
 	/**
 	 * 6.10 Bundling
@@ -389,11 +479,6 @@ int sctp_packet_transmit(struct sctp_packet *packet)
 	list_for_each_entry_safe(chunk, tmp, &packet->chunk_list, list) {
 		list_del_init(&chunk->list);
 		if (sctp_chunk_is_data(chunk)) {
-
-			if (!chunk->has_tsn) {
-				sctp_chunk_assign_ssn(chunk);
-				sctp_chunk_assign_tsn(chunk);
-
 			/* 6.3.1 C4) When data is in flight and when allowed
 			 * by rule C5, a new RTT measurement MUST be made each
 			 * round trip.  Furthermore, new RTT measurements
@@ -401,14 +486,10 @@ int sctp_packet_transmit(struct sctp_packet *packet)
 			 * for a given destination transport address.
 			 */
 
-				if (!tp->rto_pending) {
-					chunk->rtt_in_progress = 1;
-					tp->rto_pending = 1;
-				}
-			} else
-				chunk->resent = 1;
-
-			chunk->sent_at = jiffies;
+			if (!tp->rto_pending) {
+				chunk->rtt_in_progress = 1;
+				tp->rto_pending = 1;
+			}
 			has_data = 1;
 		}
 
@@ -416,14 +497,16 @@ int sctp_packet_transmit(struct sctp_packet *packet)
 		if (padding)
 			memset(skb_put(chunk->skb, padding), 0, padding);
 
-		if (dst->dev->features & NETIF_F_NO_CSUM)
-			memcpy(skb_put(nskb, chunk->skb->len),
+		/* if this is the auth chunk that we are adding,
+		 * store pointer where it will be added and put
+		 * the auth into the packet.
+		 */
+		if (chunk == packet->auth)
+			auth = skb_tail_pointer(nskb);
+
+		cksum_buf_len += chunk->skb->len;
+		memcpy(skb_put(nskb, chunk->skb->len),
 			       chunk->skb->data, chunk->skb->len);
-		else
-			crc32 = sctp_update_copy_cksum(skb_put(nskb,
-							chunk->skb->len),
-						chunk->skb->data,
-						chunk->skb->len, crc32);
 
 		SCTP_DEBUG_PRINTK("%s %p[%s] %s 0x%x, %s %d, %s %d, %s %d\n",
 				  "*** Chunk", chunk,
@@ -445,14 +528,43 @@ int sctp_packet_transmit(struct sctp_packet *packet)
 			sctp_chunk_free(chunk);
 	}
 
-	/* Perform final transformation on checksum. */
-	if (!(dst->dev->features & NETIF_F_NO_CSUM))
-		crc32 = sctp_end_cksum(crc32);
-
-	/* 3) Put the resultant value into the checksum field in the
-	 *    common header, and leave the rest of the bits unchanged.
+	/* SCTP-AUTH, Section 6.2
+	 *    The sender MUST calculate the MAC as described in RFC2104 [2]
+	 *    using the hash function H as described by the MAC Identifier and
+	 *    the shared association key K based on the endpoint pair shared key
+	 *    described by the shared key identifier.  The 'data' used for the
+	 *    computation of the AUTH-chunk is given by the AUTH chunk with its
+	 *    HMAC field set to zero (as shown in Figure 6) followed by all
+	 *    chunks that are placed after the AUTH chunk in the SCTP packet.
 	 */
-	sh->checksum = htonl(crc32);
+	if (auth)
+		sctp_auth_calculate_hmac(asoc, nskb,
+					(struct sctp_auth_chunk *)auth,
+					GFP_ATOMIC);
+
+	/* 2) Calculate the Adler-32 checksum of the whole packet,
+	 *    including the SCTP common header and all the
+	 *    chunks.
+	 *
+	 * Note: Adler-32 is no longer applicable, as has been replaced
+	 * by CRC32-C as described in <draft-ietf-tsvwg-sctpcsum-02.txt>.
+	 */
+	if (!sctp_checksum_disable) {
+		if (!(dst->dev->features & NETIF_F_SCTP_CSUM)) {
+			__u32 crc32 = sctp_start_cksum((__u8 *)sh, cksum_buf_len);
+
+			/* 3) Put the resultant value into the checksum field in the
+			 *    common header, and leave the rest of the bits unchanged.
+			 */
+			sh->checksum = sctp_end_cksum(crc32);
+		} else {
+			/* no need to seed pseudo checksum for SCTP */
+			nskb->ip_summed = CHECKSUM_PARTIAL;
+			nskb->csum_start = (skb_transport_header(nskb) -
+			                    nskb->head);
+			nskb->csum_offset = offsetof(struct sctphdr, checksum);
+		}
+	}
 
 	/* IP layer ECN support
 	 * From RFC 2481
@@ -466,7 +578,7 @@ int sctp_packet_transmit(struct sctp_packet *packet)
 	 * Note: The works for IPv6 layer checks this bit too later
 	 * in transmission.  See IP6_ECN_flow_xmit().
 	 */
-	INET_ECN_xmit(nskb->sk);
+	(*tp->af_specific->ecn_capable)(nskb->sk);
 
 	/* Set up the IP options.  */
 	/* BUG: not implemented
@@ -474,18 +586,18 @@ int sctp_packet_transmit(struct sctp_packet *packet)
 	 */
 
 	/* Dump that on IP!  */
-	if (asoc && asoc->peer.last_sent_to != tp) {
-		/* Considering the multiple CPU scenario, this is a
-		 * "correcter" place for last_sent_to.  --xguo
-		 */
-		asoc->peer.last_sent_to = tp;
+	if (asoc) {
+		asoc->stats.opackets++;
+		if (asoc->peer.last_sent_to != tp)
+			/* Considering the multiple CPU scenario, this is a
+			 * "correcter" place for last_sent_to.  --xguo
+			 */
+			asoc->peer.last_sent_to = tp;
 	}
 
 	if (has_data) {
 		struct timer_list *timer;
 		unsigned long timeout;
-
-		tp->last_time_used = jiffies;
 
 		/* Restart the AUTOCLOSE timer when sending data. */
 		if (sctp_state(asoc, ESTABLISHED) && asoc->autoclose) {
@@ -500,17 +612,15 @@ int sctp_packet_transmit(struct sctp_packet *packet)
 	SCTP_DEBUG_PRINTK("***sctp_transmit_packet*** skb len %d\n",
 			  nskb->len);
 
-	if (tp->param_flags & SPP_PMTUD_ENABLE)
-		(*tp->af_specific->sctp_xmit)(nskb, tp, packet->ipfragok);
-	else
-		(*tp->af_specific->sctp_xmit)(nskb, tp, 1);
+	nskb->local_df = packet->ipfragok;
+	(*tp->af_specific->sctp_xmit)(nskb, tp);
 
 out:
-	packet->size = packet->overhead;
+	sctp_packet_reset(packet);
 	return err;
 no_route:
 	kfree_skb(nskb);
-	IP_INC_STATS_BH(IPSTATS_MIB_OUTNOROUTES);
+	IP_INC_STATS_BH(sock_net(asoc->base.sk), IPSTATS_MIB_OUTNOROUTES);
 
 	/* FIXME: Returning the 'err' will effect all the associations
 	 * associated with a socket, although only one of the paths of the
@@ -540,16 +650,14 @@ nomem:
  * 2nd Level Abstractions
  ********************************************************************/
 
-/* This private function handles the specifics of appending DATA chunks.  */
-static sctp_xmit_t sctp_packet_append_data(struct sctp_packet *packet,
+/* This private function check to see if a chunk can be added */
+static sctp_xmit_t sctp_packet_can_append_data(struct sctp_packet *packet,
 					   struct sctp_chunk *chunk)
 {
 	sctp_xmit_t retval = SCTP_XMIT_OK;
-	size_t datasize, rwnd, inflight;
+	size_t datasize, rwnd, inflight, flight_size;
 	struct sctp_transport *transport = packet->transport;
-	__u32 max_burst_bytes;
 	struct sctp_association *asoc = transport->asoc;
-	struct sctp_sock *sp = sctp_sk(asoc->base.sk);
 	struct sctp_outq *q = &asoc->outqueue;
 
 	/* RFC 2960 6.1  Transmission of DATA Chunks
@@ -566,7 +674,8 @@ static sctp_xmit_t sctp_packet_append_data(struct sctp_packet *packet,
 	 */
 
 	rwnd = asoc->peer.rwnd;
-	inflight = asoc->outqueue.outstanding_bytes;
+	inflight = q->outstanding_bytes;
+	flight_size = transport->flight_size;
 
 	datasize = sctp_data_size(chunk);
 
@@ -578,28 +687,6 @@ static sctp_xmit_t sctp_packet_append_data(struct sctp_packet *packet,
 			retval = SCTP_XMIT_RWND_FULL;
 			goto finish;
 		}
-	}
-
-	/* sctpimpguide-05 2.14.2
-	 * D) When the time comes for the sender to
-	 * transmit new DATA chunks, the protocol parameter Max.Burst MUST
-	 * first be applied to limit how many new DATA chunks may be sent.
-	 * The limit is applied by adjusting cwnd as follows:
-	 * 	if ((flightsize + Max.Burst * MTU) < cwnd)
-	 *		cwnd = flightsize + Max.Burst * MTU
-	 */
-	max_burst_bytes = asoc->max_burst * asoc->pathmtu;
-	if ((transport->flight_size + max_burst_bytes) < transport->cwnd) {
-		transport->cwnd = transport->flight_size + max_burst_bytes;
-		SCTP_DEBUG_PRINTK("%s: cwnd limited by max_burst: "
-				  "transport: %p, cwnd: %d, "
-				  "ssthresh: %d, flight_size: %d, "
-				  "pba: %d\n",
-				  __FUNCTION__, transport,
-				  transport->cwnd,
-				  transport->ssthresh,
-				  transport->flight_size,
-				  transport->partial_bytes_acked);
 	}
 
 	/* RFC 2960 6.1  Transmission of DATA Chunks
@@ -614,8 +701,8 @@ static sctp_xmit_t sctp_packet_append_data(struct sctp_packet *packet,
 	 *    When a Fast Retransmit is being performed the sender SHOULD
 	 *    ignore the value of cwnd and SHOULD NOT delay retransmission.
 	 */
-	if (chunk->fast_retransmit <= 0)
-		if (transport->flight_size >= transport->cwnd) {
+	if (chunk->fast_retransmit != SCTP_NEED_FRTX)
+		if (flight_size >= transport->cwnd) {
 			retval = SCTP_XMIT_RWND_FULL;
 			goto finish;
 		}
@@ -625,19 +712,35 @@ static sctp_xmit_t sctp_packet_append_data(struct sctp_packet *packet,
 	 * if any previously transmitted data on the connection remains
 	 * unacknowledged.
 	 */
-	if (!sp->nodelay && sctp_packet_empty(packet) &&
-	    q->outstanding_bytes && sctp_state(asoc, ESTABLISHED)) {
-		unsigned len = datasize + q->out_qlen;
+	if (!sctp_sk(asoc->base.sk)->nodelay && sctp_packet_empty(packet) &&
+	    inflight && sctp_state(asoc, ESTABLISHED)) {
+		unsigned int max = transport->pathmtu - packet->overhead;
+		unsigned int len = chunk->skb->len + q->out_qlen;
 
 		/* Check whether this chunk and all the rest of pending
 		 * data will fit or delay in hopes of bundling a full
 		 * sized packet.
+		 * Don't delay large message writes that may have been
+		 * fragmeneted into small peices.
 		 */
-		if (len < asoc->frag_point) {
+		if ((len < max) && chunk->msg->can_delay) {
 			retval = SCTP_XMIT_NAGLE_DELAY;
 			goto finish;
 		}
 	}
+
+finish:
+	return retval;
+}
+
+/* This private function does management things when adding DATA chunk */
+static void sctp_packet_append_data(struct sctp_packet *packet,
+				struct sctp_chunk *chunk)
+{
+	struct sctp_transport *transport = packet->transport;
+	size_t datasize = sctp_data_size(chunk);
+	struct sctp_association *asoc = transport->asoc;
+	u32 rwnd = asoc->peer.rwnd;
 
 	/* Keep track of how many bytes are in flight over this transport. */
 	transport->flight_size += datasize;
@@ -645,13 +748,7 @@ static sctp_xmit_t sctp_packet_append_data(struct sctp_packet *packet,
 	/* Keep track of how many bytes are in flight to the receiver. */
 	asoc->outqueue.outstanding_bytes += datasize;
 
-	/* Update our view of the receiver's rwnd. Include sk_buff overhead
-	 * while updating peer.rwnd so that it reduces the chances of a
-	 * receiver running out of receive buffer space even when receive
-	 * window is still open. This can happen when a sender is sending
-	 * sending small messages.
-	 */
-	datasize += sizeof(struct sk_buff);
+	/* Update our view of the receiver's rwnd. */
 	if (datasize < rwnd)
 		rwnd -= datasize;
 	else
@@ -661,7 +758,47 @@ static sctp_xmit_t sctp_packet_append_data(struct sctp_packet *packet,
 	/* Has been accepted for transmission. */
 	if (!asoc->peer.prsctp_capable)
 		chunk->msg->can_abandon = 0;
+	sctp_chunk_assign_tsn(chunk);
+	sctp_chunk_assign_ssn(chunk);
+}
 
-finish:
+static sctp_xmit_t sctp_packet_will_fit(struct sctp_packet *packet,
+					struct sctp_chunk *chunk,
+					u16 chunk_len)
+{
+	size_t psize;
+	size_t pmtu;
+	int too_big;
+	sctp_xmit_t retval = SCTP_XMIT_OK;
+
+	psize = packet->size;
+	pmtu  = ((packet->transport->asoc) ?
+		(packet->transport->asoc->pathmtu) :
+		(packet->transport->pathmtu));
+
+	too_big = (psize + chunk_len > pmtu);
+
+	/* Decide if we need to fragment or resubmit later. */
+	if (too_big) {
+		/* It's OK to fragmet at IP level if any one of the following
+		 * is true:
+		 * 	1. The packet is empty (meaning this chunk is greater
+		 * 	   the MTU)
+		 * 	2. The chunk we are adding is a control chunk
+		 * 	3. The packet doesn't have any data in it yet and data
+		 * 	requires authentication.
+		 */
+		if (sctp_packet_empty(packet) || !sctp_chunk_is_data(chunk) ||
+		    (!packet->has_data && chunk->auth)) {
+			/* We no longer do re-fragmentation.
+			 * Just fragment at the IP layer, if we
+			 * actually hit this condition
+			 */
+			packet->ipfragok = 1;
+		} else {
+			retval = SCTP_XMIT_PMTU_FULL;
+		}
+	}
+
 	return retval;
 }

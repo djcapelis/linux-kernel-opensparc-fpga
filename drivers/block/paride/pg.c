@@ -130,13 +130,14 @@
 #define PI_PG	4
 #endif
 
+#include <linux/types.h>
 /* Here are things one can override from the insmod command.
    Most are autoprobed by paride unless set here.  Verbose is 0
    by default.
 
 */
 
-static int verbose = 0;
+static bool verbose = 0;
 static int major = PG_MAJOR;
 static char *name = PG_NAME;
 static int disable = 0;
@@ -162,6 +163,7 @@ enum {D_PRT, D_PRO, D_UNI, D_MOD, D_SLV, D_DLY};
 #include <linux/pg.h>
 #include <linux/device.h>
 #include <linux/sched.h>	/* current, TASK_* */
+#include <linux/mutex.h>
 #include <linux/jiffies.h>
 
 #include <asm/uaccess.h>
@@ -192,6 +194,7 @@ module_param_array(drive3, int, NULL, 0);
 
 #define ATAPI_IDENTIFY		0x12
 
+static DEFINE_MUTEX(pg_mutex);
 static int pg_open(struct inode *inode, struct file *file);
 static int pg_release(struct inode *inode, struct file *file);
 static ssize_t pg_read(struct file *filp, char __user *buf,
@@ -233,6 +236,7 @@ static const struct file_operations pg_fops = {
 	.write = pg_write,
 	.open = pg_open,
 	.release = pg_release,
+	.llseek = noop_llseek,
 };
 
 static void pg_init_units(void)
@@ -421,7 +425,7 @@ static void xs(char *buf, char *targ, int len)
 
 	for (k = 0; k < len; k++) {
 		char c = *buf++;
-		if (c != ' ' || c != l)
+		if (c != ' ' && c != l)
 			l = *targ++ = c;
 	}
 	if (l == ' ')
@@ -515,12 +519,18 @@ static int pg_open(struct inode *inode, struct file *file)
 {
 	int unit = iminor(inode) & 0x7f;
 	struct pg *dev = &devices[unit];
+	int ret = 0;
 
-	if ((unit >= PG_UNITS) || (!dev->present))
-		return -ENODEV;
+	mutex_lock(&pg_mutex);
+	if ((unit >= PG_UNITS) || (!dev->present)) {
+		ret = -ENODEV;
+		goto out;
+	}
 
-	if (test_and_set_bit(0, &dev->access))
-		return -EBUSY;
+	if (test_and_set_bit(0, &dev->access)) {
+		ret = -EBUSY;
+		goto out;
+	}
 
 	if (dev->busy) {
 		pg_reset(dev);
@@ -533,12 +543,15 @@ static int pg_open(struct inode *inode, struct file *file)
 	if (dev->bufptr == NULL) {
 		clear_bit(0, &dev->access);
 		printk("%s: buffer allocation failed\n", dev->name);
-		return -ENOMEM;
+		ret = -ENOMEM;
+		goto out;
 	}
 
 	file->private_data = dev;
 
-	return 0;
+out:
+	mutex_unlock(&pg_mutex);
+	return ret;
 }
 
 static int pg_release(struct inode *inode, struct file *file)
@@ -618,6 +631,7 @@ static ssize_t pg_read(struct file *filp, char __user *buf, size_t count, loff_t
 		if (dev->status & 0x10)
 			return -ETIME;
 
+	memset(&hdr, 0, sizeof(hdr));
 	hdr.magic = PG_MAGIC;
 	hdr.dlen = dev->dlen;
 	copy = 0;
@@ -676,8 +690,8 @@ static int __init pg_init(void)
 	for (unit = 0; unit < PG_UNITS; unit++) {
 		struct pg *dev = &devices[unit];
 		if (dev->present)
-			class_device_create(pg_class, NULL, MKDEV(major, unit),
-					NULL, "pg%u", unit);
+			device_create(pg_class, NULL, MKDEV(major, unit), NULL,
+				      "pg%u", unit);
 	}
 	err = 0;
 	goto out;
@@ -695,7 +709,7 @@ static void __exit pg_exit(void)
 	for (unit = 0; unit < PG_UNITS; unit++) {
 		struct pg *dev = &devices[unit];
 		if (dev->present)
-			class_device_destroy(pg_class, MKDEV(major, unit));
+			device_destroy(pg_class, MKDEV(major, unit));
 	}
 	class_destroy(pg_class);
 	unregister_chrdev(major, name);

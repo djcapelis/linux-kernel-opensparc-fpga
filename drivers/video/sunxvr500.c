@@ -5,16 +5,14 @@
 
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/slab.h>
 #include <linux/fb.h>
 #include <linux/pci.h>
 #include <linux/init.h>
+#include <linux/of_device.h>
 
 #include <asm/io.h>
-#include <asm/prom.h>
-#include <asm/of_device.h>
 
-/* XXX This device has a 'dev-comm' property which aparently is
+/* XXX This device has a 'dev-comm' property which apparently is
  * XXX a pointer into the openfirmware's address space which is
  * XXX a shared area the kernel driver can use to keep OBP
  * XXX informed about the current resolution setting.  The idea
@@ -53,7 +51,7 @@ struct e3d_info {
 	u32			pseudo_palette[16];
 };
 
-static int __devinit e3d_get_props(struct e3d_info *ep)
+static int e3d_get_props(struct e3d_info *ep)
 {
 	ep->width = of_getintprop_default(ep->of_node, "width", 0);
 	ep->height = of_getintprop_default(ep->of_node, "height", 0);
@@ -195,7 +193,7 @@ static struct fb_ops e3d_ops = {
 	.fb_imageblit		= e3d_imageblit,
 };
 
-static int __devinit e3d_set_fbinfo(struct e3d_info *ep)
+static int e3d_set_fbinfo(struct e3d_info *ep)
 {
 	struct fb_info *info = ep->info;
 	struct fb_var_screeninfo *var = &info->var;
@@ -240,13 +238,29 @@ static int __devinit e3d_set_fbinfo(struct e3d_info *ep)
         return 0;
 }
 
-static int __devinit e3d_pci_register(struct pci_dev *pdev,
-				      const struct pci_device_id *ent)
+static int e3d_pci_register(struct pci_dev *pdev,
+			    const struct pci_device_id *ent)
 {
+	struct device_node *of_node;
+	const char *device_type;
 	struct fb_info *info;
 	struct e3d_info *ep;
 	unsigned int line_length;
 	int err;
+
+	of_node = pci_device_to_OF_node(pdev);
+	if (!of_node) {
+		printk(KERN_ERR "e3d: Cannot find OF node of %s\n",
+		       pci_name(pdev));
+		return -ENODEV;
+	}
+
+	device_type = of_get_property(of_node, "device_type", NULL);
+	if (!device_type) {
+		printk(KERN_INFO "e3d: Ignoring secondary output device "
+		       "at %s\n", pci_name(pdev));
+		return -ENODEV;
+	}
 
 	err = pci_enable_device(pdev);
 	if (err < 0) {
@@ -266,13 +280,7 @@ static int __devinit e3d_pci_register(struct pci_dev *pdev,
 	ep->info = info;
 	ep->pdev = pdev;
 	spin_lock_init(&ep->lock);
-	ep->of_node = pci_device_to_OF_node(pdev);
-	if (!ep->of_node) {
-		printk(KERN_ERR "e3d: Cannot find OF node of %s\n",
-		       pci_name(pdev));
-		err = -ENODEV;
-		goto err_release_fb;
-	}
+	ep->of_node = of_node;
 
 	/* Read the PCI base register of the frame buffer, which we
 	 * need in order to interpret the RAMDAC_VID_*FB* values in
@@ -290,8 +298,10 @@ static int __devinit e3d_pci_register(struct pci_dev *pdev,
 		goto err_release_fb;
 	}
 	ep->ramdac = ioremap(ep->regs_base_phys + 0x8000, 0x1000);
-	if (!ep->ramdac)
+	if (!ep->ramdac) {
+		err = -ENOMEM;
 		goto err_release_pci1;
+	}
 
 	ep->fb8_0_off = readl(ep->ramdac + RAMDAC_VID_8FB_0);
 	ep->fb8_0_off -= ep->fb_base_reg;
@@ -335,8 +345,10 @@ static int __devinit e3d_pci_register(struct pci_dev *pdev,
 	ep->fb_size = info->fix.line_length * ep->height;
 
 	ep->fb_base = ioremap(ep->fb_base_phys, ep->fb_size);
-	if (!ep->fb_base)
+	if (!ep->fb_base) {
+		err = -ENOMEM;
 		goto err_release_pci0;
+	}
 
 	err = e3d_set_fbinfo(ep);
 	if (err)
@@ -350,10 +362,13 @@ static int __devinit e3d_pci_register(struct pci_dev *pdev,
 	if (err < 0) {
 		printk(KERN_ERR "e3d: Could not register framebuffer %s\n",
 		       pci_name(pdev));
-		goto err_unmap_fb;
+		goto err_free_cmap;
 	}
 
 	return 0;
+
+err_free_cmap:
+	fb_dealloc_cmap(&info->cmap);
 
 err_unmap_fb:
 	iounmap(ep->fb_base);
@@ -377,7 +392,7 @@ err_out:
 	return err;
 }
 
-static void __devexit e3d_pci_unregister(struct pci_dev *pdev)
+static void e3d_pci_unregister(struct pci_dev *pdev)
 {
 	struct fb_info *info = pci_get_drvdata(pdev);
 	struct e3d_info *ep = info->par;
@@ -390,6 +405,7 @@ static void __devexit e3d_pci_unregister(struct pci_dev *pdev)
 	pci_release_region(pdev, 0);
 	pci_release_region(pdev, 1);
 
+	fb_dealloc_cmap(&info->cmap);
         framebuffer_release(info);
 
 	pci_disable_device(pdev);
@@ -397,6 +413,7 @@ static void __devexit e3d_pci_unregister(struct pci_dev *pdev)
 
 static struct pci_device_id e3d_pci_table[] = {
 	{	PCI_DEVICE(PCI_VENDOR_ID_3DLABS, 0x7a0),	},
+	{	PCI_DEVICE(0x1091, 0x7a0),			},
 	{	PCI_DEVICE(PCI_VENDOR_ID_3DLABS, 0x7a2),	},
 	{	.vendor = PCI_VENDOR_ID_3DLABS,
 		.device = PCI_ANY_ID,
@@ -420,7 +437,7 @@ static struct pci_driver e3d_driver = {
 	.name		= "e3d",
 	.id_table	= e3d_pci_table,
 	.probe		= e3d_pci_register,
-	.remove		= __devexit_p(e3d_pci_unregister),
+	.remove		= e3d_pci_unregister,
 };
 
 static int __init e3d_init(void)

@@ -32,10 +32,12 @@
 #include <linux/kernel.h>	/* printk() */
 #include <linux/fs.h>		/* everything... */
 #include <linux/errno.h>	/* error codes */
+#include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/ioport.h>
 #include <linux/interrupt.h>
 #include <linux/spinlock.h>
+#include <linux/mutex.h>
 #include <linux/timer.h>
 #include <linux/sysfs.h>
 #include <linux/device.h>
@@ -204,11 +206,14 @@ static int tlclk_open(struct inode *inode, struct file *filp)
 {
 	int result;
 
-	if (test_and_set_bit(0, &useflags))
-		return -EBUSY;
+	mutex_lock(&tlclk_mutex);
+	if (test_and_set_bit(0, &useflags)) {
+		result = -EBUSY;
 		/* this legacy device is always one per system and it doesn't
 		 * know how to handle multiple concurrent clients.
 		 */
+		goto out;
+	}
 
 	/* Make sure there is no interrupt pending while
 	 * initialising interrupt handler */
@@ -218,13 +223,14 @@ static int tlclk_open(struct inode *inode, struct file *filp)
 	 * we can't share this IRQ */
 	result = request_irq(telclk_interrupt, &tlclk_interrupt,
 			     IRQF_DISABLED, "telco_clock", tlclk_interrupt);
-	if (result == -EBUSY) {
+	if (result == -EBUSY)
 		printk(KERN_ERR "tlclk: Interrupt can't be reserved.\n");
-		return -EBUSY;
-	}
-	inb(TLCLK_REG6);	/* Clear interrupt events */
+	else
+		inb(TLCLK_REG6);	/* Clear interrupt events */
 
-	return 0;
+out:
+	mutex_unlock(&tlclk_mutex);
+	return result;
 }
 
 static int tlclk_release(struct inode *inode, struct file *filp)
@@ -261,6 +267,7 @@ static const struct file_operations tlclk_fops = {
 	.read = tlclk_read,
 	.open = tlclk_open,
 	.release = tlclk_release,
+	.llseek = noop_llseek,
 
 };
 
@@ -777,8 +784,10 @@ static int __init tlclk_init(void)
 	}
 	tlclk_major = ret;
 	alarm_events = kzalloc( sizeof(struct tlclk_alarms), GFP_KERNEL);
-	if (!alarm_events)
+	if (!alarm_events) {
+		ret = -ENOMEM;
 		goto out1;
+	}
 
 	/* Read telecom clock IRQ number (Set by BIOS) */
 	if (!request_region(TLCLK_BASE, 8, "telco_clock")) {
@@ -790,7 +799,7 @@ static int __init tlclk_init(void)
 	telclk_interrupt = (inb(TLCLK_REG7) & 0x0f);
 
 	if (0x0F == telclk_interrupt ) { /* not MCPBL0010 ? */
-		printk(KERN_ERR "telclk_interrup = 0x%x non-mcpbl0010 hw.\n",
+		printk(KERN_ERR "telclk_interrupt = 0x%x non-mcpbl0010 hw.\n",
 			telclk_interrupt);
 		ret = -ENXIO;
 		goto out3;

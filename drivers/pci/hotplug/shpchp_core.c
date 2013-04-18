@@ -31,15 +31,14 @@
 #include <linux/moduleparam.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
+#include <linux/slab.h>
 #include <linux/pci.h>
-#include <linux/workqueue.h>
 #include "shpchp.h"
 
 /* Global variables */
-int shpchp_debug;
-int shpchp_poll_mode;
+bool shpchp_debug;
+bool shpchp_poll_mode;
 int shpchp_poll_time;
-struct workqueue_struct *shpchp_wq;
 
 #define DRIVER_VERSION	"0.4"
 #define DRIVER_AUTHOR	"Dan Zink <dan.zink@compaq.com>, Greg Kroah-Hartman <greg@kroah.com>, Dely Sy <dely.l.sy@intel.com>"
@@ -65,12 +64,8 @@ static int get_power_status	(struct hotplug_slot *slot, u8 *value);
 static int get_attention_status	(struct hotplug_slot *slot, u8 *value);
 static int get_latch_status	(struct hotplug_slot *slot, u8 *value);
 static int get_adapter_status	(struct hotplug_slot *slot, u8 *value);
-static int get_address		(struct hotplug_slot *slot, u32 *value);
-static int get_max_bus_speed	(struct hotplug_slot *slot, enum pci_bus_speed *value);
-static int get_cur_bus_speed	(struct hotplug_slot *slot, enum pci_bus_speed *value);
 
 static struct hotplug_slot_ops shpchp_hotplug_slot_ops = {
-	.owner =		THIS_MODULE,
 	.set_attention_status =	set_attention_status,
 	.enable_slot =		enable_slot,
 	.disable_slot =		disable_slot,
@@ -78,9 +73,6 @@ static struct hotplug_slot_ops shpchp_hotplug_slot_ops = {
 	.get_attention_status =	get_attention_status,
 	.get_latch_status =	get_latch_status,
 	.get_adapter_status =	get_adapter_status,
-	.get_address =		get_address,
-	.get_max_bus_speed =	get_max_bus_speed,
-	.get_cur_bus_speed =	get_cur_bus_speed,
 };
 
 /**
@@ -91,17 +83,12 @@ static void release_slot(struct hotplug_slot *hotplug_slot)
 {
 	struct slot *slot = hotplug_slot->private;
 
-	dbg("%s - physical_slot = %s\n", __FUNCTION__, hotplug_slot->name);
+	ctrl_dbg(slot->ctrl, "%s: physical_slot = %s\n",
+		 __func__, slot_name(slot));
 
 	kfree(slot->hotplug_slot->info);
 	kfree(slot->hotplug_slot);
 	kfree(slot);
-}
-
-static void make_slot_name(struct slot *slot)
-{
-	snprintf(slot->hotplug_slot->name, SLOT_NAME_SIZE, "%04d_%04d",
-		 slot->bus, slot->number);
 }
 
 static int init_slots(struct controller *ctrl)
@@ -109,25 +96,30 @@ static int init_slots(struct controller *ctrl)
 	struct slot *slot;
 	struct hotplug_slot *hotplug_slot;
 	struct hotplug_slot_info *info;
-	int retval = -ENOMEM;
+	char name[SLOT_NAME_SIZE];
+	int retval;
 	int i;
 
 	for (i = 0; i < ctrl->num_slots; i++) {
 		slot = kzalloc(sizeof(*slot), GFP_KERNEL);
-		if (!slot)
+		if (!slot) {
+			retval = -ENOMEM;
 			goto error;
+		}
 
 		hotplug_slot = kzalloc(sizeof(*hotplug_slot), GFP_KERNEL);
-		if (!hotplug_slot)
+		if (!hotplug_slot) {
+			retval = -ENOMEM;
 			goto error_slot;
+		}
 		slot->hotplug_slot = hotplug_slot;
 
 		info = kzalloc(sizeof(*info), GFP_KERNEL);
-		if (!info)
+		if (!info) {
+			retval = -ENOMEM;
 			goto error_hpslot;
+		}
 		hotplug_slot->info = info;
-
-		hotplug_slot->name = slot->name;
 
 		slot->hp_slot = i;
 		slot->ctrl = ctrl;
@@ -135,33 +127,47 @@ static int init_slots(struct controller *ctrl)
 		slot->device = ctrl->slot_device_offset + i;
 		slot->hpc_ops = ctrl->hpc_ops;
 		slot->number = ctrl->first_slot + (ctrl->slot_num_inc * i);
+
+		snprintf(name, sizeof(name), "shpchp-%d", slot->number);
+		slot->wq = alloc_workqueue(name, 0, 0);
+		if (!slot->wq) {
+			retval = -ENOMEM;
+			goto error_info;
+		}
+
 		mutex_init(&slot->lock);
 		INIT_DELAYED_WORK(&slot->work, shpchp_queue_pushbutton_work);
 
 		/* register this slot with the hotplug pci core */
 		hotplug_slot->private = slot;
 		hotplug_slot->release = &release_slot;
-		make_slot_name(slot);
+		snprintf(name, SLOT_NAME_SIZE, "%d", slot->number);
 		hotplug_slot->ops = &shpchp_hotplug_slot_ops;
+
+ 		ctrl_dbg(ctrl, "Registering domain:bus:dev=%04x:%02x:%02x "
+ 			 "hp_slot=%x sun=%x slot_device_offset=%x\n",
+ 			 pci_domain_nr(ctrl->pci_dev->subordinate),
+ 			 slot->bus, slot->device, slot->hp_slot, slot->number,
+ 			 ctrl->slot_device_offset);
+		retval = pci_hp_register(slot->hotplug_slot,
+				ctrl->pci_dev->subordinate, slot->device, name);
+		if (retval) {
+			ctrl_err(ctrl, "pci_hp_register failed with error %d\n",
+				 retval);
+			goto error_slotwq;
+		}
 
 		get_power_status(hotplug_slot, &info->power_status);
 		get_attention_status(hotplug_slot, &info->attention_status);
 		get_latch_status(hotplug_slot, &info->latch_status);
 		get_adapter_status(hotplug_slot, &info->adapter_status);
 
-		dbg("Registering bus=%x dev=%x hp_slot=%x sun=%x "
-		    "slot_device_offset=%x\n", slot->bus, slot->device,
-		    slot->hp_slot, slot->number, ctrl->slot_device_offset);
-		retval = pci_hp_register(slot->hotplug_slot);
-		if (retval) {
-			err("pci_hp_register failed with error %d\n", retval);
-			goto error_info;
-		}
-
 		list_add(&slot->slot_list, &ctrl->slot_list);
 	}
 
 	return 0;
+error_slotwq:
+	destroy_workqueue(slot->wq);
 error_info:
 	kfree(info);
 error_hpslot:
@@ -182,8 +188,7 @@ void cleanup_slots(struct controller *ctrl)
 		slot = list_entry(tmp, struct slot, slot_list);
 		list_del(&slot->slot_list);
 		cancel_delayed_work(&slot->work);
-		flush_scheduled_work();
-		flush_workqueue(shpchp_wq);
+		destroy_workqueue(slot->wq);
 		pci_hp_deregister(slot->hotplug_slot);
 	}
 }
@@ -195,7 +200,8 @@ static int set_attention_status (struct hotplug_slot *hotplug_slot, u8 status)
 {
 	struct slot *slot = get_slot(hotplug_slot);
 
-	dbg("%s - physical_slot = %s\n", __FUNCTION__, hotplug_slot->name);
+	ctrl_dbg(slot->ctrl, "%s: physical_slot = %s\n",
+		 __func__, slot_name(slot));
 
 	hotplug_slot->info->attention_status = status;
 	slot->hpc_ops->set_attention_status(slot, status);
@@ -207,7 +213,8 @@ static int enable_slot (struct hotplug_slot *hotplug_slot)
 {
 	struct slot *slot = get_slot(hotplug_slot);
 
-	dbg("%s - physical_slot = %s\n", __FUNCTION__, hotplug_slot->name);
+	ctrl_dbg(slot->ctrl, "%s: physical_slot = %s\n",
+		 __func__, slot_name(slot));
 
 	return shpchp_sysfs_enable_slot(slot);
 }
@@ -216,7 +223,8 @@ static int disable_slot (struct hotplug_slot *hotplug_slot)
 {
 	struct slot *slot = get_slot(hotplug_slot);
 
-	dbg("%s - physical_slot = %s\n", __FUNCTION__, hotplug_slot->name);
+	ctrl_dbg(slot->ctrl, "%s: physical_slot = %s\n",
+		 __func__, slot_name(slot));
 
 	return shpchp_sysfs_disable_slot(slot);
 }
@@ -226,7 +234,8 @@ static int get_power_status (struct hotplug_slot *hotplug_slot, u8 *value)
 	struct slot *slot = get_slot(hotplug_slot);
 	int retval;
 
-	dbg("%s - physical_slot = %s\n", __FUNCTION__, hotplug_slot->name);
+	ctrl_dbg(slot->ctrl, "%s: physical_slot = %s\n",
+		 __func__, slot_name(slot));
 
 	retval = slot->hpc_ops->get_power_status(slot, value);
 	if (retval < 0)
@@ -240,7 +249,8 @@ static int get_attention_status (struct hotplug_slot *hotplug_slot, u8 *value)
 	struct slot *slot = get_slot(hotplug_slot);
 	int retval;
 
-	dbg("%s - physical_slot = %s\n", __FUNCTION__, hotplug_slot->name);
+	ctrl_dbg(slot->ctrl, "%s: physical_slot = %s\n",
+		 __func__, slot_name(slot));
 
 	retval = slot->hpc_ops->get_attention_status(slot, value);
 	if (retval < 0)
@@ -254,7 +264,8 @@ static int get_latch_status (struct hotplug_slot *hotplug_slot, u8 *value)
 	struct slot *slot = get_slot(hotplug_slot);
 	int retval;
 
-	dbg("%s - physical_slot = %s\n", __FUNCTION__, hotplug_slot->name);
+	ctrl_dbg(slot->ctrl, "%s: physical_slot = %s\n",
+		 __func__, slot_name(slot));
 
 	retval = slot->hpc_ops->get_latch_status(slot, value);
 	if (retval < 0)
@@ -268,7 +279,8 @@ static int get_adapter_status (struct hotplug_slot *hotplug_slot, u8 *value)
 	struct slot *slot = get_slot(hotplug_slot);
 	int retval;
 
-	dbg("%s - physical_slot = %s\n", __FUNCTION__, hotplug_slot->name);
+	ctrl_dbg(slot->ctrl, "%s: physical_slot = %s\n",
+		 __func__, slot_name(slot));
 
 	retval = slot->hpc_ops->get_adapter_status(slot, value);
 	if (retval < 0)
@@ -277,55 +289,16 @@ static int get_adapter_status (struct hotplug_slot *hotplug_slot, u8 *value)
 	return 0;
 }
 
-static int get_address (struct hotplug_slot *hotplug_slot, u32 *value)
-{
-	struct slot *slot = get_slot(hotplug_slot);
-	struct pci_bus *bus = slot->ctrl->pci_dev->subordinate;
-
-	dbg("%s - physical_slot = %s\n", __FUNCTION__, hotplug_slot->name);
-
-	*value = (pci_domain_nr(bus) << 16) | (slot->bus << 8) | slot->device;
-
-	return 0;
-}
-
-static int get_max_bus_speed (struct hotplug_slot *hotplug_slot, enum pci_bus_speed *value)
-{
-	struct slot *slot = get_slot(hotplug_slot);
-	int retval;
-
-	dbg("%s - physical_slot = %s\n", __FUNCTION__, hotplug_slot->name);
-
-	retval = slot->hpc_ops->get_max_bus_speed(slot, value);
-	if (retval < 0)
-		*value = PCI_SPEED_UNKNOWN;
-
-	return 0;
-}
-
-static int get_cur_bus_speed (struct hotplug_slot *hotplug_slot, enum pci_bus_speed *value)
-{
-	struct slot *slot = get_slot(hotplug_slot);
-	int retval;
-
-	dbg("%s - physical_slot = %s\n", __FUNCTION__, hotplug_slot->name);
-
-	retval = slot->hpc_ops->get_cur_bus_speed(slot, value);
-	if (retval < 0)
-		*value = PCI_SPEED_UNKNOWN;
-
-	return 0;
-}
-
 static int is_shpc_capable(struct pci_dev *dev)
 {
-       if ((dev->vendor == PCI_VENDOR_ID_AMD) || (dev->device ==
-                               PCI_DEVICE_ID_AMD_GOLAM_7450))
-               return 1;
-       if (pci_find_capability(dev, PCI_CAP_ID_SHPC))
-               return 1;
-
-       return 0;
+	if (dev->vendor == PCI_VENDOR_ID_AMD &&
+	    dev->device == PCI_DEVICE_ID_AMD_GOLAM_7450)
+		return 1;
+	if (!pci_find_capability(dev, PCI_CAP_ID_SHPC))
+		return 0;
+	if (get_hp_hw_control_from_firmware(dev))
+		return 0;
+	return 1;
 }
 
 static int shpc_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
@@ -338,15 +311,14 @@ static int shpc_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 	ctrl = kzalloc(sizeof(*ctrl), GFP_KERNEL);
 	if (!ctrl) {
-		err("%s : out of memory\n", __FUNCTION__);
+		dev_err(&pdev->dev, "%s: Out of memory\n", __func__);
 		goto err_out_none;
 	}
 	INIT_LIST_HEAD(&ctrl->slot_list);
 
 	rc = shpc_init(ctrl, pdev);
 	if (rc) {
-		dbg("%s: controller initialization failed\n",
-		    SHPC_MODULE_NAME);
+		ctrl_dbg(ctrl, "Controller initialization failed\n");
 		goto err_out_free_ctrl;
 	}
 
@@ -355,7 +327,7 @@ static int shpc_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	/* Setup the slot information structures */
 	rc = init_slots(ctrl);
 	if (rc) {
-		err("%s: slot initialization failed\n", SHPC_MODULE_NAME);
+		ctrl_err(ctrl, "Slot initialization failed\n");
 		goto err_out_release_ctlr;
 	}
 
@@ -399,11 +371,12 @@ static struct pci_driver shpc_driver = {
 
 static int __init shpcd_init(void)
 {
-	int retval = 0;
+	int retval;
 
 	retval = pci_register_driver(&shpc_driver);
-	dbg("%s: pci_register_driver = %d\n", __FUNCTION__, retval);
+	dbg("%s: pci_register_driver = %d\n", __func__, retval);
 	info(DRIVER_DESC " version: " DRIVER_VERSION "\n");
+
 	return retval;
 }
 

@@ -41,12 +41,11 @@
  * - Run application using a midi device (eg. /dev/snd/midiC1D0)
  */
 
-#include <sound/driver.h>
 #include <linux/init.h>
 #include <linux/wait.h>
 #include <linux/err.h>
 #include <linux/platform_device.h>
-#include <linux/moduleparam.h>
+#include <linux/module.h>
 #include <sound/core.h>
 #include <sound/seq_kernel.h>
 #include <sound/seq_virmidi.h>
@@ -64,7 +63,7 @@ MODULE_SUPPORTED_DEVICE("{{ALSA,Virtual rawmidi device}}");
 
 static int index[SNDRV_CARDS] = SNDRV_DEFAULT_IDX;	/* Index 0-MAX */
 static char *id[SNDRV_CARDS] = SNDRV_DEFAULT_STR;	/* ID for this card */
-static int enable[SNDRV_CARDS] = {1, [1 ... (SNDRV_CARDS - 1)] = 0};
+static bool enable[SNDRV_CARDS] = {1, [1 ... (SNDRV_CARDS - 1)] = 0};
 static int midi_devs[SNDRV_CARDS] = {[0 ... (SNDRV_CARDS - 1)] = 4};
 
 module_param_array(index, int, NULL, 0444);
@@ -84,22 +83,24 @@ struct snd_card_virmidi {
 static struct platform_device *devices[SNDRV_CARDS];
 
 
-static int __devinit snd_virmidi_probe(struct platform_device *devptr)
+static int snd_virmidi_probe(struct platform_device *devptr)
 {
 	struct snd_card *card;
 	struct snd_card_virmidi *vmidi;
 	int idx, err;
 	int dev = devptr->id;
 
-	card = snd_card_new(index[dev], id[dev], THIS_MODULE,
-			    sizeof(struct snd_card_virmidi));
-	if (card == NULL)
-		return -ENOMEM;
-	vmidi = (struct snd_card_virmidi *)card->private_data;
+	err = snd_card_create(index[dev], id[dev], THIS_MODULE,
+			      sizeof(struct snd_card_virmidi), &card);
+	if (err < 0)
+		return err;
+	vmidi = card->private_data;
 	vmidi->card = card;
 
 	if (midi_devs[dev] > MAX_MIDI_DEVICES) {
-		snd_printk("too much midi devices for virmidi %d: force to use %d\n", dev, MAX_MIDI_DEVICES);
+		snd_printk(KERN_WARNING
+			   "too much midi devices for virmidi %d: "
+			   "force to use %d\n", dev, MAX_MIDI_DEVICES);
 		midi_devs[dev] = MAX_MIDI_DEVICES;
 	}
 	for (idx = 0; idx < midi_devs[dev]; idx++) {
@@ -128,7 +129,7 @@ static int __devinit snd_virmidi_probe(struct platform_device *devptr)
 	return err;
 }
 
-static int __devexit snd_virmidi_remove(struct platform_device *devptr)
+static int snd_virmidi_remove(struct platform_device *devptr)
 {
 	snd_card_free(platform_get_drvdata(devptr));
 	platform_set_drvdata(devptr, NULL);
@@ -139,13 +140,14 @@ static int __devexit snd_virmidi_remove(struct platform_device *devptr)
 
 static struct platform_driver snd_virmidi_driver = {
 	.probe		= snd_virmidi_probe,
-	.remove		= __devexit_p(snd_virmidi_remove),
+	.remove		= snd_virmidi_remove,
 	.driver		= {
-		.name	= SND_VIRMIDI_DRIVER
+		.name	= SND_VIRMIDI_DRIVER,
+		.owner	= THIS_MODULE,
 	},
 };
 
-static void __init_or_module snd_virmidi_unregister_all(void)
+static void snd_virmidi_unregister_all(void)
 {
 	int i;
 

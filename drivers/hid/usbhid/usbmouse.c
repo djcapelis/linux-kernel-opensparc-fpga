@@ -1,6 +1,4 @@
 /*
- * $Id: usbmouse.c,v 1.15 2001/12/27 10:37:41 vojtech Exp $
- *
  *  Copyright (c) 1999-2001 Vojtech Pavlik
  *
  *  USB HIDBP Mouse support
@@ -32,6 +30,11 @@
 #include <linux/init.h>
 #include <linux/usb/input.h>
 #include <linux/hid.h>
+
+/* for apple IDs */
+#ifdef CONFIG_USB_HID_MODULE
+#include "../hid-ids.h"
+#endif
 
 /*
  * Version Information
@@ -89,9 +92,10 @@ static void usb_mouse_irq(struct urb *urb)
 resubmit:
 	status = usb_submit_urb (urb, GFP_ATOMIC);
 	if (status)
-		err ("can't resubmit intr, %s-%s/input0, status %d",
-				mouse->usbdev->bus->bus_name,
-				mouse->usbdev->devpath, status);
+		dev_err(&mouse->usbdev->dev,
+			"can't resubmit intr, %s-%s/input0, status %d\n",
+			mouse->usbdev->bus->bus_name,
+			mouse->usbdev->devpath, status);
 }
 
 static int usb_mouse_open(struct input_dev *dev)
@@ -139,7 +143,7 @@ static int usb_mouse_probe(struct usb_interface *intf, const struct usb_device_i
 	if (!mouse || !input_dev)
 		goto fail1;
 
-	mouse->data = usb_buffer_alloc(dev, 8, GFP_ATOMIC, &mouse->data_dma);
+	mouse->data = usb_alloc_coherent(dev, 8, GFP_ATOMIC, &mouse->data_dma);
 	if (!mouse->data)
 		goto fail1;
 
@@ -173,11 +177,13 @@ static int usb_mouse_probe(struct usb_interface *intf, const struct usb_device_i
 	usb_to_input_id(dev, &input_dev->id);
 	input_dev->dev.parent = &intf->dev;
 
-	input_dev->evbit[0] = BIT(EV_KEY) | BIT(EV_REL);
-	input_dev->keybit[LONG(BTN_MOUSE)] = BIT(BTN_LEFT) | BIT(BTN_RIGHT) | BIT(BTN_MIDDLE);
-	input_dev->relbit[0] = BIT(REL_X) | BIT(REL_Y);
-	input_dev->keybit[LONG(BTN_MOUSE)] |= BIT(BTN_SIDE) | BIT(BTN_EXTRA);
-	input_dev->relbit[0] |= BIT(REL_WHEEL);
+	input_dev->evbit[0] = BIT_MASK(EV_KEY) | BIT_MASK(EV_REL);
+	input_dev->keybit[BIT_WORD(BTN_MOUSE)] = BIT_MASK(BTN_LEFT) |
+		BIT_MASK(BTN_RIGHT) | BIT_MASK(BTN_MIDDLE);
+	input_dev->relbit[0] = BIT_MASK(REL_X) | BIT_MASK(REL_Y);
+	input_dev->keybit[BIT_WORD(BTN_MOUSE)] |= BIT_MASK(BTN_SIDE) |
+		BIT_MASK(BTN_EXTRA);
+	input_dev->relbit[0] |= BIT_MASK(REL_WHEEL);
 
 	input_set_drvdata(input_dev, mouse);
 
@@ -200,7 +206,7 @@ static int usb_mouse_probe(struct usb_interface *intf, const struct usb_device_i
 fail3:	
 	usb_free_urb(mouse->irq);
 fail2:	
-	usb_buffer_free(dev, 8, mouse->data, mouse->data_dma);
+	usb_free_coherent(dev, 8, mouse->data, mouse->data_dma);
 fail1:	
 	input_free_device(input_dev);
 	kfree(mouse);
@@ -216,7 +222,7 @@ static void usb_mouse_disconnect(struct usb_interface *intf)
 		usb_kill_urb(mouse->irq);
 		input_unregister_device(mouse->dev);
 		usb_free_urb(mouse->irq);
-		usb_buffer_free(interface_to_usbdev(intf), 8, mouse->data, mouse->data_dma);
+		usb_free_coherent(interface_to_usbdev(intf), 8, mouse->data, mouse->data_dma);
 		kfree(mouse);
 	}
 }
@@ -236,18 +242,4 @@ static struct usb_driver usb_mouse_driver = {
 	.id_table	= usb_mouse_id_table,
 };
 
-static int __init usb_mouse_init(void)
-{
-	int retval = usb_register(&usb_mouse_driver);
-	if (retval == 0)
-		info(DRIVER_VERSION ":" DRIVER_DESC);
-	return retval;
-}
-
-static void __exit usb_mouse_exit(void)
-{
-	usb_deregister(&usb_mouse_driver);
-}
-
-module_init(usb_mouse_init);
-module_exit(usb_mouse_exit);
+module_usb_driver(usb_mouse_driver);

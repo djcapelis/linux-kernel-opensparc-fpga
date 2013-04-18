@@ -10,9 +10,10 @@
  */
 #include <linux/if_arp.h>
 #include <linux/init.h>
+#include <linux/slab.h>
 #include <net/x25.h>
 
-struct list_head x25_forward_list = LIST_HEAD_INIT(x25_forward_list);
+LIST_HEAD(x25_forward_list);
 DEFINE_RWLOCK(x25_forward_list_lock);
 
 int x25_forward_call(struct x25_address *dest_addr, struct x25_neigh *from,
@@ -30,7 +31,7 @@ int x25_forward_call(struct x25_address *dest_addr, struct x25_neigh *from,
 		goto out_no_route;
 
 	if ((neigh_new = x25_get_neigh(rt->dev)) == NULL) {
-		/* This shouldnt happen, if it occurs somehow
+		/* This shouldn't happen, if it occurs somehow
 		 * do something sensible
 		 */
 		goto out_put_route;
@@ -44,7 +45,7 @@ int x25_forward_call(struct x25_address *dest_addr, struct x25_neigh *from,
 	}
 
 	/* Remote end sending a call request on an already
-	 * established LCI? It shouldnt happen, just in case..
+	 * established LCI? It shouldn't happen, just in case..
 	 */
 	read_lock_bh(&x25_forward_list_lock);
 	list_for_each(entry, &x25_forward_list) {
@@ -118,13 +119,14 @@ int x25_forward_data(int lci, struct x25_neigh *from, struct sk_buff *skb) {
 		goto out;
 
 	if ( (skbn = pskb_copy(skb, GFP_ATOMIC)) == NULL){
-		goto out;
+		goto output;
 
 	}
 	x25_transmit_link(skbn, nb);
 
-	x25_neigh_put(nb);
 	rc = 1;
+output:
+	x25_neigh_put(nb);
 out:
 	return rc;
 }

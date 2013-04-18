@@ -63,14 +63,14 @@ If you have some knowledge and spare time, please try to fix this
 yourself (patches very welcome of course...)  You know: The linux
 slogan is "Do it yourself".
 
-There is a mailing list: video4linux-list@redhat.com.
-https://listman.redhat.com/mailman/listinfo/video4linux-list
+There is a mailing list: linux-media@vger.kernel.org
+http://vger.kernel.org/vger-lists.html#linux-media
 
 If you have trouble with some specific TV card, try to ask there
 instead of mailing me directly.  The chance that someone with the
 same card listens there is much higher...
 
-For problems with sound:  There are alot of different systems used
+For problems with sound:  There are a lot of different systems used
 for TV sound all over the world.  And there are also different chips
 which decode the audio signal.  Reports about sound problems ("stereo
 does'nt work") are pretty useless unless you include some details

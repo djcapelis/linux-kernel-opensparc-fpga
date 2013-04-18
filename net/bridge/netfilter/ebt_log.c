@@ -8,26 +8,26 @@
  *  April, 2002
  *
  */
-
-#include <linux/in.h>
-#include <linux/netfilter_bridge/ebtables.h>
-#include <linux/netfilter_bridge/ebt_log.h>
-#include <linux/netfilter.h>
 #include <linux/module.h>
 #include <linux/ip.h>
 #include <linux/in.h>
 #include <linux/if_arp.h>
 #include <linux/spinlock.h>
+#include <net/netfilter/nf_log.h>
+#include <linux/ipv6.h>
+#include <net/ipv6.h>
+#include <linux/in6.h>
+#include <linux/netfilter/x_tables.h>
+#include <linux/netfilter_bridge/ebtables.h>
+#include <linux/netfilter_bridge/ebt_log.h>
+#include <linux/netfilter.h>
 
 static DEFINE_SPINLOCK(ebt_log_lock);
 
-static int ebt_log_check(const char *tablename, unsigned int hookmask,
-   const struct ebt_entry *e, void *data, unsigned int datalen)
+static int ebt_log_tg_check(const struct xt_tgchk_param *par)
 {
-	struct ebt_log_info *info = (struct ebt_log_info *)data;
+	struct ebt_log_info *info = par->targinfo;
 
-	if (datalen != EBT_ALIGN(sizeof(struct ebt_log_info)))
-		return -EINVAL;
 	if (info->bitmask & ~EBT_LOG_MASK)
 		return -EINVAL;
 	if (info->loglevel >= 8)
@@ -50,17 +50,29 @@ struct arppayload
 	unsigned char ip_dst[4];
 };
 
-static void print_MAC(unsigned char *p)
+static void
+print_ports(const struct sk_buff *skb, uint8_t protocol, int offset)
 {
-	int i;
+	if (protocol == IPPROTO_TCP ||
+	    protocol == IPPROTO_UDP ||
+	    protocol == IPPROTO_UDPLITE ||
+	    protocol == IPPROTO_SCTP ||
+	    protocol == IPPROTO_DCCP) {
+		const struct tcpudphdr *pptr;
+		struct tcpudphdr _ports;
 
-	for (i = 0; i < ETH_ALEN; i++, p++)
-		printk("%02x%c", *p, i == ETH_ALEN - 1 ? ' ':':');
+		pptr = skb_header_pointer(skb, offset,
+					  sizeof(_ports), &_ports);
+		if (pptr == NULL) {
+			printk(" INCOMPLETE TCP/UDP header");
+			return;
+		}
+		printk(" SPT=%u DPT=%u", ntohs(pptr->src), ntohs(pptr->dst));
+	}
 }
 
-#define myNIPQUAD(a) a[0], a[1], a[2], a[3]
 static void
-ebt_log_packet(unsigned int pf, unsigned int hooknum,
+ebt_log_packet(u_int8_t pf, unsigned int hooknum,
    const struct sk_buff *skb, const struct net_device *in,
    const struct net_device *out, const struct nf_loginfo *loginfo,
    const char *prefix)
@@ -68,14 +80,11 @@ ebt_log_packet(unsigned int pf, unsigned int hooknum,
 	unsigned int bitmask;
 
 	spin_lock_bh(&ebt_log_lock);
-	printk("<%c>%s IN=%s OUT=%s MAC source = ", '0' + loginfo->u.log.level,
-	       prefix, in ? in->name : "", out ? out->name : "");
-
-	print_MAC(eth_hdr(skb)->h_source);
-	printk("MAC dest = ");
-	print_MAC(eth_hdr(skb)->h_dest);
-
-	printk("proto = 0x%04x", ntohs(eth_hdr(skb)->h_proto));
+	printk(KERN_SOH "%c%s IN=%s OUT=%s MAC source = %pM MAC dest = %pM proto = 0x%04x",
+	       '0' + loginfo->u.log.level, prefix,
+	       in ? in->name : "", out ? out->name : "",
+	       eth_hdr(skb)->h_source, eth_hdr(skb)->h_dest,
+	       ntohs(eth_hdr(skb)->h_proto));
 
 	if (loginfo->type == NF_LOG_TYPE_LOG)
 		bitmask = loginfo->u.log.logflags;
@@ -84,39 +93,50 @@ ebt_log_packet(unsigned int pf, unsigned int hooknum,
 
 	if ((bitmask & EBT_LOG_IP) && eth_hdr(skb)->h_proto ==
 	   htons(ETH_P_IP)){
-		struct iphdr _iph, *ih;
+		const struct iphdr *ih;
+		struct iphdr _iph;
 
 		ih = skb_header_pointer(skb, 0, sizeof(_iph), &_iph);
 		if (ih == NULL) {
 			printk(" INCOMPLETE IP header");
 			goto out;
 		}
-		printk(" IP SRC=%u.%u.%u.%u IP DST=%u.%u.%u.%u, IP "
-		       "tos=0x%02X, IP proto=%d", NIPQUAD(ih->saddr),
-		       NIPQUAD(ih->daddr), ih->tos, ih->protocol);
-		if (ih->protocol == IPPROTO_TCP ||
-		    ih->protocol == IPPROTO_UDP ||
-		    ih->protocol == IPPROTO_UDPLITE ||
-		    ih->protocol == IPPROTO_SCTP ||
-		    ih->protocol == IPPROTO_DCCP) {
-			struct tcpudphdr _ports, *pptr;
-
-			pptr = skb_header_pointer(skb, ih->ihl*4,
-						  sizeof(_ports), &_ports);
-			if (pptr == NULL) {
-				printk(" INCOMPLETE TCP/UDP header");
-				goto out;
-			}
-			printk(" SPT=%u DPT=%u", ntohs(pptr->src),
-			   ntohs(pptr->dst));
-		}
+		printk(" IP SRC=%pI4 IP DST=%pI4, IP tos=0x%02X, IP proto=%d",
+		       &ih->saddr, &ih->daddr, ih->tos, ih->protocol);
+		print_ports(skb, ih->protocol, ih->ihl*4);
 		goto out;
 	}
+
+#if IS_ENABLED(CONFIG_BRIDGE_EBT_IP6)
+	if ((bitmask & EBT_LOG_IP6) && eth_hdr(skb)->h_proto ==
+	   htons(ETH_P_IPV6)) {
+		const struct ipv6hdr *ih;
+		struct ipv6hdr _iph;
+		uint8_t nexthdr;
+		__be16 frag_off;
+		int offset_ph;
+
+		ih = skb_header_pointer(skb, 0, sizeof(_iph), &_iph);
+		if (ih == NULL) {
+			printk(" INCOMPLETE IPv6 header");
+			goto out;
+		}
+		printk(" IPv6 SRC=%pI6 IPv6 DST=%pI6, IPv6 priority=0x%01X, Next Header=%d",
+		       &ih->saddr, &ih->daddr, ih->priority, ih->nexthdr);
+		nexthdr = ih->nexthdr;
+		offset_ph = ipv6_skip_exthdr(skb, sizeof(_iph), &nexthdr, &frag_off);
+		if (offset_ph == -1)
+			goto out;
+		print_ports(skb, nexthdr, offset_ph);
+		goto out;
+	}
+#endif
 
 	if ((bitmask & EBT_LOG_ARP) &&
 	    ((eth_hdr(skb)->h_proto == htons(ETH_P_ARP)) ||
 	     (eth_hdr(skb)->h_proto == htons(ETH_P_RARP)))) {
-		struct arphdr _arph, *ah;
+		const struct arphdr *ah;
+		struct arphdr _arph;
 
 		ah = skb_header_pointer(skb, 0, sizeof(_arph), &_arph);
 		if (ah == NULL) {
@@ -132,7 +152,8 @@ ebt_log_packet(unsigned int pf, unsigned int hooknum,
 		if (ah->ar_hrd == htons(1) &&
 		    ah->ar_hln == ETH_ALEN &&
 		    ah->ar_pln == sizeof(__be32)) {
-			struct arppayload _arpp, *ap;
+			const struct arppayload *ap;
+			struct arppayload _arpp;
 
 			ap = skb_header_pointer(skb, sizeof(_arph),
 						sizeof(_arpp), &_arpp);
@@ -140,14 +161,8 @@ ebt_log_packet(unsigned int pf, unsigned int hooknum,
 				printk(" INCOMPLETE ARP payload");
 				goto out;
 			}
-			printk(" ARP MAC SRC=");
-			print_MAC(ap->mac_src);
-			printk(" ARP IP SRC=%u.%u.%u.%u",
-			       myNIPQUAD(ap->ip_src));
-			printk(" ARP MAC DST=");
-			print_MAC(ap->mac_dst);
-			printk(" ARP IP DST=%u.%u.%u.%u",
-			       myNIPQUAD(ap->ip_dst));
+			printk(" ARP MAC SRC=%pM ARP IP SRC=%pI4 ARP MAC DST=%pM ARP IP DST=%pI4",
+					ap->mac_src, ap->ip_src, ap->mac_dst, ap->ip_dst);
 		}
 	}
 out:
@@ -156,11 +171,10 @@ out:
 
 }
 
-static void ebt_log(const struct sk_buff *skb, unsigned int hooknr,
-   const struct net_device *in, const struct net_device *out,
-   const void *data, unsigned int datalen)
+static unsigned int
+ebt_log_tg(struct sk_buff *skb, const struct xt_action_param *par)
 {
-	struct ebt_log_info *info = (struct ebt_log_info *)data;
+	const struct ebt_log_info *info = par->targinfo;
 	struct nf_loginfo li;
 
 	li.type = NF_LOG_TYPE_LOG;
@@ -168,22 +182,25 @@ static void ebt_log(const struct sk_buff *skb, unsigned int hooknr,
 	li.u.log.logflags = info->bitmask;
 
 	if (info->bitmask & EBT_LOG_NFLOG)
-		nf_log_packet(PF_BRIDGE, hooknr, skb, in, out, &li,
-			      "%s", info->prefix);
+		nf_log_packet(NFPROTO_BRIDGE, par->hooknum, skb, par->in,
+		              par->out, &li, "%s", info->prefix);
 	else
-		ebt_log_packet(PF_BRIDGE, hooknr, skb, in, out, &li,
-			       info->prefix);
+		ebt_log_packet(NFPROTO_BRIDGE, par->hooknum, skb, par->in,
+		               par->out, &li, info->prefix);
+	return EBT_CONTINUE;
 }
 
-static struct ebt_watcher log =
-{
-	.name		= EBT_LOG_WATCHER,
-	.watcher	= ebt_log,
-	.check		= ebt_log_check,
+static struct xt_target ebt_log_tg_reg __read_mostly = {
+	.name		= "log",
+	.revision	= 0,
+	.family		= NFPROTO_BRIDGE,
+	.target		= ebt_log_tg,
+	.checkentry	= ebt_log_tg_check,
+	.targetsize	= sizeof(struct ebt_log_info),
 	.me		= THIS_MODULE,
 };
 
-static struct nf_logger ebt_log_logger = {
+static struct nf_logger ebt_log_logger __read_mostly = {
 	.name 		= "ebt_log",
 	.logfn		= &ebt_log_packet,
 	.me		= THIS_MODULE,
@@ -193,21 +210,20 @@ static int __init ebt_log_init(void)
 {
 	int ret;
 
-	ret = ebt_register_watcher(&log);
+	ret = xt_register_target(&ebt_log_tg_reg);
 	if (ret < 0)
 		return ret;
-	ret = nf_log_register(PF_BRIDGE, &ebt_log_logger);
-	if (ret < 0 && ret != -EEXIST)
-		ebt_unregister_watcher(&log);
-	return ret;
+	nf_log_register(NFPROTO_BRIDGE, &ebt_log_logger);
+	return 0;
 }
 
 static void __exit ebt_log_fini(void)
 {
 	nf_log_unregister(&ebt_log_logger);
-	ebt_unregister_watcher(&log);
+	xt_unregister_target(&ebt_log_tg_reg);
 }
 
 module_init(ebt_log_init);
 module_exit(ebt_log_fini);
+MODULE_DESCRIPTION("Ebtables: Packet logging to syslog");
 MODULE_LICENSE("GPL");

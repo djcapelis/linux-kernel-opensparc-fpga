@@ -21,6 +21,9 @@
 #include <linux/time.h>
 #include <linux/jiffies.h>
 #include <linux/security.h>
+#include <linux/delay.h>
+#include <linux/slab.h>
+#include <linux/export.h>
 #include <net/sock.h>
 #include <net/netlink.h>
 
@@ -30,13 +33,13 @@
 struct sock *scsi_nl_sock = NULL;
 EXPORT_SYMBOL_GPL(scsi_nl_sock);
 
-
 /**
- * scsi_nl_rcv_msg -
- *    Receive message handler. Extracts message from a receive buffer.
+ * scsi_nl_rcv_msg - Receive message handler.
+ * @skb:		socket receive buffer
+ *
+ * Description: Extracts message from a receive buffer.
  *    Validates message header and calls appropriate transport message handler
  *
- * @skb:		socket receive buffer
  *
  **/
 static void
@@ -44,8 +47,8 @@ scsi_nl_rcv_msg(struct sk_buff *skb)
 {
 	struct nlmsghdr *nlh;
 	struct scsi_nl_hdr *hdr;
-	uint32_t rlen;
-	int err;
+	u32 rlen;
+	int err, tport;
 
 	while (skb->len >= NLMSG_SPACE(0)) {
 		err = 0;
@@ -54,7 +57,7 @@ scsi_nl_rcv_msg(struct sk_buff *skb)
 		if ((nlh->nlmsg_len < (sizeof(*nlh) + sizeof(*hdr))) ||
 		    (skb->len < nlh->nlmsg_len)) {
 			printk(KERN_WARNING "%s: discarding partial skb\n",
-				 __FUNCTION__);
+				 __func__);
 			return;
 		}
 
@@ -74,20 +77,37 @@ scsi_nl_rcv_msg(struct sk_buff *skb)
 			goto next_msg;
 		}
 
-		if (security_netlink_recv(skb, CAP_SYS_ADMIN)) {
+		if (!capable(CAP_SYS_ADMIN)) {
 			err = -EPERM;
 			goto next_msg;
 		}
 
 		if (nlh->nlmsg_len < (sizeof(*nlh) + hdr->msglen)) {
 			printk(KERN_WARNING "%s: discarding partial message\n",
-				 __FUNCTION__);
-			return;
+				 __func__);
+			goto next_msg;
 		}
 
 		/*
-		 * We currently don't support anyone sending us a message
+		 * Deliver message to the appropriate transport
 		 */
+		tport = hdr->transport;
+		if (tport == SCSI_NL_TRANSPORT) {
+			switch (hdr->msgtype) {
+			case SCSI_NL_SHOST_VENDOR:
+				/* Locate the driver that corresponds to the message */
+				err = -ESRCH;
+				break;
+			default:
+				err = -EBADR;
+				break;
+			}
+			if (err)
+				printk(KERN_WARNING "%s: Msgtype %d failed - err %d\n",
+				       __func__, hdr->msgtype, err);
+		}
+		else
+			err = -ENOENT;
 
 next_msg:
 		if ((err) || (nlh->nlmsg_flags & NLM_F_ACK))
@@ -97,83 +117,25 @@ next_msg:
 	}
 }
 
-
 /**
- * scsi_nl_rcv_msg -
- *    Receive handler for a socket. Extracts a received message buffer from
- *    the socket, and starts message processing.
- *
- * @sk:		socket
- * @len:	unused
- *
- **/
-static void
-scsi_nl_rcv(struct sock *sk, int len)
-{
-	struct sk_buff *skb;
-
-	while ((skb = skb_dequeue(&sk->sk_receive_queue))) {
-		scsi_nl_rcv_msg(skb);
-		kfree_skb(skb);
-	}
-}
-
-
-/**
- * scsi_nl_rcv_event -
- *    Event handler for a netlink socket.
- *
- * @this:		event notifier block
- * @event:		event type
- * @ptr:		event payload
- *
- **/
-static int
-scsi_nl_rcv_event(struct notifier_block *this, unsigned long event, void *ptr)
-{
-	struct netlink_notify *n = ptr;
-
-	if (n->protocol != NETLINK_SCSITRANSPORT)
-		return NOTIFY_DONE;
-
-	/*
-	 * Currently, we are not tracking PID's, etc. There is nothing
-	 * to handle.
-	 */
-
-	return NOTIFY_DONE;
-}
-
-static struct notifier_block scsi_netlink_notifier = {
-	.notifier_call  = scsi_nl_rcv_event,
-};
-
-
-/**
- * scsi_netlink_init -
- *    Called by SCSI subsystem to intialize the SCSI transport netlink
- *    interface
+ * scsi_netlink_init - Called by SCSI subsystem to initialize
+ * 	the SCSI transport netlink interface
  *
  **/
 void
 scsi_netlink_init(void)
 {
-	int error;
+	struct netlink_kernel_cfg cfg = {
+		.input	= scsi_nl_rcv_msg,
+		.groups	= SCSI_NL_GRP_CNT,
+	};
 
-	error = netlink_register_notifier(&scsi_netlink_notifier);
-	if (error) {
-		printk(KERN_ERR "%s: register of event handler failed - %d\n",
-				__FUNCTION__, error);
-		return;
-	}
-
-	scsi_nl_sock = netlink_kernel_create(NETLINK_SCSITRANSPORT,
-				SCSI_NL_GRP_CNT, scsi_nl_rcv, NULL,
-				THIS_MODULE);
+	scsi_nl_sock = netlink_kernel_create(&init_net, NETLINK_SCSITRANSPORT,
+					     &cfg);
 	if (!scsi_nl_sock) {
-		printk(KERN_ERR "%s: register of recieve handler failed\n",
-				__FUNCTION__);
-		netlink_unregister_notifier(&scsi_netlink_notifier);
+		printk(KERN_ERR "%s: register of receive handler failed\n",
+				__func__);
+		return;
 	}
 
 	return;
@@ -181,20 +143,16 @@ scsi_netlink_init(void)
 
 
 /**
- * scsi_netlink_exit -
- *    Called by SCSI subsystem to disable the SCSI transport netlink
- *    interface
+ * scsi_netlink_exit - Called by SCSI subsystem to disable the SCSI transport netlink interface
  *
  **/
 void
 scsi_netlink_exit(void)
 {
 	if (scsi_nl_sock) {
-		sock_release(scsi_nl_sock->sk_socket);
-		netlink_unregister_notifier(&scsi_netlink_notifier);
+		netlink_kernel_release(scsi_nl_sock);
 	}
 
 	return;
 }
-
 

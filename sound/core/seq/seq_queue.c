@@ -35,7 +35,6 @@
  *     - Addition of experimental sync support.
  */
 
-#include <sound/driver.h>
 #include <linux/init.h>
 #include <linux/slab.h>
 #include <sound/core.h>
@@ -316,7 +315,8 @@ int snd_seq_enqueue_event(struct snd_seq_event_cell *cell, int atomic, int hop)
 	int dest, err;
 	struct snd_seq_queue *q;
 
-	snd_assert(cell != NULL, return -EINVAL);
+	if (snd_BUG_ON(!cell))
+		return -EINVAL;
 	dest = cell->event.queue;	/* destination queue */
 	q = queueptr(dest);
 	if (q == NULL)
@@ -467,13 +467,11 @@ int snd_seq_queue_timer_open(int queueid)
 int snd_seq_queue_timer_close(int queueid)
 {
 	struct snd_seq_queue *queue;
-	struct snd_seq_timer *tmr;
 	int result = 0;
 
 	queue = queueptr(queueid);
 	if (queue == NULL)
 		return -EINVAL;
-	tmr = queue->timer;
 	snd_seq_timer_close(queue);
 	queuefree(queue);
 	return result;
@@ -735,7 +733,8 @@ int snd_seq_control_queue(struct snd_seq_event *ev, int atomic, int hop)
 {
 	struct snd_seq_queue *q;
 
-	snd_assert(ev != NULL, return -EINVAL);
+	if (snd_BUG_ON(!ev))
+		return -EINVAL;
 	q = queueptr(ev->data.queue.queue);
 
 	if (q == NULL)

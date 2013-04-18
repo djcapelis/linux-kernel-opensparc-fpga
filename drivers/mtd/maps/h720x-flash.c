@@ -2,8 +2,6 @@
  * Flash memory access on Hynix GMS30C7201/HMS30C7202 based
  * evaluation boards
  *
- * $Id: h720x-flash.c,v 1.12 2005/11/07 11:14:27 gleixner Exp $
- *
  * (C) 2002 Jungjun Kim <jungjun.kim@hynix.com>
  *     2003 Thomas Gleixner <tglx@linutronix.de>
  */
@@ -18,7 +16,7 @@
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/map.h>
 #include <linux/mtd/partitions.h>
-#include <asm/hardware.h>
+#include <mach/hardware.h>
 #include <asm/io.h>
 
 static struct mtd_info *mymtd;
@@ -26,8 +24,8 @@ static struct mtd_info *mymtd;
 static struct map_info h720x_map = {
 	.name =		"H720X",
 	.bankwidth =	4,
-	.size =		FLASH_SIZE,
-	.phys =		FLASH_PHYS,
+	.size =		H720X_FLASH_SIZE,
+	.phys =		H720X_FLASH_PHYS,
 };
 
 static struct mtd_partition h720x_partitions[] = {
@@ -60,19 +58,12 @@ static struct mtd_partition h720x_partitions[] = {
 
 #define NUM_PARTITIONS ARRAY_SIZE(h720x_partitions)
 
-static int                   nr_mtd_parts;
-static struct mtd_partition *mtd_parts;
-static const char *probes[] = { "cmdlinepart", NULL };
-
 /*
  * Initialize FLASH support
  */
-int __init h720x_mtd_init(void)
+static int __init h720x_mtd_init(void)
 {
-
-	char	*part_type = NULL;
-
-	h720x_map.virt = ioremap(FLASH_PHYS, FLASH_SIZE);
+	h720x_map.virt = ioremap(h720x_map.phys, h720x_map.size);
 
 	if (!h720x_map.virt) {
 		printk(KERN_ERR "H720x-MTD: ioremap failed\n");
@@ -94,18 +85,8 @@ int __init h720x_mtd_init(void)
 	if (mymtd) {
 		mymtd->owner = THIS_MODULE;
 
-#ifdef CONFIG_MTD_PARTITIONS
-		nr_mtd_parts = parse_mtd_partitions(mymtd, probes, &mtd_parts, 0);
-		if (nr_mtd_parts > 0)
-			part_type = "command line";
-#endif
-		if (nr_mtd_parts <= 0) {
-			mtd_parts = h720x_partitions;
-			nr_mtd_parts = NUM_PARTITIONS;
-			part_type = "builtin";
-		}
-		printk(KERN_INFO "Using %s partition table\n", part_type);
-		add_mtd_partitions(mymtd, mtd_parts, nr_mtd_parts);
+		mtd_device_parse_register(mymtd, NULL, NULL,
+					  h720x_partitions, NUM_PARTITIONS);
 		return 0;
 	}
 
@@ -120,13 +101,9 @@ static void __exit h720x_mtd_cleanup(void)
 {
 
 	if (mymtd) {
-		del_mtd_partitions(mymtd);
+		mtd_device_unregister(mymtd);
 		map_destroy(mymtd);
 	}
-
-	/* Free partition info, if commandline partition was used */
-	if (mtd_parts && (mtd_parts != h720x_partitions))
-		kfree (mtd_parts);
 
 	if (h720x_map.virt) {
 		iounmap((void *)h720x_map.virt);

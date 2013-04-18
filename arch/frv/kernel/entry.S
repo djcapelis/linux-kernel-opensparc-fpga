@@ -38,7 +38,7 @@
 
 #define nr_syscalls ((syscall_table_size)/4)
 
-	.text
+	.section	.text..entry
 	.balign		4
 
 .macro LEDS val
@@ -253,7 +253,7 @@ __entry_kernel_external_interrupt_reentry:
 	andi.p		gr5,#~PSR_ET,gr5
 
 	# set CCCR.CC3 to Undefined to abort atomic-modify completion inside the kernel
-	# - for an explanation of how it works, see: Documentation/fujitsu/frv/atomic-ops.txt
+	# - for an explanation of how it works, see: Documentation/frv/atomic-ops.txt
 	andi		gr25,#~0xc0,gr25
 
 	sti		gr20,@(gr28,#REG_TBR)
@@ -445,7 +445,7 @@ __entry_kernel_softprog_interrupt_reentry:
 	sti		gr22,@(sp,#REG_SP)
 
 	# set CCCR.CC3 to Undefined to abort atomic-modify completion inside the kernel
-	# - for an explanation of how it works, see: Documentation/fujitsu/frv/atomic-ops.txt
+	# - for an explanation of how it works, see: Documentation/frv/atomic-ops.txt
 	movsg		cccr,gr20
 	andi		gr20,#~0xc0,gr20
 	movgs		gr20,cccr
@@ -656,6 +656,26 @@ __entry_debug_exception:
 
 ###############################################################################
 #
+# handle atomic operation emulation for userspace
+#
+###############################################################################
+	.globl		__entry_atomic_op
+__entry_atomic_op:
+	LEDS		0x6012
+	sethi.p		%hi(atomic_operation),gr5
+	setlo		%lo(atomic_operation),gr5
+	movsg		esfr1,gr8
+	movsg		epcr0,gr9
+	movsg		esr0,gr10
+
+	# now that we've accessed the exception regs, we can enable exceptions
+	movsg		psr,gr4
+	ori		gr4,#PSR_ET,gr4
+	movgs		gr4,psr
+	jmpl		@(gr5,gr0)	; call atomic_operation(esfr1,epcr0,esr0)
+
+###############################################################################
+#
 # handle media exception
 #
 ###############################################################################
@@ -843,6 +863,14 @@ ret_from_fork:
 	setlos.p	#0,gr8
 	bra		__syscall_exit
 
+	.globl		ret_from_kernel_thread
+ret_from_kernel_thread:
+	lddi.p		@(gr28,#REG_GR(8)),gr20
+	call		schedule_tail
+	calll.p		@(gr21,gr0)
+	or		gr20,gr20,gr8
+	bra		__syscall_exit
+
 ###################################################################################################
 #
 # Return to user mode is not as complex as all this looks,
@@ -866,7 +894,6 @@ system_call:
 	bnc		icc0,#0,__syscall_badsys
 
 	ldi		@(gr15,#TI_FLAGS),gr4
-	ori		gr4,#_TIF_SYSCALL_TRACE,gr4
 	andicc		gr4,#_TIF_SYSCALL_TRACE,gr0,icc0
 	bne		icc0,#0,__syscall_trace_entry
 
@@ -886,18 +913,19 @@ __syscall_call:
 __syscall_exit:
 	LEDS		0x6300
 
-	sti		gr8,@(gr28,#REG_GR(8))	; save return value
+	# keep current PSR in GR23
+	movsg		psr,gr23
+
+	ldi		@(gr28,#REG_PSR),gr22
+
+	sti.p		gr8,@(gr28,#REG_GR(8))	; save return value
 
 	# rebuild saved psr - execve will change it for init/main.c
-	ldi		@(gr28,#REG_PSR),gr22
 	srli		gr22,#1,gr5
 	andi.p		gr22,#~PSR_PS,gr22
 	andi		gr5,#PSR_PS,gr5
 	or		gr5,gr22,gr22
-	ori		gr22,#PSR_S,gr22
-
-	# keep current PSR in GR23
-	movsg		psr,gr23
+	ori.p		gr22,#PSR_S,gr22
 
 	# make sure we don't miss an interrupt setting need_resched or sigpending between
 	# sampling and the RETT
@@ -905,9 +933,7 @@ __syscall_exit:
 	movgs		gr23,psr
 
 	ldi		@(gr15,#TI_FLAGS),gr4
-	sethi.p		%hi(_TIF_ALLWORK_MASK),gr5
-	setlo		%lo(_TIF_ALLWORK_MASK),gr5
-	andcc		gr4,gr5,gr0,icc0
+	andicc		gr4,#_TIF_ALLWORK_MASK,gr0,icc0
 	bne		icc0,#0,__syscall_exit_work
 
 	# restore all registers and return
@@ -1049,27 +1075,10 @@ __entry_return_from_kernel_interrupt:
 	subicc		gr5,#0,gr0,icc0
 	beq		icc0,#0,__entry_return_direct
 
-__entry_preempt_need_resched:
-	ldi		@(gr15,#TI_FLAGS),gr4
-	andicc		gr4,#_TIF_NEED_RESCHED,gr0,icc0
-	beq		icc0,#1,__entry_return_direct
-
-	setlos		#PREEMPT_ACTIVE,gr5
-	sti		gr5,@(gr15,#TI_FLAGS)
-
-	andi		gr23,#~PSR_PIL,gr23
-	movgs		gr23,psr
-
-	call		schedule
-	sti		gr0,@(gr15,#TI_PRE_COUNT)
-
-	movsg		psr,gr23
-	ori		gr23,#PSR_PIL_14,gr23
-	movgs		gr23,psr
-	bra		__entry_preempt_need_resched
-#else
-	bra		__entry_return_direct
+	subcc		gr0,gr0,gr0,icc2		/* set Z and clear C */
+	call		preempt_schedule_irq
 #endif
+	bra		__entry_return_direct
 
 
 ###############################################################################
@@ -1092,9 +1101,7 @@ __entry_resume_userspace:
 __entry_return_from_user_interrupt:
 	LEDS		0x6402
 	ldi		@(gr15,#TI_FLAGS),gr4
-	sethi.p		%hi(_TIF_WORK_MASK),gr5
-	setlo		%lo(_TIF_WORK_MASK),gr5
-	andcc		gr4,gr5,gr0,icc0
+	andicc		gr4,#_TIF_WORK_MASK,gr0,icc0
 	beq		icc0,#1,__entry_return_direct
 
 __entry_work_pending:
@@ -1114,9 +1121,7 @@ __entry_work_resched:
 
 	LEDS		0x6401
 	ldi		@(gr15,#TI_FLAGS),gr4
-	sethi.p		%hi(_TIF_WORK_MASK),gr5
-	setlo		%lo(_TIF_WORK_MASK),gr5
-	andcc		gr4,gr5,gr0,icc0
+	andicc		gr4,#_TIF_WORK_MASK,gr0,icc0
 	beq		icc0,#1,__entry_return_direct
 	andicc		gr4,#_TIF_NEED_RESCHED,gr0,icc0
 	bne		icc0,#1,__entry_work_resched
@@ -1130,11 +1135,10 @@ __entry_work_notifysig:
 	# perform syscall entry tracing
 __syscall_trace_entry:
 	LEDS		0x6320
-	setlos.p	#0,gr8
-	call		do_syscall_trace
+	call		syscall_trace_entry
 
-	ldi		@(gr28,#REG_SYSCALLNO),gr7
-	lddi		@(gr28,#REG_GR(8)) ,gr8
+	lddi.p		@(gr28,#REG_GR(8)) ,gr8
+	ori		gr8,#0,gr7		; syscall_trace_entry() returned new syscallno
 	lddi		@(gr28,#REG_GR(10)),gr10
 	lddi.p		@(gr28,#REG_GR(12)),gr12
 
@@ -1145,15 +1149,16 @@ __syscall_trace_entry:
 	# perform syscall exit tracing
 __syscall_exit_work:
 	LEDS		0x6340
-	andicc		gr4,#_TIF_SYSCALL_TRACE,gr0,icc0
+	andicc		gr22,#PSR_PS,gr0,icc1	; don't handle on return to kernel mode
+	andicc.p	gr4,#_TIF_SYSCALL_TRACE,gr0,icc0
+	bne		icc1,#0,__entry_return_direct
 	beq		icc0,#1,__entry_work_pending
 
 	movsg		psr,gr23
-	andi		gr23,#~PSR_PIL,gr23	; could let do_syscall_trace() call schedule()
+	andi		gr23,#~PSR_PIL,gr23	; could let syscall_trace_exit() call schedule()
 	movgs		gr23,psr
 
-	setlos.p	#1,gr8
-	call		do_syscall_trace
+	call		syscall_trace_exit
 	bra		__entry_resume_userspace
 
 __syscall_badsys:
@@ -1341,7 +1346,7 @@ sys_call_table:
 	.long sys_ni_syscall	/* for vm86 */
 	.long sys_ni_syscall	/* Old sys_query_module */
 	.long sys_poll
-	.long sys_nfsservctl
+	.long sys_ni_syscall	/* Old nfsservctl */
 	.long sys_setresgid16	/* 170 */
 	.long sys_getresgid16
 	.long sys_prctl
@@ -1492,6 +1497,23 @@ sys_call_table:
 	.long sys_move_pages
 	.long sys_getcpu
 	.long sys_epoll_pwait
-
+	.long sys_utimensat		/* 320 */
+	.long sys_signalfd
+	.long sys_timerfd_create
+	.long sys_eventfd
+	.long sys_fallocate
+	.long sys_timerfd_settime	/* 325 */
+	.long sys_timerfd_gettime
+	.long sys_signalfd4
+	.long sys_eventfd2
+	.long sys_epoll_create1
+	.long sys_dup3			/* 330 */
+	.long sys_pipe2
+	.long sys_inotify_init1
+	.long sys_preadv
+	.long sys_pwritev
+	.long sys_rt_tgsigqueueinfo	/* 335 */
+	.long sys_perf_event_open
+	.long sys_setns
 
 syscall_table_size = (. - sys_call_table)

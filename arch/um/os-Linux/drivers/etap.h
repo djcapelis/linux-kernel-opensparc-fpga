@@ -1,9 +1,12 @@
 /* 
- * Copyright (C) 2001 Jeff Dike (jdike@karaya.com)
+ * Copyright (C) 2001 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
  * Licensed under the GPL
  */
 
-#include "net_user.h"
+#ifndef __DRIVERS_ETAP_H
+#define __DRIVERS_ETAP_H
+
+#include <net_user.h>
 
 struct ethertap_data {
 	char *dev_name;
@@ -15,13 +18,4 @@ struct ethertap_data {
 
 extern const struct net_user_info ethertap_user_info;
 
-/*
- * Overrides for Emacs so that we follow Linus's tabbing style.
- * Emacs will notice this stuff at the end of the file and automatically
- * adjust the settings for this buffer only.  This must remain at the end
- * of the file.
- * ---------------------------------------------------------------------------
- * Local variables:
- * c-file-style: "linux"
- * End:
- */
+#endif

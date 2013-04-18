@@ -9,29 +9,29 @@
  * Copyright (C) 2004 Thiemo Seufer
  */
 #include <linux/errno.h>
-#include <linux/module.h>
 #include <linux/sched.h>
+#include <linux/tick.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/stddef.h>
 #include <linux/unistd.h>
+#include <linux/export.h>
 #include <linux/ptrace.h>
-#include <linux/slab.h>
 #include <linux/mman.h>
 #include <linux/personality.h>
 #include <linux/sys.h>
 #include <linux/user.h>
-#include <linux/a.out.h>
 #include <linux/init.h>
 #include <linux/completion.h>
 #include <linux/kallsyms.h>
+#include <linux/random.h>
 
+#include <asm/asm.h>
 #include <asm/bootinfo.h>
 #include <asm/cpu.h>
 #include <asm/dsp.h>
 #include <asm/fpu.h>
 #include <asm/pgtable.h>
-#include <asm/system.h>
 #include <asm/mipsregs.h>
 #include <asm/processor.h>
 #include <asm/uaccess.h>
@@ -46,36 +46,52 @@
  * power and have a low exit latency (ie sit in a loop waiting for somebody to
  * say that they'd like to reschedule)
  */
-ATTRIB_NORET void cpu_idle(void)
+void __noreturn cpu_idle(void)
 {
+	int cpu;
+
+	/* CPU is going idle. */
+	cpu = smp_processor_id();
+
 	/* endless idle loop with no priority at all */
 	while (1) {
-		while (!need_resched()) {
-#ifdef CONFIG_SMTC_IDLE_HOOK_DEBUG
+		tick_nohz_idle_enter();
+		rcu_idle_enter();
+		while (!need_resched() && cpu_online(cpu)) {
+#ifdef CONFIG_MIPS_MT_SMTC
 			extern void smtc_idle_loop_hook(void);
 
 			smtc_idle_loop_hook();
 #endif
-			if (cpu_wait)
+
+			if (cpu_wait) {
+				/* Don't trace irqs off for idle */
+				stop_critical_timings();
 				(*cpu_wait)();
+				start_critical_timings();
+			}
 		}
-		preempt_enable_no_resched();
-		schedule();
-		preempt_disable();
+#ifdef CONFIG_HOTPLUG_CPU
+		if (!cpu_online(cpu) && !cpu_isset(cpu, cpu_callin_map))
+			play_dead();
+#endif
+		rcu_idle_exit();
+		tick_nohz_idle_exit();
+		schedule_preempt_disabled();
 	}
 }
 
 asmlinkage void ret_from_fork(void);
+asmlinkage void ret_from_kernel_thread(void);
 
 void start_thread(struct pt_regs * regs, unsigned long pc, unsigned long sp)
 {
 	unsigned long status;
 
 	/* New thread loses kernel privileges. */
-	status = regs->cp0_status & ~(ST0_CU0|ST0_CU1|KU_MASK);
+	status = regs->cp0_status & ~(ST0_CU0|ST0_CU1|ST0_FR|KU_MASK);
 #ifdef CONFIG_64BIT
-	status &= ~ST0_FR;
-	status |= (current->thread.mflags & MF_32BIT_REGS) ? 0 : ST0_FR;
+	status |= test_thread_flag(TIF_32BIT_REGS) ? 0 : ST0_FR;
 #endif
 	status |= KU_USER;
 	regs->cp0_status = status;
@@ -85,7 +101,6 @@ void start_thread(struct pt_regs * regs, unsigned long pc, unsigned long sp)
 		__init_dsp();
 	regs->cp0_epc = pc;
 	regs->regs[29] = sp;
-	current_thread_info()->addr_limit = USER_DS;
 }
 
 void exit_thread(void)
@@ -96,12 +111,12 @@ void flush_thread(void)
 {
 }
 
-int copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
-	unsigned long unused, struct task_struct *p, struct pt_regs *regs)
+int copy_thread(unsigned long clone_flags, unsigned long usp,
+	unsigned long arg, struct task_struct *p)
 {
 	struct thread_info *ti = task_thread_info(p);
-	struct pt_regs *childregs;
-	long childksp;
+	struct pt_regs *childregs, *regs = current_pt_regs();
+	unsigned long childksp;
 	p->set_child_tid = p->clear_child_tid = NULL;
 
 	childksp = (unsigned long)task_stack_page(p) + THREAD_SIZE - 32;
@@ -118,27 +133,32 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
 
 	/* set up new TSS. */
 	childregs = (struct pt_regs *) childksp - 1;
+	/*  Put the stack after the struct pt_regs.  */
+	childksp = (unsigned long) childregs;
+	p->thread.cp0_status = read_c0_status() & ~(ST0_CU2|ST0_CU1);
+	if (unlikely(p->flags & PF_KTHREAD)) {
+		unsigned long status = p->thread.cp0_status;
+		memset(childregs, 0, sizeof(struct pt_regs));
+		ti->addr_limit = KERNEL_DS;
+		p->thread.reg16 = usp; /* fn */
+		p->thread.reg17 = arg;
+		p->thread.reg29 = childksp;
+		p->thread.reg31 = (unsigned long) ret_from_kernel_thread;
+#if defined(CONFIG_CPU_R3000) || defined(CONFIG_CPU_TX39XX)
+		status = (status & ~(ST0_KUP | ST0_IEP | ST0_IEC)) |
+			 ((status & (ST0_KUC | ST0_IEC)) << 2);
+#else
+		status |= ST0_EXL;
+#endif
+		childregs->cp0_status = status;
+		return 0;
+	}
 	*childregs = *regs;
 	childregs->regs[7] = 0;	/* Clear error flag */
-
-#if defined(CONFIG_BINFMT_IRIX)
-	if (current->personality != PER_LINUX) {
-		/* Under IRIX things are a little different. */
-		childregs->regs[3] = 1;
-		regs->regs[3] = 0;
-	}
-#endif
 	childregs->regs[2] = 0;	/* Child gets zero as return value */
-	regs->regs[2] = p->pid;
+	childregs->regs[29] = usp;
+	ti->addr_limit = USER_DS;
 
-	if (childregs->cp0_status & ST0_CU0) {
-		childregs->regs[28] = (unsigned long) ti;
-		childregs->regs[29] = childksp;
-		ti->addr_limit = KERNEL_DS;
-	} else {
-		childregs->regs[29] = usp;
-		ti->addr_limit = USER_DS;
-	}
 	p->thread.reg29 = (unsigned long) childregs;
 	p->thread.reg31 = (unsigned long) ret_from_fork;
 
@@ -146,19 +166,19 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
 	 * New tasks lose permission to use the fpu. This accelerates context
 	 * switching for most programs since they don't use the fpu.
 	 */
-	p->thread.cp0_status = read_c0_status() & ~(ST0_CU2|ST0_CU1);
 	childregs->cp0_status &= ~(ST0_CU2|ST0_CU1);
+
+#ifdef CONFIG_MIPS_MT_SMTC
+	/*
+	 * SMTC restores TCStatus after Status, and the CU bits
+	 * are aliased there.
+	 */
+	childregs->cp0_tcstatus &= ~(ST0_CU2|ST0_CU1);
+#endif
 	clear_tsk_thread_flag(p, TIF_USEDFPU);
 
 #ifdef CONFIG_MIPS_MT_FPAFF
-	/*
-	 * FPU affinity support is cleaner if we track the
-	 * user-visible CPU affinity from the very beginning.
-	 * The generic cpus_allowed mask will already have
-	 * been copied from the parent before copy_thread
-	 * is invoked.
-	 */
-	p->thread.user_cpus_allowed = p->cpus_allowed;
+	clear_tsk_thread_flag(p, TIF_FPUBOUND);
 #endif /* CONFIG_MIPS_MT_FPAFF */
 
 	if (clone_flags & CLONE_SETTLS)
@@ -197,46 +217,17 @@ void elf_dump_regs(elf_greg_t *gp, struct pt_regs *regs)
 #endif
 }
 
-int dump_task_regs (struct task_struct *tsk, elf_gregset_t *regs)
+int dump_task_regs(struct task_struct *tsk, elf_gregset_t *regs)
 {
 	elf_dump_regs(*regs, task_pt_regs(tsk));
 	return 1;
 }
 
-int dump_task_fpu (struct task_struct *t, elf_fpregset_t *fpr)
+int dump_task_fpu(struct task_struct *t, elf_fpregset_t *fpr)
 {
 	memcpy(fpr, &t->thread.fpu, sizeof(current->thread.fpu));
 
 	return 1;
-}
-
-/*
- * Create a kernel thread
- */
-static ATTRIB_NORET void kernel_thread_helper(void *arg, int (*fn)(void *))
-{
-	do_exit(fn(arg));
-}
-
-long kernel_thread(int (*fn)(void *), void *arg, unsigned long flags)
-{
-	struct pt_regs regs;
-
-	memset(&regs, 0, sizeof(regs));
-
-	regs.regs[4] = (unsigned long) arg;
-	regs.regs[5] = (unsigned long) fn;
-	regs.cp0_epc = (unsigned long) kernel_thread_helper;
-	regs.cp0_status = read_c0_status();
-#if defined(CONFIG_CPU_R3000) || defined(CONFIG_CPU_TX39XX)
-	regs.cp0_status &= ~(ST0_KUP | ST0_IEC);
-	regs.cp0_status |= ST0_IEP;
-#else
-	regs.cp0_status |= ST0_EXL;
-#endif
-
-	/* Ok, create the new process.. */
-	return do_fork(flags | CLONE_VM | CLONE_UNTRACED, 0, &regs, 0, NULL, NULL);
 }
 
 /*
@@ -360,18 +351,18 @@ unsigned long thread_saved_pc(struct task_struct *tsk)
 
 
 #ifdef CONFIG_KALLSYMS
-/* used by show_backtrace() */
-unsigned long unwind_stack(struct task_struct *task, unsigned long *sp,
-			   unsigned long pc, unsigned long *ra)
+/* generic stack unwinding function */
+unsigned long notrace unwind_stack_by_address(unsigned long stack_page,
+					      unsigned long *sp,
+					      unsigned long pc,
+					      unsigned long *ra)
 {
-	unsigned long stack_page;
 	struct mips_frame_info info;
 	unsigned long size, ofs;
 	int leaf;
 	extern void ret_from_irq(void);
 	extern void ret_from_exception(void);
 
-	stack_page = (unsigned long)task_stack_page(task);
 	if (!stack_page)
 		return 0;
 
@@ -397,7 +388,7 @@ unsigned long unwind_stack(struct task_struct *task, unsigned long *sp,
 	if (!kallsyms_lookup_size_offset(pc, &size, &ofs))
 		return 0;
 	/*
-	 * Return ra if an exception occured at the first instruction
+	 * Return ra if an exception occurred at the first instruction
 	 */
 	if (unlikely(ofs == 0)) {
 		pc = *ra;
@@ -430,6 +421,15 @@ unsigned long unwind_stack(struct task_struct *task, unsigned long *sp,
 	*ra = 0;
 	return __kernel_text_address(pc) ? pc : 0;
 }
+EXPORT_SYMBOL(unwind_stack_by_address);
+
+/* used by show_backtrace() */
+unsigned long unwind_stack(struct task_struct *task, unsigned long *sp,
+			   unsigned long pc, unsigned long *ra)
+{
+	unsigned long stack_page = (unsigned long)task_stack_page(task);
+	return unwind_stack_by_address(stack_page, sp, pc, ra);
+}
 #endif
 
 /*
@@ -459,4 +459,16 @@ unsigned long get_wchan(struct task_struct *task)
 
 out:
 	return pc;
+}
+
+/*
+ * Don't forget that the stack pointer must be aligned on a 8 bytes
+ * boundary for 32-bits ABI and 16 bytes for 64-bits ABI.
+ */
+unsigned long arch_align_stack(unsigned long sp)
+{
+	if (!(current->personality & ADDR_NO_RANDOMIZE) && randomize_va_space)
+		sp -= get_random_int() & ~PAGE_MASK;
+
+	return sp & ALMASK;
 }

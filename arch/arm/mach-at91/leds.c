@@ -9,87 +9,84 @@
  * 2 of the License, or (at your option) any later version.
 */
 
+#include <linux/gpio.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/init.h>
+#include <linux/platform_device.h>
 
-#include <asm/mach-types.h>
-#include <asm/leds.h>
-#include <asm/arch/board.h>
-#include <asm/arch/gpio.h>
+#include "board.h"
 
 
-static inline void at91_led_on(unsigned int led)
-{
-	at91_set_gpio_value(led, 0);
-}
+/* ------------------------------------------------------------------------- */
 
-static inline void at91_led_off(unsigned int led)
-{
-	at91_set_gpio_value(led, 1);
-}
-
-static inline void at91_led_toggle(unsigned int led)
-{
-	unsigned long is_off = at91_get_gpio_value(led);
-	if (is_off)
-		at91_led_on(led);
-	else
-		at91_led_off(led);
-}
-
+#if defined(CONFIG_NEW_LEDS)
 
 /*
- * Handle LED events.
+ * New cross-platform LED support.
  */
-static void at91_leds_event(led_event_t evt)
+
+static struct gpio_led_platform_data led_data;
+
+static struct platform_device at91_gpio_leds_device = {
+	.name			= "leds-gpio",
+	.id			= -1,
+	.dev.platform_data	= &led_data,
+};
+
+void __init at91_gpio_leds(struct gpio_led *leds, int nr)
 {
-	unsigned long flags;
+	int i;
 
-	local_irq_save(flags);
+	if (!nr)
+		return;
 
-	switch(evt) {
-	case led_start:		/* System startup */
-		at91_led_on(at91_leds_cpu);
-		break;
+	for (i = 0; i < nr; i++)
+		at91_set_gpio_output(leds[i].gpio, leds[i].active_low);
 
-	case led_stop:		/* System stop / suspend */
-		at91_led_off(at91_leds_cpu);
-		break;
-
-#ifdef CONFIG_LEDS_TIMER
-	case led_timer:		/* Every 50 timer ticks */
-		at91_led_toggle(at91_leds_timer);
-		break;
-#endif
-
-#ifdef CONFIG_LEDS_CPU
-	case led_idle_start:	/* Entering idle state */
-		at91_led_off(at91_leds_cpu);
-		break;
-
-	case led_idle_end:	/* Exit idle state */
-		at91_led_on(at91_leds_cpu);
-		break;
-#endif
-
-	default:
-		break;
-	}
-
-	local_irq_restore(flags);
+	led_data.leds = leds;
+	led_data.num_leds = nr;
+	platform_device_register(&at91_gpio_leds_device);
 }
 
+#else
+void __init at91_gpio_leds(struct gpio_led *leds, int nr) {}
+#endif
 
-static int __init leds_init(void)
+
+/* ------------------------------------------------------------------------- */
+
+#if defined (CONFIG_LEDS_ATMEL_PWM)
+
+/*
+ * PWM Leds
+ */
+
+static struct gpio_led_platform_data pwm_led_data;
+
+static struct platform_device at91_pwm_leds_device = {
+	.name			= "leds-atmel-pwm",
+	.id			= -1,
+	.dev.platform_data	= &pwm_led_data,
+};
+
+void __init at91_pwm_leds(struct gpio_led *leds, int nr)
 {
-	if (!at91_leds_timer || !at91_leds_cpu)
-		return -ENODEV;
+	int i;
+	u32 pwm_mask = 0;
 
-	leds_event = at91_leds_event;
+	if (!nr)
+		return;
 
-	leds_event(led_start);
-	return 0;
+	for (i = 0; i < nr; i++)
+		pwm_mask |= (1 << leds[i].gpio);
+
+	pwm_led_data.leds = leds;
+	pwm_led_data.num_leds = nr;
+
+	at91_add_device_pwm(pwm_mask);
+	platform_device_register(&at91_pwm_leds_device);
 }
-
-__initcall(leds_init);
+#else
+void __init at91_pwm_leds(struct gpio_led *leds, int nr){}
+#endif

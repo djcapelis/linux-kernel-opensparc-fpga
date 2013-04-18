@@ -3,7 +3,7 @@
  *
  *   VT82C686A/B/C, VT8233A/C, VT8235
  *
- *	Copyright (c) 2000 Jaroslav Kysela <perex@suse.cz>
+ *	Copyright (c) 2000 Jaroslav Kysela <perex@perex.cz>
  *	                   Tjeerd.Mulder <Tjeerd.Mulder@fujitsu-siemens.com>
  *                    2002 Takashi Iwai <tiwai@suse.de>
  *
@@ -31,14 +31,13 @@
  *      modems.
  */
 
-#include <sound/driver.h>
 #include <asm/io.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
 #include <linux/init.h>
 #include <linux/pci.h>
 #include <linux/slab.h>
-#include <linux/moduleparam.h>
+#include <linux/module.h>
 #include <sound/core.h>
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
@@ -50,7 +49,7 @@
 #define POINTER_DEBUG
 #endif
 
-MODULE_AUTHOR("Jaroslav Kysela <perex@suse.cz>");
+MODULE_AUTHOR("Jaroslav Kysela <perex@perex.cz>");
 MODULE_DESCRIPTION("VIA VT82xx modem");
 MODULE_LICENSE("GPL");
 MODULE_SUPPORTED_DEVICE("{{VIA,VT82C686A/B/C modem,pci}}");
@@ -67,7 +66,7 @@ module_param(ac97_clock, int, 0444);
 MODULE_PARM_DESC(ac97_clock, "AC'97 codec clock (default 48000Hz).");
 
 /* just for backward compatibility */
-static int enable;
+static bool enable;
 module_param(enable, bool, 0444);
 
 
@@ -261,8 +260,8 @@ struct via82xx_modem {
 	struct snd_info_entry *proc_entry;
 };
 
-static struct pci_device_id snd_via82xx_modem_ids[] = {
-	{ 0x1106, 0x3068, PCI_ANY_ID, PCI_ANY_ID, 0, 0, TYPE_CARD_VIA82XX_MODEM, },
+static DEFINE_PCI_DEVICE_TABLE(snd_via82xx_modem_ids) = {
+	{ PCI_VDEVICE(VIA, 0x3068), TYPE_CARD_VIA82XX_MODEM, },
 	{ 0, }
 };
 
@@ -282,7 +281,6 @@ static int build_via_table(struct viadev *dev, struct snd_pcm_substream *substre
 {
 	unsigned int i, idx, ofs, rest;
 	struct via82xx_modem *chip = snd_pcm_substream_chip(substream);
-	struct snd_sg_buf *sgbuf = snd_pcm_substream_sgbuf(substream);
 
 	if (dev->table.area == NULL) {
 		/* the start of each lists must be aligned to 8 bytes,
@@ -311,12 +309,14 @@ static int build_via_table(struct viadev *dev, struct snd_pcm_substream *substre
 		do {
 			unsigned int r;
 			unsigned int flag;
+			unsigned int addr;
 
 			if (idx >= VIA_TABLE_SIZE) {
 				snd_printk(KERN_ERR "via82xx: too much table size!\n");
 				return -EINVAL;
 			}
-			((u32 *)dev->table.area)[idx << 1] = cpu_to_le32((u32)snd_pcm_sgbuf_get_addr(sgbuf, ofs));
+			addr = snd_pcm_sgbuf_get_addr(substream, ofs);
+			((u32 *)dev->table.area)[idx << 1] = cpu_to_le32(addr);
 			r = PAGE_SIZE - (ofs % PAGE_SIZE);
 			if (rest < r)
 				r = rest;
@@ -328,7 +328,10 @@ static int build_via_table(struct viadev *dev, struct snd_pcm_substream *substre
 					flag = VIA_TBL_BIT_FLAG; /* period boundary */
 			} else
 				flag = 0; /* period continues to the next */
-			// printk("via: tbl %d: at %d  size %d (rest %d)\n", idx, ofs, r, rest);
+			/*
+			printk(KERN_DEBUG "via: tbl %d: at %d  size %d "
+			       "(rest %d)\n", idx, ofs, r, rest);
+			*/
 			((u32 *)dev->table.area)[(idx<<1) + 1] = cpu_to_le32(r | flag);
 			dev->idx_table[idx].offset = ofs;
 			dev->idx_table[idx].size = r;
@@ -613,7 +616,8 @@ static snd_pcm_uframes_t snd_via686_pcm_pointer(struct snd_pcm_substream *substr
 	struct viadev *viadev = substream->runtime->private_data;
 	unsigned int idx, ptr, count, res;
 
-	snd_assert(viadev->tbl_entries, return 0);
+	if (snd_BUG_ON(!viadev->tbl_entries))
+		return 0;
 	if (!(inb(VIADEV_REG(viadev, OFFSET_STATUS)) & VIA_REG_STAT_ACTIVE))
 		return 0;
 
@@ -832,7 +836,7 @@ static void init_viadev(struct via82xx_modem *chip, int idx, unsigned int reg_of
 /*
  * create a pcm instance for via686a/b
  */
-static int __devinit snd_via686_pcm_new(struct via82xx_modem *chip)
+static int snd_via686_pcm_new(struct via82xx_modem *chip)
 {
 	struct snd_pcm *pcm;
 	int err;
@@ -881,7 +885,7 @@ static void snd_via82xx_mixer_free_ac97(struct snd_ac97 *ac97)
 }
 
 
-static int __devinit snd_via82xx_mixer_new(struct via82xx_modem *chip)
+static int snd_via82xx_mixer_new(struct via82xx_modem *chip)
 {
 	struct snd_ac97_template ac97;
 	int err;
@@ -924,7 +928,7 @@ static void snd_via82xx_proc_read(struct snd_info_entry *entry, struct snd_info_
 	}
 }
 
-static void __devinit snd_via82xx_proc_init(struct via82xx_modem *chip)
+static void snd_via82xx_proc_init(struct via82xx_modem *chip)
 {
 	struct snd_info_entry *entry;
 
@@ -1001,7 +1005,7 @@ static int snd_via82xx_chip_init(struct via82xx_modem *chip)
 			chip->ac97_secondary = 1;
 			goto __ac97_ok2;
 		}
-		schedule_timeout_interruptible(1);
+		schedule_timeout_uninterruptible(1);
 	} while (time_before(jiffies, end_time));
 	/* This is ok, the most of motherboards have only one codec */
 
@@ -1015,13 +1019,14 @@ static int snd_via82xx_chip_init(struct via82xx_modem *chip)
 	return 0;
 }
 
-#ifdef CONFIG_PM
+#ifdef CONFIG_PM_SLEEP
 /*
  * power management
  */
-static int snd_via82xx_suspend(struct pci_dev *pci, pm_message_t state)
+static int snd_via82xx_suspend(struct device *dev)
 {
-	struct snd_card *card = pci_get_drvdata(pci);
+	struct pci_dev *pci = to_pci_dev(dev);
+	struct snd_card *card = dev_get_drvdata(dev);
 	struct via82xx_modem *chip = card->private_data;
 	int i;
 
@@ -1035,13 +1040,14 @@ static int snd_via82xx_suspend(struct pci_dev *pci, pm_message_t state)
 
 	pci_disable_device(pci);
 	pci_save_state(pci);
-	pci_set_power_state(pci, pci_choose_state(pci, state));
+	pci_set_power_state(pci, PCI_D3hot);
 	return 0;
 }
 
-static int snd_via82xx_resume(struct pci_dev *pci)
+static int snd_via82xx_resume(struct device *dev)
 {
-	struct snd_card *card = pci_get_drvdata(pci);
+	struct pci_dev *pci = to_pci_dev(dev);
+	struct snd_card *card = dev_get_drvdata(dev);
 	struct via82xx_modem *chip = card->private_data;
 	int i;
 
@@ -1065,7 +1071,12 @@ static int snd_via82xx_resume(struct pci_dev *pci)
 	snd_power_change_state(card, SNDRV_CTL_POWER_D0);
 	return 0;
 }
-#endif /* CONFIG_PM */
+
+static SIMPLE_DEV_PM_OPS(snd_via82xx_pm, snd_via82xx_suspend, snd_via82xx_resume);
+#define SND_VIA82XX_PM_OPS	&snd_via82xx_pm
+#else
+#define SND_VIA82XX_PM_OPS	NULL
+#endif /* CONFIG_PM_SLEEP */
 
 static int snd_via82xx_free(struct via82xx_modem *chip)
 {
@@ -1076,7 +1087,7 @@ static int snd_via82xx_free(struct via82xx_modem *chip)
 	/* disable interrupts */
 	for (i = 0; i < chip->num_devs; i++)
 		snd_via82xx_channel_reset(chip, &chip->devs[i]);
-	synchronize_irq(chip->irq);
+
       __end_hw:
 	if (chip->irq >= 0)
 		free_irq(chip->irq, chip);
@@ -1092,12 +1103,12 @@ static int snd_via82xx_dev_free(struct snd_device *device)
 	return snd_via82xx_free(chip);
 }
 
-static int __devinit snd_via82xx_create(struct snd_card *card,
-					struct pci_dev *pci,
-					int chip_type,
-					int revision,
-					unsigned int ac97_clock,
-					struct via82xx_modem ** r_via)
+static int snd_via82xx_create(struct snd_card *card,
+			      struct pci_dev *pci,
+			      int chip_type,
+			      int revision,
+			      unsigned int ac97_clock,
+			      struct via82xx_modem **r_via)
 {
 	struct via82xx_modem *chip;
 	int err;
@@ -1125,7 +1136,7 @@ static int __devinit snd_via82xx_create(struct snd_card *card,
 	}
 	chip->port = pci_resource_start(pci, 0);
 	if (request_irq(pci->irq, snd_via82xx_interrupt, IRQF_SHARED,
-			card->driver, chip)) {
+			KBUILD_MODNAME, chip)) {
 		snd_printk(KERN_ERR "unable to grab IRQ %d\n", pci->irq);
 		snd_via82xx_free(chip);
 		return -EBUSY;
@@ -1157,22 +1168,20 @@ static int __devinit snd_via82xx_create(struct snd_card *card,
 }
 
 
-static int __devinit snd_via82xx_probe(struct pci_dev *pci,
-				       const struct pci_device_id *pci_id)
+static int snd_via82xx_probe(struct pci_dev *pci,
+			     const struct pci_device_id *pci_id)
 {
 	struct snd_card *card;
 	struct via82xx_modem *chip;
-	unsigned char revision;
 	int chip_type = 0, card_type;
 	unsigned int i;
 	int err;
 
-	card = snd_card_new(index, id, THIS_MODULE, 0);
-	if (card == NULL)
-		return -ENOMEM;
+	err = snd_card_create(index, id, THIS_MODULE, 0, &card);
+	if (err < 0)
+		return err;
 
 	card_type = pci_id->driver_data;
-	pci_read_config_byte(pci, PCI_REVISION_ID, &revision);
 	switch (card_type) {
 	case TYPE_CARD_VIA82XX_MODEM:
 		strcpy(card->driver, "VIA82XX-MODEM");
@@ -1184,7 +1193,7 @@ static int __devinit snd_via82xx_probe(struct pci_dev *pci,
 		goto __error;
 	}
 		
-	if ((err = snd_via82xx_create(card, pci, chip_type, revision,
+	if ((err = snd_via82xx_create(card, pci, chip_type, pci->revision,
 				      ac97_clock, &chip)) < 0)
 		goto __error;
 	card->private_data = chip;
@@ -1215,32 +1224,20 @@ static int __devinit snd_via82xx_probe(struct pci_dev *pci,
 	return err;
 }
 
-static void __devexit snd_via82xx_remove(struct pci_dev *pci)
+static void snd_via82xx_remove(struct pci_dev *pci)
 {
 	snd_card_free(pci_get_drvdata(pci));
 	pci_set_drvdata(pci, NULL);
 }
 
-static struct pci_driver driver = {
-	.name = "VIA 82xx Modem",
+static struct pci_driver via82xx_modem_driver = {
+	.name = KBUILD_MODNAME,
 	.id_table = snd_via82xx_modem_ids,
 	.probe = snd_via82xx_probe,
-	.remove = __devexit_p(snd_via82xx_remove),
-#ifdef CONFIG_PM
-	.suspend = snd_via82xx_suspend,
-	.resume = snd_via82xx_resume,
-#endif
+	.remove = snd_via82xx_remove,
+	.driver = {
+		.pm = SND_VIA82XX_PM_OPS,
+	},
 };
 
-static int __init alsa_card_via82xx_init(void)
-{
-	return pci_register_driver(&driver);
-}
-
-static void __exit alsa_card_via82xx_exit(void)
-{
-	pci_unregister_driver(&driver);
-}
-
-module_init(alsa_card_via82xx_init)
-module_exit(alsa_card_via82xx_exit)
+module_pci_driver(via82xx_modem_driver);

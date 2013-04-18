@@ -8,7 +8,6 @@
 
 #include <linux/types.h>
 #include <linux/module.h>
-#include <linux/utsname.h>
 #include <linux/sunrpc/clnt.h>
 
 #ifdef RPC_DEBUG
@@ -76,7 +75,7 @@ nul_marshal(struct rpc_task *task, __be32 *p)
 static int
 nul_refresh(struct rpc_task *task)
 {
-	task->tk_msg.rpc_cred->cr_flags |= RPCAUTH_CRED_UPTODATE;
+	set_bit(RPCAUTH_CRED_UPTODATE, &task->tk_rqstp->rq_cred->cr_flags);
 	return 0;
 }
 
@@ -101,12 +100,10 @@ nul_validate(struct rpc_task *task, __be32 *p)
 	return p;
 }
 
-struct rpc_authops authnull_ops = {
+const struct rpc_authops authnull_ops = {
 	.owner		= THIS_MODULE,
 	.au_flavor	= RPC_AUTH_NULL,
-#ifdef RPC_DEBUG
 	.au_name	= "NULL",
-#endif
 	.create		= nul_create,
 	.destroy	= nul_destroy,
 	.lookup_cred	= nul_lookup_cred,
@@ -122,9 +119,10 @@ struct rpc_auth null_auth = {
 };
 
 static
-struct rpc_credops	null_credops = {
+const struct rpc_credops null_credops = {
 	.cr_name	= "AUTH_NULL",
 	.crdestroy	= nul_destroy_cred,
+	.crbind		= rpcauth_generic_bind_cred,
 	.crmatch	= nul_match,
 	.crmarshal	= nul_marshal,
 	.crrefresh	= nul_refresh,
@@ -133,9 +131,11 @@ struct rpc_credops	null_credops = {
 
 static
 struct rpc_cred null_cred = {
+	.cr_lru		= LIST_HEAD_INIT(null_cred.cr_lru),
+	.cr_auth	= &null_auth,
 	.cr_ops		= &null_credops,
 	.cr_count	= ATOMIC_INIT(1),
-	.cr_flags	= RPCAUTH_CRED_UPTODATE,
+	.cr_flags	= 1UL << RPCAUTH_CRED_UPTODATE,
 #ifdef RPC_DEBUG
 	.cr_magic	= RPCAUTH_CRED_MAGIC,
 #endif

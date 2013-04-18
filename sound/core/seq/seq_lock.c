@@ -19,7 +19,7 @@
  *
  */
 
-#include <sound/driver.h>
+#include <linux/export.h>
 #include <sound/core.h>
 #include "seq_lock.h"
 

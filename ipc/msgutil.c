@@ -13,9 +13,28 @@
 #include <linux/security.h>
 #include <linux/slab.h>
 #include <linux/ipc.h>
+#include <linux/msg.h>
+#include <linux/ipc_namespace.h>
+#include <linux/utsname.h>
+#include <linux/proc_fs.h>
 #include <asm/uaccess.h>
 
 #include "util.h"
+
+DEFINE_SPINLOCK(mq_lock);
+
+/*
+ * The next 2 defines are here bc this is the only file
+ * compiled when either CONFIG_SYSVIPC and CONFIG_POSIX_MQUEUE
+ * and not CONFIG_IPC_NS.
+ */
+struct ipc_namespace init_ipc_ns = {
+	.count		= ATOMIC_INIT(1),
+	.user_ns = &init_user_ns,
+	.proc_inum = PROC_IPC_INIT_INO,
+};
+
+atomic_t nr_ipc_ns = ATOMIC_INIT(1);
 
 struct msg_msgseg {
 	struct msg_msgseg* next;
@@ -83,7 +102,47 @@ out_err:
 	free_msg(msg);
 	return ERR_PTR(err);
 }
+#ifdef CONFIG_CHECKPOINT_RESTORE
+struct msg_msg *copy_msg(struct msg_msg *src, struct msg_msg *dst)
+{
+	struct msg_msgseg *dst_pseg, *src_pseg;
+	int len = src->m_ts;
+	int alen;
 
+	BUG_ON(dst == NULL);
+	if (src->m_ts > dst->m_ts)
+		return ERR_PTR(-EINVAL);
+
+	alen = len;
+	if (alen > DATALEN_MSG)
+		alen = DATALEN_MSG;
+
+	memcpy(dst + 1, src + 1, alen);
+
+	len -= alen;
+	dst_pseg = dst->next;
+	src_pseg = src->next;
+	while (len > 0) {
+		alen = len;
+		if (alen > DATALEN_SEG)
+			alen = DATALEN_SEG;
+		memcpy(dst_pseg + 1, src_pseg + 1, alen);
+		dst_pseg = dst_pseg->next;
+		len -= alen;
+		src_pseg = src_pseg->next;
+	}
+
+	dst->m_type = src->m_type;
+	dst->m_ts = src->m_ts;
+
+	return dst;
+}
+#else
+struct msg_msg *copy_msg(struct msg_msg *src, struct msg_msg *dst)
+{
+	return ERR_PTR(-ENOSYS);
+}
+#endif
 int store_msg(void __user *dest, struct msg_msg *msg, int len)
 {
 	int alen;

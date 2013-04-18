@@ -4,8 +4,6 @@
  *	uclinux.c -- generic memory mapped MTD driver for uclinux
  *
  *	(C) Copyright 2002, Greg Ungerer (gerg@snapgear.com)
- *
- * 	$Id: uclinux.c,v 1.12 2005/11/07 11:14:29 gleixner Exp $
  */
 
 /****************************************************************************/
@@ -15,23 +13,27 @@
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/fs.h>
+#include <linux/mm.h>
 #include <linux/major.h>
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/map.h>
 #include <linux/mtd/partitions.h>
 #include <asm/io.h>
+#include <asm/sections.h>
 
 /****************************************************************************/
 
 struct map_info uclinux_ram_map = {
 	.name = "RAM",
+	.phys = (unsigned long)__bss_stop,
+	.size = 0,
 };
 
-struct mtd_info *uclinux_ram_mtdinfo;
+static struct mtd_info *uclinux_ram_mtdinfo;
 
 /****************************************************************************/
 
-struct mtd_partition uclinux_romfs[] = {
+static struct mtd_partition uclinux_romfs[] = {
 	{ .name = "ROMfs" }
 };
 
@@ -39,36 +41,42 @@ struct mtd_partition uclinux_romfs[] = {
 
 /****************************************************************************/
 
-int uclinux_point(struct mtd_info *mtd, loff_t from, size_t len,
-	size_t *retlen, u_char **mtdbuf)
+static int uclinux_point(struct mtd_info *mtd, loff_t from, size_t len,
+	size_t *retlen, void **virt, resource_size_t *phys)
 {
 	struct map_info *map = mtd->priv;
-	*mtdbuf = (u_char *) (map->virt + ((int) from));
+	*virt = map->virt + from;
+	if (phys)
+		*phys = map->phys + from;
 	*retlen = len;
 	return(0);
 }
 
 /****************************************************************************/
 
-int __init uclinux_mtd_init(void)
+static int __init uclinux_mtd_init(void)
 {
 	struct mtd_info *mtd;
 	struct map_info *mapp;
-	extern char _ebss;
-	unsigned long addr = (unsigned long) &_ebss;
 
 	mapp = &uclinux_ram_map;
-	mapp->phys = addr;
-	mapp->size = PAGE_ALIGN(ntohl(*((unsigned long *)(addr + 8))));
+	if (!mapp->size)
+		mapp->size = PAGE_ALIGN(ntohl(*((unsigned long *)(mapp->phys + 8))));
 	mapp->bankwidth = 4;
 
 	printk("uclinux[mtd]: RAM probe address=0x%x size=0x%x\n",
 	       	(int) mapp->phys, (int) mapp->size);
 
-	mapp->virt = ioremap_nocache(mapp->phys, mapp->size);
+	/*
+	 * The filesystem is guaranteed to be in direct mapped memory. It is
+	 * directly following the kernels own bss region. Following the same
+	 * mechanism used by architectures setting up traditional initrds we
+	 * use phys_to_virt to get the virtual address of its start.
+	 */
+	mapp->virt = phys_to_virt(mapp->phys);
 
 	if (mapp->virt == 0) {
-		printk("uclinux[mtd]: ioremap_nocache() failed\n");
+		printk("uclinux[mtd]: no virtual mapping?\n");
 		return(-EIO);
 	}
 
@@ -77,33 +85,30 @@ int __init uclinux_mtd_init(void)
 	mtd = do_map_probe("map_ram", mapp);
 	if (!mtd) {
 		printk("uclinux[mtd]: failed to find a mapping?\n");
-		iounmap(mapp->virt);
 		return(-ENXIO);
 	}
 
 	mtd->owner = THIS_MODULE;
-	mtd->point = uclinux_point;
+	mtd->_point = uclinux_point;
 	mtd->priv = mapp;
 
 	uclinux_ram_mtdinfo = mtd;
-	add_mtd_partitions(mtd, uclinux_romfs, NUM_PARTITIONS);
+	mtd_device_register(mtd, uclinux_romfs, NUM_PARTITIONS);
 
 	return(0);
 }
 
 /****************************************************************************/
 
-void __exit uclinux_mtd_cleanup(void)
+static void __exit uclinux_mtd_cleanup(void)
 {
 	if (uclinux_ram_mtdinfo) {
-		del_mtd_partitions(uclinux_ram_mtdinfo);
+		mtd_device_unregister(uclinux_ram_mtdinfo);
 		map_destroy(uclinux_ram_mtdinfo);
 		uclinux_ram_mtdinfo = NULL;
 	}
-	if (uclinux_ram_map.virt) {
-		iounmap((void *) uclinux_ram_map.virt);
+	if (uclinux_ram_map.virt)
 		uclinux_ram_map.virt = 0;
-	}
 }
 
 /****************************************************************************/

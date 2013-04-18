@@ -103,6 +103,7 @@
 #include <linux/module.h>
 #include <linux/parport.h>
 #include <linux/sched.h>
+#include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/stddef.h>
 #include <linux/types.h>
@@ -134,7 +135,7 @@
 #define PARPORT_IP32_ENABLE_EPP	(1U << 3)
 #define PARPORT_IP32_ENABLE_ECP	(1U << 4)
 static unsigned int features =	~0U;
-static int verbose_probing =	DEFAULT_VERBOSE_PROBING;
+static bool verbose_probing =	DEFAULT_VERBOSE_PROBING;
 
 /* We do not support more than one port. */
 static struct parport *this_port = NULL;
@@ -778,14 +779,16 @@ static irqreturn_t parport_ip32_interrupt(int irq, void *dev_id)
 	struct parport * const p = dev_id;
 	struct parport_ip32_private * const priv = p->physport->private_data;
 	enum parport_ip32_irq_mode irq_mode = priv->irq_mode;
+
 	switch (irq_mode) {
 	case PARPORT_IP32_IRQ_FWD:
-		parport_generic_irq(irq, p);
-		break;
+		return parport_irq_handler(irq, dev_id);
+
 	case PARPORT_IP32_IRQ_HERE:
 		parport_ip32_wakeup(p);
 		break;
 	}
+
 	return IRQ_HANDLED;
 }
 
@@ -2200,7 +2203,6 @@ static __exit void parport_ip32_unregister_port(struct parport *p)
 static int __init parport_ip32_init(void)
 {
 	pr_info(PPIP32 "SGI IP32 built-in parallel port driver v0.6\n");
-	pr_debug1(PPIP32 "Compiled on %s, %s\n", __DATE__, __TIME__);
 	this_port = parport_ip32_probe_port();
 	return IS_ERR(this_port) ? PTR_ERR(this_port) : 0;
 }

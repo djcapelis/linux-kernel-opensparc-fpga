@@ -14,22 +14,36 @@
  */
 #include <linux/kernel.h>
 
+#include <linux/gfp.h>
 #include <linux/mm.h>
 #include <linux/mmzone.h>
-#include <linux/module.h>
 #include <linux/quicklist.h>
 
-DEFINE_PER_CPU(struct quicklist, quicklist)[CONFIG_NR_QUICK];
+DEFINE_PER_CPU(struct quicklist [CONFIG_NR_QUICK], quicklist);
 
 #define FRACTION_OF_NODE_MEM	16
 
 static unsigned long max_pages(unsigned long min_pages)
 {
 	unsigned long node_free_pages, max;
+	int node = numa_node_id();
+	struct zone *zones = NODE_DATA(node)->node_zones;
+	int num_cpus_on_node;
 
-	node_free_pages = node_page_state(numa_node_id(),
-			NR_FREE_PAGES);
+	node_free_pages =
+#ifdef CONFIG_ZONE_DMA
+		zone_page_state(&zones[ZONE_DMA], NR_FREE_PAGES) +
+#endif
+#ifdef CONFIG_ZONE_DMA32
+		zone_page_state(&zones[ZONE_DMA32], NR_FREE_PAGES) +
+#endif
+		zone_page_state(&zones[ZONE_NORMAL], NR_FREE_PAGES);
+
 	max = node_free_pages / FRACTION_OF_NODE_MEM;
+
+	num_cpus_on_node = cpumask_weight(cpumask_of_node(node));
+	max /= num_cpus_on_node;
+
 	return max(max, min_pages);
 }
 

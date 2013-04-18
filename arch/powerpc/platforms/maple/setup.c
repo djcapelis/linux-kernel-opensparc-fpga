@@ -17,13 +17,12 @@
 #include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
+#include <linux/export.h>
 #include <linux/mm.h>
 #include <linux/stddef.h>
 #include <linux/unistd.h>
 #include <linux/ptrace.h>
-#include <linux/slab.h>
 #include <linux/user.h>
-#include <linux/a.out.h>
 #include <linux/tty.h>
 #include <linux/string.h>
 #include <linux/delay.h>
@@ -41,23 +40,21 @@
 #include <linux/root_dev.h>
 #include <linux/serial.h>
 #include <linux/smp.h>
+#include <linux/bitops.h>
+#include <linux/of_device.h>
+#include <linux/memblock.h>
 
 #include <asm/processor.h>
 #include <asm/sections.h>
 #include <asm/prom.h>
-#include <asm/system.h>
 #include <asm/pgtable.h>
-#include <asm/bitops.h>
 #include <asm/io.h>
-#include <asm/kexec.h>
 #include <asm/pci-bridge.h>
 #include <asm/iommu.h>
 #include <asm/machdep.h>
 #include <asm/dma.h>
 #include <asm/cputable.h>
 #include <asm/time.h>
-#include <asm/of_device.h>
-#include <asm/lmb.h>
 #include <asm/mpic.h>
 #include <asm/rtas.h>
 #include <asm/udbg.h>
@@ -223,7 +220,7 @@ static void __init maple_init_IRQ(void)
 	unsigned long openpic_addr = 0;
 	int naddr, n, i, opplen, has_isus = 0;
 	struct mpic *mpic;
-	unsigned int flags = MPIC_PRIMARY;
+	unsigned int flags = 0;
 
 	/* Locate MPIC in the device-tree. Note that there is a bug
 	 * in Maple device-tree where the type of the controller is
@@ -264,7 +261,7 @@ static void __init maple_init_IRQ(void)
 		flags |= MPIC_BIG_ENDIAN;
 
 	/* XXX Maple specific bits */
-	flags |= MPIC_U3_HT_IRQS | MPIC_WANTS_RESET;
+	flags |= MPIC_U3_HT_IRQS;
 	/* All U3/U4 are big-endian, older SLOF firmware doesn't encode this */
 	flags |= MPIC_BIG_ENDIAN;
 
@@ -319,7 +316,7 @@ static int __init maple_probe(void)
 	return 1;
 }
 
-define_machine(maple_md) {
+define_machine(maple) {
 	.name			= "Maple",
 	.probe			= maple_probe,
 	.setup_arch		= maple_setup_arch,
@@ -336,9 +333,61 @@ define_machine(maple_md) {
       	.calibrate_decr		= generic_calibrate_decr,
 	.progress		= maple_progress,
 	.power_save		= power4_idle,
-#ifdef CONFIG_KEXEC
-	.machine_kexec		= default_machine_kexec,
-	.machine_kexec_prepare	= default_machine_kexec_prepare,
-	.machine_crash_shutdown	= default_machine_crash_shutdown,
-#endif
 };
+
+#ifdef CONFIG_EDAC
+/*
+ * Register a platform device for CPC925 memory controller on
+ * all boards with U3H (CPC925) bridge.
+ */
+static int __init maple_cpc925_edac_setup(void)
+{
+	struct platform_device *pdev;
+	struct device_node *np = NULL;
+	struct resource r;
+	int ret;
+	volatile void __iomem *mem;
+	u32 rev;
+
+	np = of_find_node_by_type(NULL, "memory-controller");
+	if (!np) {
+		printk(KERN_ERR "%s: Unable to find memory-controller node\n",
+			__func__);
+		return -ENODEV;
+	}
+
+	ret = of_address_to_resource(np, 0, &r);
+	of_node_put(np);
+
+	if (ret < 0) {
+		printk(KERN_ERR "%s: Unable to get memory-controller reg\n",
+			__func__);
+		return -ENODEV;
+	}
+
+	mem = ioremap(r.start, resource_size(&r));
+	if (!mem) {
+		printk(KERN_ERR "%s: Unable to map memory-controller memory\n",
+				__func__);
+		return -ENOMEM;
+	}
+
+	rev = __raw_readl(mem);
+	iounmap(mem);
+
+	if (rev < 0x34 || rev > 0x3f) { /* U3H */
+		printk(KERN_ERR "%s: Non-CPC925(U3H) bridge revision: %02x\n",
+			__func__, rev);
+		return 0;
+	}
+
+	pdev = platform_device_register_simple("cpc925_edac", 0, &r, 1);
+	if (IS_ERR(pdev))
+		return PTR_ERR(pdev);
+
+	printk(KERN_INFO "%s: CPC925 platform device created\n", __func__);
+
+	return 0;
+}
+machine_device_initcall(maple, maple_cpc925_edac_setup);
+#endif

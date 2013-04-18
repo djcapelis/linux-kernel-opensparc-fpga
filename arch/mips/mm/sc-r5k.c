@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 1997, 2001 Ralf Baechle (ralf@gnu.org),
- * derived from r4xx0.c by David S. Miller (dm@engr.sgi.com).
+ * derived from r4xx0.c by David S. Miller (davem@davemloft.net).
  */
 #include <linux/init.h>
 #include <linux/kernel.h>
@@ -12,7 +12,6 @@
 #include <asm/cacheops.h>
 #include <asm/page.h>
 #include <asm/pgtable.h>
-#include <asm/system.h>
 #include <asm/mmu_context.h>
 #include <asm/r4kcache.h>
 
@@ -99,7 +98,7 @@ static struct bcache_ops r5k_sc_ops = {
 	.bc_inv = r5k_dma_cache_inv_sc
 };
 
-void __init r5k_sc_init(void)
+void __cpuinit r5k_sc_init(void)
 {
 	if (r5k_sc_probe()) {
 		r5k_sc_enable();

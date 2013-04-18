@@ -142,7 +142,7 @@ module_param_array(irq, int, NULL, 0);
 MODULE_PARM_DESC(iobase, "I/O address");
 MODULE_PARM_DESC(irq, "IRQ");
 
-static int __devinit qlogicfas_detect(struct scsi_host_template *sht)
+static int qlogicfas_detect(struct scsi_host_template *sht)
 {
 	struct Scsi_Host *shost;
 	struct qlogicfas408_priv *priv;
@@ -166,6 +166,7 @@ static int qlogicfas_release(struct Scsi_Host *shost)
 {
 	struct qlogicfas408_priv *priv = get_priv_by_host(shost);
 
+	scsi_remove_host(shost);
 	if (shost->irq) {
 		qlogicfas408_disable_ints(priv);	
 		free_irq(shost->irq, shost);
@@ -174,7 +175,6 @@ static int qlogicfas_release(struct Scsi_Host *shost)
 		free_dma(shost->dma_channel);
 	if (shost->io_port && shost->n_io_port)
 		release_region(shost->io_port, shost->n_io_port);
-	scsi_remove_host(shost);
 	scsi_host_put(shost);
 
 	return 0;

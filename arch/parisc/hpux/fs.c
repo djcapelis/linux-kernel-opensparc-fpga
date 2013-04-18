@@ -23,31 +23,29 @@
 
 #include <linux/kernel.h>
 #include <linux/mm.h>
+#include <linux/fs.h>
 #include <linux/sched.h>
 #include <linux/file.h>
-#include <linux/slab.h>
 #include <linux/ptrace.h>
+#include <linux/slab.h>
 #include <asm/errno.h>
 #include <asm/uaccess.h>
 
 int hpux_execve(struct pt_regs *regs)
 {
 	int error;
-	char *filename;
+	struct filename *filename;
 
-	filename = getname((char __user *) regs->gr[26]);
+	filename = getname((const char __user *) regs->gr[26]);
 	error = PTR_ERR(filename);
 	if (IS_ERR(filename))
 		goto out;
 
-	error = do_execve(filename, (char __user * __user *) regs->gr[25],
-		(char __user * __user *) regs->gr[24], regs);
+	error = do_execve(filename->name,
+			  (const char __user *const __user *) regs->gr[25],
+			  (const char __user *const __user *) regs->gr[24],
+			  regs);
 
-	if (error == 0) {
-		task_lock(current);
-		current->ptrace &= ~PT_DTRACE;
-		task_unlock(current);
-	}
 	putname(filename);
 
 out:
@@ -83,55 +81,60 @@ static int filldir(void * __buf, const char * name, int namlen, loff_t offset,
 	if (reclen > buf->count)
 		return -EINVAL;
 	d_ino = ino;
-	if (sizeof(d_ino) < sizeof(ino) && d_ino != ino)
+	if (sizeof(d_ino) < sizeof(ino) && d_ino != ino) {
+		buf->error = -EOVERFLOW;
 		return -EOVERFLOW;
+	}
 	dirent = buf->previous;
 	if (dirent)
-		put_user(offset, &dirent->d_off);
+		if (put_user(offset, &dirent->d_off))
+			goto Efault;
 	dirent = buf->current_dir;
+	if (put_user(d_ino, &dirent->d_ino) ||
+	    put_user(reclen, &dirent->d_reclen) ||
+	    put_user(namlen, &dirent->d_namlen) ||
+	    copy_to_user(dirent->d_name, name, namlen) ||
+	    put_user(0, dirent->d_name + namlen))
+		goto Efault;
 	buf->previous = dirent;
-	put_user(d_ino, &dirent->d_ino);
-	put_user(reclen, &dirent->d_reclen);
-	put_user(namlen, &dirent->d_namlen);
-	copy_to_user(dirent->d_name, name, namlen);
-	put_user(0, dirent->d_name + namlen);
-	dirent = (void __user *)dirent + reclen;
-	buf->current_dir = dirent;
+	buf->current_dir = (void __user *)dirent + reclen;
 	buf->count -= reclen;
 	return 0;
+Efault:
+	buf->error = -EFAULT;
+	return -EFAULT;
 }
 
 #undef NAME_OFFSET
 
 int hpux_getdents(unsigned int fd, struct hpux_dirent __user *dirent, unsigned int count)
 {
-	struct file * file;
+	struct fd arg;
 	struct hpux_dirent __user * lastdirent;
 	struct getdents_callback buf;
-	int error = -EBADF;
+	int error;
 
-	file = fget(fd);
-	if (!file)
-		goto out;
+	arg = fdget(fd);
+	if (!arg.file)
+		return -EBADF;
 
 	buf.current_dir = dirent;
 	buf.previous = NULL;
 	buf.count = count;
 	buf.error = 0;
 
-	error = vfs_readdir(file, filldir, &buf);
-	if (error < 0)
-		goto out_putf;
-	error = buf.error;
+	error = vfs_readdir(arg.file, filldir, &buf);
+	if (error >= 0)
+		error = buf.error;
 	lastdirent = buf.previous;
 	if (lastdirent) {
-		put_user(file->f_pos, &lastdirent->d_off);
-		error = count - buf.count;
+		if (put_user(arg.file->f_pos, &lastdirent->d_off))
+			error = -EFAULT;
+		else
+			error = count - buf.count;
 	}
 
-out_putf:
-	fput(file);
-out:
+	fdput(arg);
 	return error;
 }
 
@@ -155,8 +158,8 @@ static int cp_hpux_stat(struct kstat *stat, struct hpux_stat64 __user *statbuf)
 	tmp.st_ino = stat->ino;
 	tmp.st_mode = stat->mode;
 	tmp.st_nlink = stat->nlink;
-	tmp.st_uid = stat->uid;
-	tmp.st_gid = stat->gid;
+	tmp.st_uid = from_kuid_munged(current_user_ns(), stat->uid);
+	tmp.st_gid = from_kgid_munged(current_user_ns(), stat->gid);
 	tmp.st_rdev = new_encode_dev(stat->rdev);
 	tmp.st_size = stat->size;
 	tmp.st_atime = stat->atime.tv_sec;
@@ -167,7 +170,7 @@ static int cp_hpux_stat(struct kstat *stat, struct hpux_stat64 __user *statbuf)
 	return copy_to_user(statbuf,&tmp,sizeof(tmp)) ? -EFAULT : 0;
 }
 
-long hpux_stat64(char __user *filename, struct hpux_stat64 __user *statbuf)
+long hpux_stat64(const char __user *filename, struct hpux_stat64 __user *statbuf)
 {
 	struct kstat stat;
 	int error = vfs_stat(filename, &stat);
@@ -189,7 +192,8 @@ long hpux_fstat64(unsigned int fd, struct hpux_stat64 __user *statbuf)
 	return error;
 }
 
-long hpux_lstat64(char __user *filename, struct hpux_stat64 __user *statbuf)
+long hpux_lstat64(const char __user *filename,
+		  struct hpux_stat64 __user *statbuf)
 {
 	struct kstat stat;
 	int error = vfs_lstat(filename, &stat);

@@ -1,7 +1,7 @@
 /*
  *  Routines for control of the AK4117 via 4-wire serial interface
  *  IEC958 (S/PDIF) receiver by Asahi Kasei
- *  Copyright (c) by Jaroslav Kysela <perex@suse.cz>
+ *  Copyright (c) by Jaroslav Kysela <perex@perex.cz>
  *
  *
  *   This program is free software; you can redistribute it and/or modify
@@ -20,16 +20,16 @@
  *
  */
 
-#include <sound/driver.h>
 #include <linux/slab.h>
 #include <linux/delay.h>
+#include <linux/module.h>
 #include <sound/core.h>
 #include <sound/control.h>
 #include <sound/pcm.h>
 #include <sound/ak4117.h>
 #include <sound/asoundef.h>
 
-MODULE_AUTHOR("Jaroslav Kysela <perex@suse.cz>");
+MODULE_AUTHOR("Jaroslav Kysela <perex@perex.cz>");
 MODULE_DESCRIPTION("AK4117 IEC958 (S/PDIF) receiver by Asahi Kasei");
 MODULE_LICENSE("GPL");
 
@@ -181,15 +181,7 @@ static int snd_ak4117_in_error_get(struct snd_kcontrol *kcontrol,
 	return 0;
 }
 
-static int snd_ak4117_in_bit_info(struct snd_kcontrol *kcontrol,
-				  struct snd_ctl_elem_info *uinfo)
-{
-	uinfo->type = SNDRV_CTL_ELEM_TYPE_BOOLEAN;
-	uinfo->count = 1;
-	uinfo->value.integer.min = 0;
-	uinfo->value.integer.max = 1;
-	return 0;
-}
+#define snd_ak4117_in_bit_info		snd_ctl_boolean_mono_info
 
 static int snd_ak4117_in_bit_get(struct snd_kcontrol *kcontrol,
 				 struct snd_ctl_elem_value *ucontrol)
@@ -388,7 +380,7 @@ static struct snd_kcontrol_new snd_ak4117_iec958_controls[] = {
 },
 {
 	.iface =	SNDRV_CTL_ELEM_IFACE_PCM,
-	.name =		"IEC958 Preample Capture Default",
+	.name =		"IEC958 Preamble Capture Default",
 	.access =	SNDRV_CTL_ELEM_ACCESS_READ | SNDRV_CTL_ELEM_ACCESS_VOLATILE,
 	.info =		snd_ak4117_spdif_pinfo,
 	.get =		snd_ak4117_spdif_pget,
@@ -440,7 +432,8 @@ int snd_ak4117_build(struct ak4117 *ak4117, struct snd_pcm_substream *cap_substr
 	unsigned int idx;
 	int err;
 
-	snd_assert(cap_substream, return -EINVAL);
+	if (snd_BUG_ON(!cap_substream))
+		return -EINVAL;
 	ak4117->substream = cap_substream;
 	for (idx = 0; idx < AK4117_CONTROLS; idx++) {
 		kctl = snd_ctl_new1(&snd_ak4117_iec958_controls[idx], ak4117);

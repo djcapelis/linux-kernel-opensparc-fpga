@@ -57,7 +57,7 @@ poll_def_tmr(unsigned long dummy)
 		  {
 			  def_tmr.expires = (1) + jiffies;
 			  add_timer(&def_tmr);
-		  };
+		  }
 
 		  if (tmr_running)
 		    {
@@ -100,13 +100,10 @@ def_tmr_open(int dev, int mode)
 	curr_tempo = 60;
 	curr_timebase = 100;
 	opened = 1;
-
-	;
-
 	{
 		def_tmr.expires = (1) + jiffies;
 		add_timer(&def_tmr);
-	};
+	}
 
 	return 0;
 }

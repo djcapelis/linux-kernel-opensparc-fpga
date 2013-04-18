@@ -29,7 +29,7 @@
  *	PM support
  *	MIDI support
  *	Game Port support
- *	SG DMA support (this will need *alot* of work)
+ *	SG DMA support (this will need *a lot* of work)
  */
 
 #include <linux/init.h>
@@ -39,8 +39,8 @@
 #include <linux/interrupt.h>
 #include <linux/compiler.h>
 #include <linux/delay.h>
+#include <linux/module.h>
 
-#include <sound/driver.h>
 #include <sound/core.h>
 #include <sound/pcm.h>
 #include <sound/initval.h>
@@ -66,7 +66,7 @@ static char *id[SNDRV_CARDS] = SNDRV_DEFAULT_STR;
 module_param_array(id, charp, NULL, 0444);
 MODULE_PARM_DESC(id, "ID string for the AD1889 soundcard.");
 
-static int enable[SNDRV_CARDS] = SNDRV_DEFAULT_ENABLE_PNP;
+static bool enable[SNDRV_CARDS] = SNDRV_DEFAULT_ENABLE_PNP;
 module_param_array(enable, bool, NULL, 0444);
 MODULE_PARM_DESC(enable, "Enable AD1889 soundcard.");
 
@@ -265,10 +265,10 @@ snd_ad1889_ac97_ready(struct snd_ad1889 *chip)
 		mdelay(1);
 	if (!retry) {
 		snd_printk(KERN_ERR PFX "[%s] Link is not ready.\n",
-		       __FUNCTION__);
+		       __func__);
 		return -EIO;
 	}
-	ad1889_debug("[%s] ready after %d ms\n", __FUNCTION__, 400 - retry);
+	ad1889_debug("[%s] ready after %d ms\n", __func__, 400 - retry);
 
 	return 0;
 }
@@ -550,7 +550,8 @@ snd_ad1889_playback_pointer(struct snd_pcm_substream *ss)
 	ptr = ad1889_readl(chip, AD_DMA_WAVCA);
 	ptr -= chip->wave.addr;
 	
-	snd_assert((ptr >= 0) && (ptr < chip->wave.size), return 0);
+	if (snd_BUG_ON(ptr >= chip->wave.size))
+		return 0;
 	
 	return bytes_to_frames(ss->runtime, ptr);
 }
@@ -568,7 +569,8 @@ snd_ad1889_capture_pointer(struct snd_pcm_substream *ss)
 	ptr = ad1889_readl(chip, AD_DMA_ADCCA);
 	ptr -= chip->ramc.addr;
 
-	snd_assert((ptr >= 0) && (ptr < chip->ramc.size), return 0);
+	if (snd_BUG_ON(ptr >= chip->ramc.size))
+		return 0;
 	
 	return bytes_to_frames(ss->runtime, ptr);
 }
@@ -622,7 +624,7 @@ snd_ad1889_interrupt(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
-static int __devinit
+static int
 snd_ad1889_pcm_init(struct snd_ad1889 *chip, int device, struct snd_pcm **rpcm)
 {
 	int err;
@@ -745,7 +747,7 @@ snd_ad1889_proc_read(struct snd_info_entry *entry, struct snd_info_buffer *buffe
 	snd_iprintf(buffer, "Resampler samplerate: %u Hz\n", reg);
 }
 
-static void __devinit
+static void
 snd_ad1889_proc_init(struct snd_ad1889 *chip)
 {
 	struct snd_info_entry *entry;
@@ -765,7 +767,7 @@ static struct ac97_quirk ac97_quirks[] = {
 	{ } /* terminator */
 };
 
-static void __devinit
+static void
 snd_ad1889_ac97_xinit(struct snd_ad1889 *chip)
 {
 	u16 reg;
@@ -803,7 +805,7 @@ snd_ad1889_ac97_free(struct snd_ac97 *ac97)
 	chip->ac97 = NULL;
 }
 
-static int __devinit
+static int
 snd_ad1889_ac97_init(struct snd_ad1889 *chip, const char *quirk_override)
 {
 	int err;
@@ -855,8 +857,6 @@ snd_ad1889_free(struct snd_ad1889 *chip)
 
 	spin_unlock_irq(&chip->lock);
 
-	synchronize_irq(chip->irq);
-	
 	if (chip->irq >= 0)
 		free_irq(chip->irq, chip);
 
@@ -878,7 +878,7 @@ snd_ad1889_dev_free(struct snd_device *device)
 	return snd_ad1889_free(chip);
 }
 
-static int __devinit
+static int
 snd_ad1889_init(struct snd_ad1889 *chip) 
 {
 	ad1889_writew(chip, AD_DS_CCS, AD_DS_CCS_CLKEN); /* turn on clock */
@@ -892,7 +892,7 @@ snd_ad1889_init(struct snd_ad1889 *chip)
 	return 0;
 }
 
-static int __devinit
+static int
 snd_ad1889_create(struct snd_card *card,
 		  struct pci_dev *pci,
 		  struct snd_ad1889 **rchip)
@@ -910,8 +910,8 @@ snd_ad1889_create(struct snd_card *card,
 		return err;
 
 	/* check PCI availability (32bit DMA) */
-	if (pci_set_dma_mask(pci, DMA_32BIT_MASK) < 0 ||
-	    pci_set_consistent_dma_mask(pci, DMA_32BIT_MASK) < 0) {
+	if (pci_set_dma_mask(pci, DMA_BIT_MASK(32)) < 0 ||
+	    pci_set_consistent_dma_mask(pci, DMA_BIT_MASK(32)) < 0) {
 		printk(KERN_ERR PFX "error setting 32-bit DMA mask.\n");
 		pci_disable_device(pci);
 		return -ENXIO;
@@ -933,7 +933,7 @@ snd_ad1889_create(struct snd_card *card,
 		goto free_and_ret;
 
 	chip->bar = pci_resource_start(pci, 0);
-	chip->iobase = ioremap_nocache(chip->bar, pci_resource_len(pci, 0));
+	chip->iobase = pci_ioremap_bar(pci, 0);
 	if (chip->iobase == NULL) {
 		printk(KERN_ERR PFX "unable to reserve region.\n");
 		err = -EBUSY;
@@ -945,7 +945,7 @@ snd_ad1889_create(struct snd_card *card,
 	spin_lock_init(&chip->lock);	/* only now can we call ad1889_free */
 
 	if (request_irq(pci->irq, snd_ad1889_interrupt,
-			IRQF_SHARED, card->driver, chip)) {
+			IRQF_SHARED, KBUILD_MODNAME, chip)) {
 		printk(KERN_ERR PFX "cannot obtain IRQ %d\n", pci->irq);
 		snd_ad1889_free(chip);
 		return -EBUSY;
@@ -978,7 +978,7 @@ free_and_ret:
 	return err;
 }
 
-static int __devinit
+static int
 snd_ad1889_probe(struct pci_dev *pci,
 		 const struct pci_device_id *pci_id)
 {
@@ -996,10 +996,10 @@ snd_ad1889_probe(struct pci_dev *pci,
 	}
 
 	/* (2) */
-	card = snd_card_new(index[devno], id[devno], THIS_MODULE, 0);
+	err = snd_card_create(index[devno], id[devno], THIS_MODULE, 0, &card);
 	/* XXX REVISIT: we can probably allocate chip in this call */
-	if (card == NULL)
-		return -ENOMEM;
+	if (err < 0)
+		return err;
 
 	strcpy(card->driver, "AD1889");
 	strcpy(card->shortname, "Analog Devices AD1889");
@@ -1042,37 +1042,24 @@ free_and_ret:
 	return err;
 }
 
-static void __devexit
+static void
 snd_ad1889_remove(struct pci_dev *pci)
 {
 	snd_card_free(pci_get_drvdata(pci));
 	pci_set_drvdata(pci, NULL);
 }
 
-static struct pci_device_id snd_ad1889_ids[] = {
+static DEFINE_PCI_DEVICE_TABLE(snd_ad1889_ids) = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_ANALOG_DEVICES, PCI_DEVICE_ID_AD1889JS) },
 	{ 0, },
 };
 MODULE_DEVICE_TABLE(pci, snd_ad1889_ids);
 
-static struct pci_driver ad1889_pci = {
-	.name = "AD1889 Audio",
+static struct pci_driver ad1889_pci_driver = {
+	.name = KBUILD_MODNAME,
 	.id_table = snd_ad1889_ids,
 	.probe = snd_ad1889_probe,
-	.remove = __devexit_p(snd_ad1889_remove),
+	.remove = snd_ad1889_remove,
 };
 
-static int __init
-alsa_ad1889_init(void)
-{
-	return pci_register_driver(&ad1889_pci);
-}
-
-static void __exit
-alsa_ad1889_fini(void)
-{
-	pci_unregister_driver(&ad1889_pci);
-}
-
-module_init(alsa_ad1889_init);
-module_exit(alsa_ad1889_fini);
+module_pci_driver(ad1889_pci_driver);

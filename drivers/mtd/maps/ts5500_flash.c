@@ -22,8 +22,6 @@
  * - Drive A and B use the resident flash disk (RFD) flash translation layer.
  * - If you have created your own jffs file system and the bios overwrites
  *   it during boot, try disabling Drive A: and B: in the boot order.
- *
- * $Id: ts5500_flash.c,v 1.5 2005/11/07 11:14:28 gleixner Exp $
  */
 
 #include <linux/init.h>
@@ -91,12 +89,11 @@ static int __init init_ts5500_map(void)
 	}
 
 	mymtd->owner = THIS_MODULE;
-	add_mtd_partitions(mymtd, ts5500_partitions, NUM_PARTITIONS);
+	mtd_device_register(mymtd, ts5500_partitions, NUM_PARTITIONS);
 
 	return 0;
 
 err1:
-	map_destroy(mymtd);
 	iounmap(ts5500_map.virt);
 err2:
 	return rc;
@@ -105,7 +102,7 @@ err2:
 static void __exit cleanup_ts5500_map(void)
 {
 	if (mymtd) {
-		del_mtd_partitions(mymtd);
+		mtd_device_unregister(mymtd);
 		map_destroy(mymtd);
 	}
 

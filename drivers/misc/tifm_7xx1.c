@@ -11,6 +11,7 @@
 
 #include <linux/tifm.h>
 #include <linux/dma-mapping.h>
+#include <linux/module.h>
 
 #define DRIVER_NAME "tifm_7xx1"
 #define DRIVER_VERSION "0.8"
@@ -149,7 +150,7 @@ static void tifm_7xx1_switch_media(struct work_struct *work)
 	socket_change_set = fm->socket_change_set;
 	fm->socket_change_set = 0;
 
-	dev_dbg(fm->cdev.dev, "checking media set %x\n",
+	dev_dbg(fm->dev.parent, "checking media set %x\n",
 		socket_change_set);
 
 	if (!socket_change_set) {
@@ -164,7 +165,7 @@ static void tifm_7xx1_switch_media(struct work_struct *work)
 		if (sock) {
 			printk(KERN_INFO
 			       "%s : demand removing card from socket %u:%u\n",
-			       fm->cdev.class_id, fm->id, cnt);
+			       dev_name(&fm->dev), fm->id, cnt);
 			fm->sockets[cnt] = NULL;
 			sock_addr = sock->addr;
 			spin_unlock_irqrestore(&fm->lock, flags);
@@ -302,6 +303,21 @@ static int tifm_7xx1_resume(struct pci_dev *dev)
 
 #endif /* CONFIG_PM */
 
+static int tifm_7xx1_dummy_has_ms_pif(struct tifm_adapter *fm,
+				      struct tifm_dev *sock)
+{
+	return 0;
+}
+
+static int tifm_7xx1_has_ms_pif(struct tifm_adapter *fm, struct tifm_dev *sock)
+{
+	if (((fm->num_sockets == 4) && (sock->socket_id == 2))
+	    || ((fm->num_sockets == 2) && (sock->socket_id == 0)))
+		return 1;
+
+	return 0;
+}
+
 static int tifm_7xx1_probe(struct pci_dev *dev,
 			   const struct pci_device_id *dev_id)
 {
@@ -309,7 +325,7 @@ static int tifm_7xx1_probe(struct pci_dev *dev,
 	int pci_dev_busy = 0;
 	int rc;
 
-	rc = pci_set_dma_mask(dev, DMA_32BIT_MASK);
+	rc = pci_set_dma_mask(dev, DMA_BIT_MASK(32));
 	if (rc)
 		return rc;
 
@@ -336,10 +352,10 @@ static int tifm_7xx1_probe(struct pci_dev *dev,
 
 	INIT_WORK(&fm->media_switcher, tifm_7xx1_switch_media);
 	fm->eject = tifm_7xx1_eject;
+	fm->has_ms_pif = tifm_7xx1_has_ms_pif;
 	pci_set_drvdata(dev, fm);
 
-	fm->addr = ioremap(pci_resource_start(dev, 0),
-			   pci_resource_len(dev, 0));
+	fm->addr = pci_ioremap_bar(dev, 0);
 	if (!fm->addr)
 		goto err_out_free;
 
@@ -351,6 +367,8 @@ static int tifm_7xx1_probe(struct pci_dev *dev,
 	if (rc)
 		goto err_out_irq;
 
+	writel(TIFM_IRQ_ENABLE | TIFM_IRQ_SOCKMASK((1 << fm->num_sockets) - 1),
+	       fm->addr + FM_CLEAR_INTERRUPT_ENABLE);
 	writel(TIFM_IRQ_ENABLE | TIFM_IRQ_SOCKMASK((1 << fm->num_sockets) - 1),
 	       fm->addr + FM_SET_INTERRUPT_ENABLE);
 	return 0;
@@ -377,6 +395,7 @@ static void tifm_7xx1_remove(struct pci_dev *dev)
 	int cnt;
 
 	fm->eject = tifm_7xx1_dummy_eject;
+	fm->has_ms_pif = tifm_7xx1_dummy_has_ms_pif;
 	writel(TIFM_IRQ_SETALL, fm->addr + FM_CLEAR_INTERRUPT_ENABLE);
 	mmiowb();
 	free_irq(dev->irq, fm);
@@ -415,21 +434,9 @@ static struct pci_driver tifm_7xx1_driver = {
 	.resume = tifm_7xx1_resume,
 };
 
-static int __init tifm_7xx1_init(void)
-{
-	return pci_register_driver(&tifm_7xx1_driver);
-}
-
-static void __exit tifm_7xx1_exit(void)
-{
-	pci_unregister_driver(&tifm_7xx1_driver);
-}
-
+module_pci_driver(tifm_7xx1_driver);
 MODULE_AUTHOR("Alex Dubov");
 MODULE_DESCRIPTION("TI FlashMedia host driver");
 MODULE_LICENSE("GPL");
 MODULE_DEVICE_TABLE(pci, tifm_7xx1_pci_tbl);
 MODULE_VERSION(DRIVER_VERSION);
-
-module_init(tifm_7xx1_init);
-module_exit(tifm_7xx1_exit);

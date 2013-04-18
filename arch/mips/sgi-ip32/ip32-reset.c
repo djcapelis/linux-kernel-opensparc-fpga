@@ -20,7 +20,6 @@
 #include <asm/addrspace.h>
 #include <asm/irq.h>
 #include <asm/reboot.h>
-#include <asm/system.h>
 #include <asm/wbflush.h>
 #include <asm/ip32/mace.h>
 #include <asm/ip32/crime.h>
@@ -53,7 +52,7 @@ static inline void ip32_machine_halt(void)
 
 static void ip32_machine_power_off(void)
 {
-	volatile unsigned char reg_a, xctrl_a, xctrl_b;
+	unsigned char reg_a, xctrl_a, xctrl_b;
 
 	disable_irq(MACEISA_RTC_IRQ);
 	reg_a = CMOS_READ(RTC_REG_A);
@@ -91,9 +90,10 @@ static void blink_timeout(unsigned long data)
 
 static void debounce(unsigned long data)
 {
-	volatile unsigned char reg_a, reg_c, xctrl_a;
+	unsigned char reg_a, reg_c, xctrl_a;
 
 	reg_c = CMOS_READ(RTC_INTR_FLAGS);
+	reg_a = CMOS_READ(RTC_REG_A);
 	CMOS_WRITE(reg_a | DS_REGA_DV0, RTC_REG_A);
 	wbflush();
 	xctrl_a = CMOS_READ(DS_B1_XCTRL4A);
@@ -137,15 +137,15 @@ static inline void ip32_power_button(void)
 
 static irqreturn_t ip32_rtc_int(int irq, void *dev_id)
 {
-	volatile unsigned char reg_c;
+	unsigned char reg_c;
 
 	reg_c = CMOS_READ(RTC_INTR_FLAGS);
 	if (!(reg_c & RTC_IRQF)) {
 		printk(KERN_WARNING
-			"%s: RTC IRQ without RTC_IRQF\n", __FUNCTION__);
+			"%s: RTC IRQ without RTC_IRQF\n", __func__);
 	}
 	/* Wait until interrupt goes away */
-	disable_irq(MACEISA_RTC_IRQ);
+	disable_irq_nosync(MACEISA_RTC_IRQ);
 	init_timer(&debounce_timer);
 	debounce_timer.function = debounce;
 	debounce_timer.expires = jiffies + 50;
@@ -195,7 +195,8 @@ static __init int ip32_reboot_setup(void)
 	blink_timer.function = blink_timeout;
 	atomic_notifier_chain_register(&panic_notifier_list, &panic_block);
 
-	request_irq(MACEISA_RTC_IRQ, ip32_rtc_int, 0, "rtc", NULL);
+	if (request_irq(MACEISA_RTC_IRQ, ip32_rtc_int, 0, "rtc", NULL))
+		panic("Can't allocate MACEISA RTC IRQ");
 
 	return 0;
 }

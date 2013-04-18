@@ -1,6 +1,4 @@
 /*
- * $Id: xtkbd.c,v 1.11 2001/09/25 10:12:07 vojtech Exp $
- *
  *  Copyright (c) 1999-2001 Vojtech Pavlik
  */
 
@@ -110,7 +108,7 @@ static int xtkbd_connect(struct serio *serio, struct serio_driver *drv)
 	input_dev->id.version = 0x0100;
 	input_dev->dev.parent = &serio->dev;
 
-	input_dev->evbit[0] = BIT(EV_KEY) | BIT(EV_REP);
+	input_dev->evbit[0] = BIT_MASK(EV_KEY) | BIT_MASK(EV_REP);
 	input_dev->keycode = xtkbd->keycode;
 	input_dev->keycodesize = sizeof(unsigned char);
 	input_dev->keycodemax = ARRAY_SIZE(xtkbd_keycode);
@@ -171,15 +169,4 @@ static struct serio_driver xtkbd_drv = {
 	.disconnect	= xtkbd_disconnect,
 };
 
-static int __init xtkbd_init(void)
-{
-	return serio_register_driver(&xtkbd_drv);
-}
-
-static void __exit xtkbd_exit(void)
-{
-	serio_unregister_driver(&xtkbd_drv);
-}
-
-module_init(xtkbd_init);
-module_exit(xtkbd_exit);
+module_serio_driver(xtkbd_drv);

@@ -7,7 +7,7 @@
  * Reiner Sailer <sailer@watson.ibm.com>
  * Kylene Hall <kjhall@us.ibm.com>
  *
- * Maintained by: <tpmdd_devel@lists.sourceforge.net>
+ * Maintained by: <tpmdd-devel@lists.sourceforge.net>
  *
  * Device driver for TCG/TCPA TPM (trusted platform module).
  * Specifications at www.trustedcomputinggroup.org	 
@@ -20,6 +20,7 @@
  */
 
 #include <linux/platform_device.h>
+#include <linux/slab.h>
 #include "tpm.h"
 
 /* National definitions */
@@ -264,7 +265,7 @@ static const struct tpm_vendor_specific tpm_nsc = {
 
 static struct platform_device *pdev = NULL;
 
-static void __devexit tpm_nsc_remove(struct device *dev)
+static void tpm_nsc_remove(struct device *dev)
 {
 	struct tpm_chip *chip = dev_get_drvdata(dev);
 	if ( chip ) {
@@ -273,12 +274,14 @@ static void __devexit tpm_nsc_remove(struct device *dev)
 	}
 }
 
-static struct device_driver nsc_drv = {
-	.name = "tpm_nsc",
-	.bus = &platform_bus_type,
-	.owner = THIS_MODULE,
-	.suspend = tpm_pm_suspend,
-	.resume = tpm_pm_resume,
+static SIMPLE_DEV_PM_OPS(tpm_nsc_pm, tpm_pm_suspend, tpm_pm_resume);
+
+static struct platform_driver nsc_drv = {
+	.driver          = {
+		.name    = "tpm_nsc",
+		.owner   = THIS_MODULE,
+		.pm      = &tpm_nsc_pm,
+	},
 };
 
 static int __init init_nsc(void)
@@ -297,7 +300,7 @@ static int __init init_nsc(void)
 			return -ENODEV;
 	}
 
-	err = driver_register(&nsc_drv);
+	err = platform_driver_register(&nsc_drv);
 	if (err)
 		return err;
 
@@ -308,24 +311,22 @@ static int __init init_nsc(void)
 	/* enable the DPM module */
 	tpm_write_index(nscAddrBase, NSC_LDC_INDEX, 0x01);
 
-	pdev = kzalloc(sizeof(struct platform_device), GFP_KERNEL);
+	pdev = platform_device_alloc("tpm_nscl0", -1);
 	if (!pdev) {
 		rc = -ENOMEM;
 		goto err_unreg_drv;
 	}
 
-	pdev->name = "tpm_nscl0";
-	pdev->id = -1;
 	pdev->num_resources = 0;
+	pdev->dev.driver = &nsc_drv.driver;
 	pdev->dev.release = tpm_nsc_remove;
-	pdev->dev.driver = &nsc_drv;
 
-	if ((rc = platform_device_register(pdev)) < 0)
-		goto err_free_dev;
+	if ((rc = platform_device_add(pdev)) < 0)
+		goto err_put_dev;
 
 	if (request_region(base, 2, "tpm_nsc0") == NULL ) {
 		rc = -EBUSY;
-		goto err_unreg_dev;
+		goto err_del_dev;
 	}
 
 	if (!(chip = tpm_register_hardware(&pdev->dev, &tpm_nsc))) {
@@ -372,12 +373,12 @@ static int __init init_nsc(void)
 
 err_rel_reg:
 	release_region(base, 2);
-err_unreg_dev:
-	platform_device_unregister(pdev);
-err_free_dev:
-	kfree(pdev);
+err_del_dev:
+	platform_device_del(pdev);
+err_put_dev:
+	platform_device_put(pdev);
 err_unreg_drv:
-	driver_unregister(&nsc_drv);
+	platform_driver_unregister(&nsc_drv);
 	return rc;
 }
 
@@ -386,11 +387,9 @@ static void __exit cleanup_nsc(void)
 	if (pdev) {
 		tpm_nsc_remove(&pdev->dev);
 		platform_device_unregister(pdev);
-		kfree(pdev);
-		pdev = NULL;
 	}
 
-	driver_unregister(&nsc_drv);
+	platform_driver_unregister(&nsc_drv);
 }
 
 module_init(init_nsc);

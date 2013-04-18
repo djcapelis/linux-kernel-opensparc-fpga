@@ -14,6 +14,22 @@
 #include <asm/sn/sn0/hub.h>
 
 /*
+ * Most of the IOC3 PCI config register aren't present
+ * we emulate what is needed for a normal PCI enumeration
+ */
+static u32 emulate_ioc3_cfg(int where, int size)
+{
+	if (size == 1 && where == 0x3d)
+		return 0x01;
+	else if (size == 2 && where == 0x3c)
+		return 0x0100;
+	else if (size == 4 && where == 0x3c)
+		return 0x00000100;
+
+	return 0;
+}
+
+/*
  * The Bridge ASIC supports both type 0 and type 1 access.  Type 1 is
  * not really documented, so right now I can't write code which uses it.
  * Therefore we use type 0 accesses for now even though they won't work
@@ -40,7 +56,7 @@ static int pci_conf0_read_config(struct pci_bus *bus, unsigned int devfn,
 		return PCIBIOS_DEVICE_NOT_FOUND;
 
 	/*
-	 * IOC3 is fucked fucked beyond believe ...  Don't even give the
+	 * IOC3 is fucking fucked beyond belief ...  Don't even give the
 	 * generic PCI code a chance to look at it for real ...
 	 */
 	if (cf == (PCI_VENDOR_ID_SGI | (PCI_DEVICE_ID_SGI_IOC3 << 16)))
@@ -60,16 +76,16 @@ static int pci_conf0_read_config(struct pci_bus *bus, unsigned int devfn,
 oh_my_gawd:
 
 	/*
-	 * IOC3 is fucked fucked beyond believe ...  Don't even give the
+	 * IOC3 is fucking fucked beyond belief ...  Don't even give the
 	 * generic PCI code a chance to look at the wrong register.
 	 */
 	if ((where >= 0x14 && where < 0x40) || (where >= 0x48)) {
-		*value = 0;
+		*value = emulate_ioc3_cfg(where, size);
 		return PCIBIOS_SUCCESSFUL;
 	}
 
 	/*
-	 * IOC3 is fucked fucked beyond believe ...  Don't try to access
+	 * IOC3 is fucking fucked beyond belief ...  Don't try to access
 	 * anything but 32-bit words ...
 	 */
 	addr = &bridge->b_type0_cfg_dev[slot].f[fn].l[where >> 2];
@@ -102,7 +118,7 @@ static int pci_conf1_read_config(struct pci_bus *bus, unsigned int devfn,
 		return PCIBIOS_DEVICE_NOT_FOUND;
 
 	/*
-	 * IOC3 is fucked fucked beyond believe ...  Don't even give the
+	 * IOC3 is fucking fucked beyond belief ...  Don't even give the
 	 * generic PCI code a chance to look at it for real ...
 	 */
 	if (cf == (PCI_VENDOR_ID_SGI | (PCI_DEVICE_ID_SGI_IOC3 << 16)))
@@ -123,16 +139,16 @@ static int pci_conf1_read_config(struct pci_bus *bus, unsigned int devfn,
 oh_my_gawd:
 
 	/*
-	 * IOC3 is fucked fucked beyond believe ...  Don't even give the
+	 * IOC3 is fucking fucked beyond belief ...  Don't even give the
 	 * generic PCI code a chance to look at the wrong register.
 	 */
 	if ((where >= 0x14 && where < 0x40) || (where >= 0x48)) {
-		*value = 0;
+		*value = emulate_ioc3_cfg(where, size);
 		return PCIBIOS_SUCCESSFUL;
 	}
 
 	/*
-	 * IOC3 is fucked fucked beyond believe ...  Don't try to access
+	 * IOC3 is fucking fucked beyond belief ...  Don't try to access
 	 * anything but 32-bit words ...
 	 */
 	bridge->b_pci_cfg = (busno << 16) | (slot << 11);
@@ -173,7 +189,7 @@ static int pci_conf0_write_config(struct pci_bus *bus, unsigned int devfn,
 		return PCIBIOS_DEVICE_NOT_FOUND;
 
 	/*
-	 * IOC3 is fucked fucked beyond believe ...  Don't even give the
+	 * IOC3 is fucking fucked beyond belief ...  Don't even give the
 	 * generic PCI code a chance to look at it for real ...
 	 */
 	if (cf == (PCI_VENDOR_ID_SGI | (PCI_DEVICE_ID_SGI_IOC3 << 16)))
@@ -197,14 +213,14 @@ static int pci_conf0_write_config(struct pci_bus *bus, unsigned int devfn,
 oh_my_gawd:
 
 	/*
-	 * IOC3 is fucked fucked beyond believe ...  Don't even give the
+	 * IOC3 is fucking fucked beyond belief ...  Don't even give the
 	 * generic PCI code a chance to touch the wrong register.
 	 */
 	if ((where >= 0x14 && where < 0x40) || (where >= 0x48))
 		return PCIBIOS_SUCCESSFUL;
 
 	/*
-	 * IOC3 is fucked fucked beyond believe ...  Don't try to access
+	 * IOC3 is fucking fucked beyond belief ...  Don't try to access
 	 * anything but 32-bit words ...
 	 */
 	addr = &bridge->b_type0_cfg_dev[slot].f[fn].l[where >> 2];
@@ -241,7 +257,7 @@ static int pci_conf1_write_config(struct pci_bus *bus, unsigned int devfn,
 		return PCIBIOS_DEVICE_NOT_FOUND;
 
 	/*
-	 * IOC3 is fucked fucked beyond believe ...  Don't even give the
+	 * IOC3 is fucking fucked beyond belief ...  Don't even give the
 	 * generic PCI code a chance to look at it for real ...
 	 */
 	if (cf == (PCI_VENDOR_ID_SGI | (PCI_DEVICE_ID_SGI_IOC3 << 16)))
@@ -265,14 +281,14 @@ static int pci_conf1_write_config(struct pci_bus *bus, unsigned int devfn,
 oh_my_gawd:
 
 	/*
-	 * IOC3 is fucked fucked beyond believe ...  Don't even give the
+	 * IOC3 is fucking fucked beyond belief ...  Don't even give the
 	 * generic PCI code a chance to touch the wrong register.
 	 */
 	if ((where >= 0x14 && where < 0x40) || (where >= 0x48))
 		return PCIBIOS_SUCCESSFUL;
 
 	/*
-	 * IOC3 is fucked fucked beyond believe ...  Don't try to access
+	 * IOC3 is fucking fucked beyond belief ...  Don't try to access
 	 * anything but 32-bit words ...
 	 */
 	addr = &bridge->b_type0_cfg_dev[slot].f[fn].l[where >> 2];

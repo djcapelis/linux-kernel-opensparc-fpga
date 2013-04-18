@@ -18,7 +18,6 @@
 #include <asm/prom.h>
 #include <asm/machdep.h>
 #include <asm/io.h>
-#include <asm/system.h>
 #include <asm/sections.h>
 #include <asm/smu.h>
 
@@ -202,6 +201,8 @@ static struct smu_fan_control *smu_fan_create(struct device_node *node,
 		fct->ctrl.name = "cpu-front-fan-1";
 	else if (!strcmp(l, "CPU A PUMP"))
 		fct->ctrl.name = "cpu-pump-0";
+	else if (!strcmp(l, "CPU B PUMP"))
+		fct->ctrl.name = "cpu-pump-1";
 	else if (!strcmp(l, "Slots Fan") || !strcmp(l, "Slots fan") ||
 		 !strcmp(l, "EXPANSION SLOTS INTAKE"))
 		fct->ctrl.name = "slots-fan";
@@ -218,6 +219,10 @@ static struct smu_fan_control *smu_fan_create(struct device_node *node,
 		fct->ctrl.name = "cpu-fan";
 	else if (!strcmp(l, "Hard Drive") || !strcmp(l, "Hard drive"))
 		fct->ctrl.name = "drive-bay-fan";
+	else if (!strcmp(l, "HDD Fan")) /* seen on iMac G5 iSight */
+		fct->ctrl.name = "hard-drive-fan";
+	else if (!strcmp(l, "ODD Fan")) /* same */
+		fct->ctrl.name = "optical-drive-fan";
 
 	/* Unrecognized fan, bail out */
 	if (fct->ctrl.name == NULL)

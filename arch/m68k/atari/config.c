@@ -26,33 +26,44 @@
 
 #include <linux/types.h>
 #include <linux/mm.h>
+#include <linux/seq_file.h>
 #include <linux/console.h>
 #include <linux/init.h>
 #include <linux/delay.h>
 #include <linux/ioport.h>
 #include <linux/vt_kern.h>
+#include <linux/module.h>
 
 #include <asm/bootinfo.h>
 #include <asm/setup.h>
 #include <asm/atarihw.h>
 #include <asm/atariints.h>
 #include <asm/atari_stram.h>
-#include <asm/system.h>
 #include <asm/machdep.h>
 #include <asm/hwtest.h>
 #include <asm/io.h>
 
 u_long atari_mch_cookie;
+EXPORT_SYMBOL(atari_mch_cookie);
+
 u_long atari_mch_type;
+EXPORT_SYMBOL(atari_mch_type);
+
 struct atari_hw_present atari_hw_present;
+EXPORT_SYMBOL(atari_hw_present);
+
 u_long atari_switches;
+EXPORT_SYMBOL(atari_switches);
+
 int atari_dont_touch_floppy_select;
+EXPORT_SYMBOL(atari_dont_touch_floppy_select);
+
 int atari_rtc_year_offset;
 
 /* local function prototypes */
 static void atari_reset(void);
 static void atari_get_model(char *model);
-static int atari_get_hardware_list(char *buffer);
+static void atari_get_hardware_list(struct seq_file *m);
 
 /* atari specific irq functions */
 extern void atari_init_IRQ (void);
@@ -220,7 +231,7 @@ void __init config_atari(void)
 	 */
 
 	printk("Atari hardware found: ");
-	if (MACH_IS_MEDUSA || MACH_IS_HADES) {
+	if (MACH_IS_MEDUSA) {
 		/* There's no Atari video hardware on the Medusa, but all the
 		 * addresses below generate a DTACK so no bus error occurs! */
 	} else if (hwreg_present(f030_xreg)) {
@@ -246,7 +257,7 @@ void __init config_atari(void)
 			printk("STND_SHIFTER ");
 		}
 	}
-	if (hwreg_present(&mfp.par_dt_reg)) {
+	if (hwreg_present(&st_mfp.par_dt_reg)) {
 		ATARIHW_SET(ST_MFP);
 		printk("ST_MFP ");
 	}
@@ -257,10 +268,6 @@ void __init config_atari(void)
 	if (hwreg_present(&tt_scsi_dma.dma_addr_hi)) {
 		ATARIHW_SET(SCSI_DMA);
 		printk("TT_SCSI_DMA ");
-	}
-	if (!MACH_IS_HADES && hwreg_present(&st_dma.dma_hi)) {
-		ATARIHW_SET(STND_DMA);
-		printk("STND_DMA ");
 	}
 	/*
 	 * The ST-DMA address registers aren't readable
@@ -283,12 +290,11 @@ void __init config_atari(void)
 		ATARIHW_SET(YM_2149);
 		printk("YM2149 ");
 	}
-	if (!MACH_IS_MEDUSA && !MACH_IS_HADES &&
-		hwreg_present(&tt_dmasnd.ctrl)) {
+	if (!MACH_IS_MEDUSA && hwreg_present(&tt_dmasnd.ctrl)) {
 		ATARIHW_SET(PCM_8BIT);
 		printk("PCM ");
 	}
-	if (!MACH_IS_HADES && hwreg_present(&falcon_codec.unused5)) {
+	if (hwreg_present(&falcon_codec.unused5)) {
 		ATARIHW_SET(CODEC);
 		printk("CODEC ");
 	}
@@ -302,13 +308,13 @@ void __init config_atari(void)
 	    (tt_scc_dma.dma_ctrl = 0x01, (tt_scc_dma.dma_ctrl & 1) == 1) &&
 	    (tt_scc_dma.dma_ctrl = 0x00, (tt_scc_dma.dma_ctrl & 1) == 0)
 #else
-	    !MACH_IS_MEDUSA && !MACH_IS_HADES
+	    !MACH_IS_MEDUSA
 #endif
 	    ) {
 		ATARIHW_SET(SCC_DMA);
 		printk("SCC_DMA ");
 	}
-	if (scc_test(&scc.cha_a_ctrl)) {
+	if (scc_test(&atari_scc.cha_a_ctrl)) {
 		ATARIHW_SET(SCC);
 		printk("SCC ");
 	}
@@ -316,10 +322,7 @@ void __init config_atari(void)
 		ATARIHW_SET(ST_ESCC);
 		printk("ST_ESCC ");
 	}
-	if (MACH_IS_HADES) {
-		ATARIHW_SET(VME);
-		printk("VME ");
-	} else if (hwreg_present(&tt_scu.sys_mask)) {
+	if (hwreg_present(&tt_scu.sys_mask)) {
 		ATARIHW_SET(SCU);
 		/* Assume a VME bus if there's a SCU */
 		ATARIHW_SET(VME);
@@ -329,7 +332,7 @@ void __init config_atari(void)
 		ATARIHW_SET(ANALOG_JOY);
 		printk("ANALOG_JOY ");
 	}
-	if (!MACH_IS_HADES && hwreg_present(blitter.halftone)) {
+	if (hwreg_present(blitter.halftone)) {
 		ATARIHW_SET(BLITTER);
 		printk("BLITTER ");
 	}
@@ -338,8 +341,7 @@ void __init config_atari(void)
 		printk("IDE ");
 	}
 #if 1 /* This maybe wrong */
-	if (!MACH_IS_MEDUSA && !MACH_IS_HADES &&
-	    hwreg_present(&tt_microwire.data) &&
+	if (!MACH_IS_MEDUSA && hwreg_present(&tt_microwire.data) &&
 	    hwreg_present(&tt_microwire.mask) &&
 	    (tt_microwire.mask = 0x7ff,
 	     udelay(1),
@@ -358,19 +360,18 @@ void __init config_atari(void)
 		mach_hwclk = atari_tt_hwclk;
 		mach_set_clock_mmss = atari_tt_set_clock_mmss;
 	}
-	if (!MACH_IS_HADES && hwreg_present(&mste_rtc.sec_ones)) {
+	if (hwreg_present(&mste_rtc.sec_ones)) {
 		ATARIHW_SET(MSTE_CLK);
 		printk("MSTE_CLK ");
 		mach_hwclk = atari_mste_hwclk;
 		mach_set_clock_mmss = atari_mste_set_clock_mmss;
 	}
-	if (!MACH_IS_MEDUSA && !MACH_IS_HADES &&
-	    hwreg_present(&dma_wd.fdc_speed) &&
+	if (!MACH_IS_MEDUSA && hwreg_present(&dma_wd.fdc_speed) &&
 	    hwreg_write(&dma_wd.fdc_speed, 0)) {
 		ATARIHW_SET(FDCSPEED);
 		printk("FDC_SPEED ");
 	}
-	if (!MACH_IS_HADES && !ATARIHW_PRESENT(ST_SCSI)) {
+	if (!ATARIHW_PRESENT(ST_SCSI)) {
 		ATARIHW_SET(ACSI);
 		printk("ACSI ");
 	}
@@ -412,9 +413,9 @@ void __init config_atari(void)
 					 * FDC val = 4 -> Supervisor only */
 		asm volatile ("\n"
 			"	.chip	68030\n"
-			"	pmove	%0@,%/tt1\n"
+			"	pmove	%0,%/tt1\n"
 			"	.chip	68k"
-			: : "a" (&tt1_val));
+			: : "m" (tt1_val));
 	} else {
 	        asm volatile ("\n"
 			"	.chip	68040\n"
@@ -438,7 +439,7 @@ void __init config_atari(void)
 	 * 0xFFxxxxxx -> 0x00xxxxxx, so that the first 16MB is accessible
 	 * in the last 16MB of the address space.
 	 */
-	tos_version = (MACH_IS_MEDUSA || MACH_IS_HADES) ?
+	tos_version = (MACH_IS_MEDUSA) ?
 			0xfff : *(unsigned short *)0xff000002;
 	atari_rtc_year_offset = (tos_version < 0x306) ? 70 : 68;
 }
@@ -500,8 +501,7 @@ static void atari_reset(void)
 	 * On the Medusa, phys. 0x4 may contain garbage because it's no
 	 * ROM.  See above for explanation why we cannot use PTOV(4).
 	 */
-	reset_addr = MACH_IS_HADES ? 0x7fe00030 :
-		     MACH_IS_MEDUSA || MACH_IS_AB40 ? 0xe00030 :
+	reset_addr = MACH_IS_MEDUSA || MACH_IS_AB40 ? 0xe00030 :
 		     *(unsigned long *) 0xff000004;
 
 	/* reset ACIA for switch off OverScan, if it's active */
@@ -568,10 +568,10 @@ static void atari_reset(void)
 			: "d0");
 	} else
 		asm volatile ("\n"
-			"	pmove	%0@,%%tc\n"
+			"	pmove	%0,%%tc\n"
 			"	jmp	%1@"
 			: /* no outputs */
-			: "a" (&tc_val), "a" (reset_addr));
+			: "m" (tc_val), "a" (reset_addr));
 }
 
 
@@ -595,8 +595,6 @@ static void atari_get_model(char *model)
 		if (MACH_IS_MEDUSA)
 			/* Medusa has TT _MCH cookie */
 			strcat(model, "Medusa");
-		else if (MACH_IS_HADES)
-			strcat(model, "Hades");
 		else
 			strcat(model, "TT");
 		break;
@@ -613,21 +611,21 @@ static void atari_get_model(char *model)
 }
 
 
-static int atari_get_hardware_list(char *buffer)
+static void atari_get_hardware_list(struct seq_file *m)
 {
-	int len = 0, i;
+	int i;
 
 	for (i = 0; i < m68k_num_memory; i++)
-		len += sprintf(buffer+len, "\t%3ld MB at 0x%08lx (%s)\n",
+		seq_printf(m, "\t%3ld MB at 0x%08lx (%s)\n",
 				m68k_memory[i].size >> 20, m68k_memory[i].addr,
 				(m68k_memory[i].addr & 0xff000000 ?
 				 "alternate RAM" : "ST-RAM"));
 
 #define ATARIHW_ANNOUNCE(name, str)			\
 	if (ATARIHW_PRESENT(name))			\
-		len += sprintf(buffer + len, "\t%s\n", str)
+		seq_printf(m, "\t%s\n", str)
 
-	len += sprintf(buffer + len, "Detected hardware:\n");
+	seq_printf(m, "Detected hardware:\n");
 	ATARIHW_ANNOUNCE(STND_SHIFTER, "ST Shifter");
 	ATARIHW_ANNOUNCE(EXTD_SHIFTER, "STe Shifter");
 	ATARIHW_ANNOUNCE(TT_SHIFTER, "TT Shifter");
@@ -656,6 +654,4 @@ static int atari_get_hardware_list(char *buffer)
 	ATARIHW_ANNOUNCE(BLITTER, "Blitter");
 	ATARIHW_ANNOUNCE(VME, "VME Bus");
 	ATARIHW_ANNOUNCE(DSP56K, "DSP56001 processor");
-
-	return len;
 }

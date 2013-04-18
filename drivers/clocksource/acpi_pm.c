@@ -18,9 +18,11 @@
 
 #include <linux/acpi_pmtmr.h>
 #include <linux/clocksource.h>
+#include <linux/timex.h>
 #include <linux/errno.h>
 #include <linux/init.h>
 #include <linux/pci.h>
+#include <linux/delay.h>
 #include <asm/io.h>
 
 /*
@@ -56,12 +58,7 @@ u32 acpi_pm_read_verified(void)
 	return v2;
 }
 
-static cycle_t acpi_pm_read_slow(void)
-{
-	return (cycle_t)acpi_pm_read_verified();
-}
-
-static cycle_t acpi_pm_read(void)
+static cycle_t acpi_pm_read(struct clocksource *cs)
 {
 	return (cycle_t)read_pmtmr();
 }
@@ -71,21 +68,23 @@ static struct clocksource clocksource_acpi_pm = {
 	.rating		= 200,
 	.read		= acpi_pm_read,
 	.mask		= (cycle_t)ACPI_PM_MASK,
-	.mult		= 0, /*to be caluclated*/
-	.shift		= 22,
 	.flags		= CLOCK_SOURCE_IS_CONTINUOUS,
-
 };
 
 
 #ifdef CONFIG_PCI
-static int __devinitdata acpi_pm_good;
+static int acpi_pm_good;
 static int __init acpi_pm_good_setup(char *__str)
 {
 	acpi_pm_good = 1;
 	return 1;
 }
 __setup("acpi_pm_good", acpi_pm_good_setup);
+
+static cycle_t acpi_pm_read_slow(struct clocksource *cs)
+{
+	return (cycle_t)acpi_pm_read_verified();
+}
 
 static inline void acpi_pm_need_workaround(void)
 {
@@ -103,16 +102,13 @@ static inline void acpi_pm_need_workaround(void)
  * incorrect when read). As a result, the ACPI free running count up
  * timer specification is violated due to erroneous reads.
  */
-static void __devinit acpi_pm_check_blacklist(struct pci_dev *dev)
+static void acpi_pm_check_blacklist(struct pci_dev *dev)
 {
-	u8 rev;
-
 	if (acpi_pm_good)
 		return;
 
-	pci_read_config_byte(dev, PCI_REVISION_ID, &rev);
 	/* the bug has been fixed in PIIX4M */
-	if (rev < 3) {
+	if (dev->revision < 3) {
 		printk(KERN_WARNING "* Found PM-Timer Bug on the chipset."
 		       " Due to workarounds for a bug,\n"
 		       "* this clock source is slow. Consider trying"
@@ -124,7 +120,7 @@ static void __devinit acpi_pm_check_blacklist(struct pci_dev *dev)
 DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82371AB_3,
 			acpi_pm_check_blacklist);
 
-static void __devinit acpi_pm_check_graylist(struct pci_dev *dev)
+static void acpi_pm_check_graylist(struct pci_dev *dev)
 {
 	if (acpi_pm_good)
 		return;
@@ -145,22 +141,22 @@ DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_SERVERWORKS, PCI_DEVICE_ID_SERVERWORKS_LE,
 #endif
 
 #ifndef CONFIG_X86_64
-#include "mach_timer.h"
+#include <asm/mach_timer.h>
 #define PMTMR_EXPECTED_RATE \
-  ((CALIBRATE_LATCH * (PMTMR_TICKS_PER_SEC >> 10)) / (CLOCK_TICK_RATE>>10))
+  ((CALIBRATE_LATCH * (PMTMR_TICKS_PER_SEC >> 10)) / (PIT_TICK_RATE>>10))
 /*
  * Some boards have the PMTMR running way too fast. We check
  * the PMTMR rate against PIT channel 2 to catch these cases.
  */
 static int verify_pmtmr_rate(void)
 {
-	u32 value1, value2;
+	cycle_t value1, value2;
 	unsigned long count, delta;
 
 	mach_prepare_counter();
-	value1 = read_pmtmr();
+	value1 = clocksource_acpi_pm.read(&clocksource_acpi_pm);
 	mach_countup(&count);
-	value2 = read_pmtmr();
+	value2 = clocksource_acpi_pm.read(&clocksource_acpi_pm);
 	delta = (value2 - value1) & ACPI_PM_MASK;
 
 	/* Check that the PMTMR delta is within 5% of what we expect */
@@ -178,43 +174,76 @@ static int verify_pmtmr_rate(void)
 #define verify_pmtmr_rate() (0)
 #endif
 
+/* Number of monotonicity checks to perform during initialization */
+#define ACPI_PM_MONOTONICITY_CHECKS 10
+/* Number of reads we try to get two different values */
+#define ACPI_PM_READ_CHECKS 10000
+
 static int __init init_acpi_pm_clocksource(void)
 {
-	u32 value1, value2;
-	unsigned int i;
+	cycle_t value1, value2;
+	unsigned int i, j = 0;
 
 	if (!pmtmr_ioport)
 		return -ENODEV;
 
-	clocksource_acpi_pm.mult = clocksource_hz2mult(PMTMR_TICKS_PER_SEC,
-						clocksource_acpi_pm.shift);
-
 	/* "verify" this timing source: */
-	value1 = read_pmtmr();
-	for (i = 0; i < 10000; i++) {
-		value2 = read_pmtmr();
-		if (value2 == value1)
-			continue;
-		if (value2 > value1)
-			goto pm_good;
-		if ((value2 < value1) && ((value2) < 0xFFF))
-			goto pm_good;
-		printk(KERN_INFO "PM-Timer had inconsistent results:"
-			" 0x%#x, 0x%#x - aborting.\n", value1, value2);
-		return -EINVAL;
+	for (j = 0; j < ACPI_PM_MONOTONICITY_CHECKS; j++) {
+		udelay(100 * j);
+		value1 = clocksource_acpi_pm.read(&clocksource_acpi_pm);
+		for (i = 0; i < ACPI_PM_READ_CHECKS; i++) {
+			value2 = clocksource_acpi_pm.read(&clocksource_acpi_pm);
+			if (value2 == value1)
+				continue;
+			if (value2 > value1)
+				break;
+			if ((value2 < value1) && ((value2) < 0xFFF))
+				break;
+			printk(KERN_INFO "PM-Timer had inconsistent results:"
+			       " 0x%#llx, 0x%#llx - aborting.\n",
+			       value1, value2);
+			pmtmr_ioport = 0;
+			return -EINVAL;
+		}
+		if (i == ACPI_PM_READ_CHECKS) {
+			printk(KERN_INFO "PM-Timer failed consistency check "
+			       " (0x%#llx) - aborting.\n", value1);
+			pmtmr_ioport = 0;
+			return -ENODEV;
+		}
 	}
-	printk(KERN_INFO "PM-Timer had no reasonable result:"
-			" 0x%#x - aborting.\n", value1);
-	return -ENODEV;
 
-pm_good:
-	if (verify_pmtmr_rate() != 0)
+	if (verify_pmtmr_rate() != 0){
+		pmtmr_ioport = 0;
 		return -ENODEV;
+	}
 
-	return clocksource_register(&clocksource_acpi_pm);
+	return clocksource_register_hz(&clocksource_acpi_pm,
+						PMTMR_TICKS_PER_SEC);
 }
 
 /* We use fs_initcall because we want the PCI fixups to have run
  * but we still need to load before device_initcall
  */
 fs_initcall(init_acpi_pm_clocksource);
+
+/*
+ * Allow an override of the IOPort. Stupid BIOSes do not tell us about
+ * the PMTimer, but we might know where it is.
+ */
+static int __init parse_pmtmr(char *arg)
+{
+	unsigned int base;
+	int ret;
+
+	ret = kstrtouint(arg, 16, &base);
+	if (ret)
+		return ret;
+
+	pr_info("PMTMR IOPort override: 0x%04x -> 0x%04x\n", pmtmr_ioport,
+		base);
+	pmtmr_ioport = base;
+
+	return 1;
+}
+__setup("pmtmr=", parse_pmtmr);

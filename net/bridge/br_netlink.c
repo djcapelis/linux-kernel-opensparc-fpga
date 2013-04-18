@@ -11,19 +11,54 @@
  */
 
 #include <linux/kernel.h>
+#include <linux/slab.h>
+#include <linux/etherdevice.h>
 #include <net/rtnetlink.h>
+#include <net/net_namespace.h>
+#include <net/sock.h>
+
 #include "br_private.h"
+#include "br_private_stp.h"
+
+static inline size_t br_port_info_size(void)
+{
+	return nla_total_size(1)	/* IFLA_BRPORT_STATE  */
+		+ nla_total_size(2)	/* IFLA_BRPORT_PRIORITY */
+		+ nla_total_size(4)	/* IFLA_BRPORT_COST */
+		+ nla_total_size(1)	/* IFLA_BRPORT_MODE */
+		+ nla_total_size(1)	/* IFLA_BRPORT_GUARD */
+		+ nla_total_size(1)	/* IFLA_BRPORT_PROTECT */
+		+ nla_total_size(1)	/* IFLA_BRPORT_FAST_LEAVE */
+		+ 0;
+}
 
 static inline size_t br_nlmsg_size(void)
 {
 	return NLMSG_ALIGN(sizeof(struct ifinfomsg))
-	       + nla_total_size(IFNAMSIZ) /* IFLA_IFNAME */
-	       + nla_total_size(MAX_ADDR_LEN) /* IFLA_ADDRESS */
-	       + nla_total_size(4) /* IFLA_MASTER */
-	       + nla_total_size(4) /* IFLA_MTU */
-	       + nla_total_size(4) /* IFLA_LINK */
-	       + nla_total_size(1) /* IFLA_OPERSTATE */
-	       + nla_total_size(1); /* IFLA_PROTINFO */
+		+ nla_total_size(IFNAMSIZ) /* IFLA_IFNAME */
+		+ nla_total_size(MAX_ADDR_LEN) /* IFLA_ADDRESS */
+		+ nla_total_size(4) /* IFLA_MASTER */
+		+ nla_total_size(4) /* IFLA_MTU */
+		+ nla_total_size(4) /* IFLA_LINK */
+		+ nla_total_size(1) /* IFLA_OPERSTATE */
+		+ nla_total_size(br_port_info_size()); /* IFLA_PROTINFO */
+}
+
+static int br_port_fill_attrs(struct sk_buff *skb,
+			      const struct net_bridge_port *p)
+{
+	u8 mode = !!(p->flags & BR_HAIRPIN_MODE);
+
+	if (nla_put_u8(skb, IFLA_BRPORT_STATE, p->state) ||
+	    nla_put_u16(skb, IFLA_BRPORT_PRIORITY, p->priority) ||
+	    nla_put_u32(skb, IFLA_BRPORT_COST, p->path_cost) ||
+	    nla_put_u8(skb, IFLA_BRPORT_MODE, mode) ||
+	    nla_put_u8(skb, IFLA_BRPORT_GUARD, !!(p->flags & BR_BPDU_GUARD)) ||
+	    nla_put_u8(skb, IFLA_BRPORT_PROTECT, !!(p->flags & BR_ROOT_BLOCK)) ||
+	    nla_put_u8(skb, IFLA_BRPORT_FAST_LEAVE, !!(p->flags & BR_MULTICAST_FAST_LEAVE)))
+		return -EMSGSIZE;
+
+	return 0;
 }
 
 /*
@@ -39,8 +74,8 @@ static int br_fill_ifinfo(struct sk_buff *skb, const struct net_bridge_port *por
 	struct nlmsghdr *nlh;
 	u8 operstate = netif_running(dev) ? dev->operstate : IF_OPER_DOWN;
 
-	pr_debug("br_fill_info event %d port %s master %s\n",
-		 event, dev->name, br->dev->name);
+	br_debug(br, "br_fill_info event %d port %s master %s\n",
+		     event, dev->name, br->dev->name);
 
 	nlh = nlmsg_put(skb, pid, seq, event, sizeof(*hdr), flags);
 	if (nlh == NULL)
@@ -54,19 +89,24 @@ static int br_fill_ifinfo(struct sk_buff *skb, const struct net_bridge_port *por
 	hdr->ifi_flags = dev_get_flags(dev);
 	hdr->ifi_change = 0;
 
-	NLA_PUT_STRING(skb, IFLA_IFNAME, dev->name);
-	NLA_PUT_U32(skb, IFLA_MASTER, br->dev->ifindex);
-	NLA_PUT_U32(skb, IFLA_MTU, dev->mtu);
-	NLA_PUT_U8(skb, IFLA_OPERSTATE, operstate);
+	if (nla_put_string(skb, IFLA_IFNAME, dev->name) ||
+	    nla_put_u32(skb, IFLA_MASTER, br->dev->ifindex) ||
+	    nla_put_u32(skb, IFLA_MTU, dev->mtu) ||
+	    nla_put_u8(skb, IFLA_OPERSTATE, operstate) ||
+	    (dev->addr_len &&
+	     nla_put(skb, IFLA_ADDRESS, dev->addr_len, dev->dev_addr)) ||
+	    (dev->ifindex != dev->iflink &&
+	     nla_put_u32(skb, IFLA_LINK, dev->iflink)))
+		goto nla_put_failure;
 
-	if (dev->addr_len)
-		NLA_PUT(skb, IFLA_ADDRESS, dev->addr_len, dev->dev_addr);
+	if (event == RTM_NEWLINK) {
+		struct nlattr *nest
+			= nla_nest_start(skb, IFLA_PROTINFO | NLA_F_NESTED);
 
-	if (dev->ifindex != dev->iflink)
-		NLA_PUT_U32(skb, IFLA_LINK, dev->iflink);
-
-	if (event == RTM_NEWLINK)
-		NLA_PUT_U8(skb, IFLA_PROTINFO, port->state);
+		if (nest == NULL || br_port_fill_attrs(skb, port) < 0)
+			goto nla_put_failure;
+		nla_nest_end(skb, nest);
+	}
 
 	return nlmsg_end(skb, nlh);
 
@@ -80,10 +120,13 @@ nla_put_failure:
  */
 void br_ifinfo_notify(int event, struct net_bridge_port *port)
 {
+	struct net *net = dev_net(port->dev);
 	struct sk_buff *skb;
 	int err = -ENOBUFS;
 
-	pr_debug("bridge notify event=%d\n", event);
+	br_debug(port->br, "port %u(%s) event %d\n",
+		 (unsigned int)port->port_no, port->dev->name, event);
+
 	skb = nlmsg_new(br_nlmsg_size(), GFP_ATOMIC);
 	if (skb == NULL)
 		goto errout;
@@ -95,101 +138,183 @@ void br_ifinfo_notify(int event, struct net_bridge_port *port)
 		kfree_skb(skb);
 		goto errout;
 	}
-	err = rtnl_notify(skb, 0, RTNLGRP_LINK, NULL, GFP_ATOMIC);
+	rtnl_notify(skb, net, 0, RTNLGRP_LINK, NULL, GFP_ATOMIC);
+	return;
 errout:
 	if (err < 0)
-		rtnl_set_sk_err(RTNLGRP_LINK, err);
+		rtnl_set_sk_err(net, RTNLGRP_LINK, err);
 }
 
 /*
  * Dump information about all ports, in response to GETLINK
  */
-static int br_dump_ifinfo(struct sk_buff *skb, struct netlink_callback *cb)
+int br_getlink(struct sk_buff *skb, u32 pid, u32 seq,
+	       struct net_device *dev)
 {
-	struct net_device *dev;
-	int idx;
+	int err = 0;
+	struct net_bridge_port *port = br_port_get_rcu(dev);
 
-	idx = 0;
-	for_each_netdev(dev) {
-		/* not a bridge port */
-		if (dev->br_port == NULL || idx < cb->args[0])
-			goto skip;
+	/* not a bridge port */
+	if (!port)
+		goto out;
 
-		if (br_fill_ifinfo(skb, dev->br_port, NETLINK_CB(cb->skb).pid,
-				   cb->nlh->nlmsg_seq, RTM_NEWLINK,
-				   NLM_F_MULTI) < 0)
-			break;
-skip:
-		++idx;
-	}
-
-	cb->args[0] = idx;
-
-	return skb->len;
+	err = br_fill_ifinfo(skb, port, pid, seq, RTM_NEWLINK, NLM_F_MULTI);
+out:
+	return err;
 }
 
-/*
- * Change state of port (ie from forwarding to blocking etc)
- * Used by spanning tree in user space.
- */
-static int br_rtm_setlink(struct sk_buff *skb,  struct nlmsghdr *nlh, void *arg)
+static const struct nla_policy ifla_brport_policy[IFLA_BRPORT_MAX + 1] = {
+	[IFLA_BRPORT_STATE]	= { .type = NLA_U8 },
+	[IFLA_BRPORT_COST]	= { .type = NLA_U32 },
+	[IFLA_BRPORT_PRIORITY]	= { .type = NLA_U16 },
+	[IFLA_BRPORT_MODE]	= { .type = NLA_U8 },
+	[IFLA_BRPORT_GUARD]	= { .type = NLA_U8 },
+	[IFLA_BRPORT_PROTECT]	= { .type = NLA_U8 },
+};
+
+/* Change the state of the port and notify spanning tree */
+static int br_set_port_state(struct net_bridge_port *p, u8 state)
 {
-	struct ifinfomsg *ifm;
-	struct nlattr *protinfo;
-	struct net_device *dev;
-	struct net_bridge_port *p;
-	u8 new_state;
-
-	if (nlmsg_len(nlh) < sizeof(*ifm))
-		return -EINVAL;
-
-	ifm = nlmsg_data(nlh);
-	if (ifm->ifi_family != AF_BRIDGE)
-		return -EPFNOSUPPORT;
-
-	protinfo = nlmsg_find_attr(nlh, sizeof(*ifm), IFLA_PROTINFO);
-	if (!protinfo || nla_len(protinfo) < sizeof(u8))
-		return -EINVAL;
-
-	new_state = nla_get_u8(protinfo);
-	if (new_state > BR_STATE_BLOCKING)
-		return -EINVAL;
-
-	dev = __dev_get_by_index(ifm->ifi_index);
-	if (!dev)
-		return -ENODEV;
-
-	p = dev->br_port;
-	if (!p)
+	if (state > BR_STATE_BLOCKING)
 		return -EINVAL;
 
 	/* if kernel STP is running, don't allow changes */
 	if (p->br->stp_enabled == BR_KERNEL_STP)
 		return -EBUSY;
 
-	if (!netif_running(dev) ||
-	    (!netif_carrier_ok(dev) && new_state != BR_STATE_DISABLED))
+	if (!netif_running(p->dev) ||
+	    (!netif_carrier_ok(p->dev) && state != BR_STATE_DISABLED))
 		return -ENETDOWN;
 
-	p->state = new_state;
+	p->state = state;
 	br_log_state(p);
+	br_port_state_selection(p->br);
 	return 0;
 }
 
+/* Set/clear or port flags based on attribute */
+static void br_set_port_flag(struct net_bridge_port *p, struct nlattr *tb[],
+			   int attrtype, unsigned long mask)
+{
+	if (tb[attrtype]) {
+		u8 flag = nla_get_u8(tb[attrtype]);
+		if (flag)
+			p->flags |= mask;
+		else
+			p->flags &= ~mask;
+	}
+}
+
+/* Process bridge protocol info on port */
+static int br_setport(struct net_bridge_port *p, struct nlattr *tb[])
+{
+	int err;
+
+	br_set_port_flag(p, tb, IFLA_BRPORT_MODE, BR_HAIRPIN_MODE);
+	br_set_port_flag(p, tb, IFLA_BRPORT_GUARD, BR_BPDU_GUARD);
+	br_set_port_flag(p, tb, IFLA_BRPORT_FAST_LEAVE, BR_MULTICAST_FAST_LEAVE);
+
+	if (tb[IFLA_BRPORT_COST]) {
+		err = br_stp_set_path_cost(p, nla_get_u32(tb[IFLA_BRPORT_COST]));
+		if (err)
+			return err;
+	}
+
+	if (tb[IFLA_BRPORT_PRIORITY]) {
+		err = br_stp_set_port_priority(p, nla_get_u16(tb[IFLA_BRPORT_PRIORITY]));
+		if (err)
+			return err;
+	}
+
+	if (tb[IFLA_BRPORT_STATE]) {
+		err = br_set_port_state(p, nla_get_u8(tb[IFLA_BRPORT_STATE]));
+		if (err)
+			return err;
+	}
+	return 0;
+}
+
+/* Change state and parameters on port. */
+int br_setlink(struct net_device *dev, struct nlmsghdr *nlh)
+{
+	struct ifinfomsg *ifm;
+	struct nlattr *protinfo;
+	struct net_bridge_port *p;
+	struct nlattr *tb[IFLA_BRPORT_MAX + 1];
+	int err;
+
+	ifm = nlmsg_data(nlh);
+
+	protinfo = nlmsg_find_attr(nlh, sizeof(*ifm), IFLA_PROTINFO);
+	if (!protinfo)
+		return 0;
+
+	p = br_port_get_rtnl(dev);
+	if (!p)
+		return -EINVAL;
+
+	if (protinfo->nla_type & NLA_F_NESTED) {
+		err = nla_parse_nested(tb, IFLA_BRPORT_MAX,
+				       protinfo, ifla_brport_policy);
+		if (err)
+			return err;
+
+		spin_lock_bh(&p->br->lock);
+		err = br_setport(p, tb);
+		spin_unlock_bh(&p->br->lock);
+	} else {
+		/* Binary compatability with old RSTP */
+		if (nla_len(protinfo) < sizeof(u8))
+			return -EINVAL;
+
+		spin_lock_bh(&p->br->lock);
+		err = br_set_port_state(p, nla_get_u8(protinfo));
+		spin_unlock_bh(&p->br->lock);
+	}
+
+	if (err == 0)
+		br_ifinfo_notify(RTM_NEWLINK, p);
+
+	return err;
+}
+
+static int br_validate(struct nlattr *tb[], struct nlattr *data[])
+{
+	if (tb[IFLA_ADDRESS]) {
+		if (nla_len(tb[IFLA_ADDRESS]) != ETH_ALEN)
+			return -EINVAL;
+		if (!is_valid_ether_addr(nla_data(tb[IFLA_ADDRESS])))
+			return -EADDRNOTAVAIL;
+	}
+
+	return 0;
+}
+
+struct rtnl_link_ops br_link_ops __read_mostly = {
+	.kind		= "bridge",
+	.priv_size	= sizeof(struct net_bridge),
+	.setup		= br_dev_setup,
+	.validate	= br_validate,
+	.dellink	= br_dev_delete,
+};
 
 int __init br_netlink_init(void)
 {
-	if (__rtnl_register(PF_BRIDGE, RTM_GETLINK, NULL, br_dump_ifinfo))
-		return -ENOBUFS;
+	int err;
 
-	/* Only the first call to __rtnl_register can fail */
-	__rtnl_register(PF_BRIDGE, RTM_SETLINK, br_rtm_setlink, NULL);
+	br_mdb_init();
+	err = rtnl_link_register(&br_link_ops);
+	if (err)
+		goto out;
 
 	return 0;
+out:
+	br_mdb_uninit();
+	return err;
 }
 
 void __exit br_netlink_fini(void)
 {
-	rtnl_unregister_all(PF_BRIDGE);
+	br_mdb_uninit();
+	rtnl_link_unregister(&br_link_ops);
 }
-

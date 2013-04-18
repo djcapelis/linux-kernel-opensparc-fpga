@@ -20,7 +20,7 @@
 	.import hpux_call_table
 	.import hpux_syscall_exit,code
 
-	.align 4096
+	.align	PAGE_SIZE
 ENTRY(hpux_gateway_page)
 	nop
 #ifdef CONFIG_64BIT
@@ -71,7 +71,7 @@ ENTRY(hpux_gateway_page)
 	STREG	%r26, TASK_PT_GR26(%r1)	 	/* 1st argument */
 	STREG	%r27, TASK_PT_GR27(%r1)		/* user dp */
 	STREG   %r28, TASK_PT_GR28(%r1)         /* return value 0 */
-	STREG   %r28, TASK_PT_ORIG_R28(%r1)     /* return value 0 (saved for signals) */
+	STREG   %r0, TASK_PT_ORIG_R28(%r1)     /* don't prohibit restarts */
 	STREG   %r29, TASK_PT_GR29(%r1)         /* 8th argument */
 	STREG	%r31, TASK_PT_GR31(%r1)		/* preserve syscall return ptr */
 	
@@ -103,5 +103,5 @@ syscall_nosys:
 	ldo	-ENOSYS(%r0),%r28
 ENDPROC(hpux_gateway_page)
 
-	.align 4096
+	.align	PAGE_SIZE
 ENTRY(end_hpux_gateway_page)

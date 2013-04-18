@@ -1,6 +1,5 @@
 /*
- * (C) Copyright IBM Corp. 2004   All Rights Reserved.
- * tape_class.h
+ * Copyright IBM Corp. 2004   All Rights Reserved.
  *
  * Tape class device support
  *
@@ -14,8 +13,6 @@
 #include <linux/module.h>
 #include <linux/fs.h>
 #include <linux/major.h>
-#include <linux/kobject.h>
-#include <linux/kobj_map.h>
 #include <linux/cdev.h>
 
 #include <linux/device.h>
@@ -24,8 +21,8 @@
 #define TAPECLASS_NAME_LEN	32
 
 struct tape_class_device {
-	struct cdev *		char_device;
-	struct class_device *	class_device;
+	struct cdev		*char_device;
+	struct device		*class_device;
 	char			device_name[TAPECLASS_NAME_LEN];
 	char			mode_name[TAPECLASS_NAME_LEN];
 };
@@ -56,6 +53,6 @@ struct tape_class_device *register_tape_dev(
 	char *			device_name,
 	char *			node_name
 );
-void unregister_tape_dev(struct tape_class_device *tcd);
+void unregister_tape_dev(struct device *device, struct tape_class_device *tcd);
 
 #endif /* __TAPE_CLASS_H__ */

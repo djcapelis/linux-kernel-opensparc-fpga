@@ -24,16 +24,16 @@
  */
 
 #include <linux/fs.h>
-#include <linux/ufs_fs.h>
 #include <linux/time.h>
 #include <linux/stat.h>
 #include <linux/string.h>
-#include <linux/quotaops.h>
 #include <linux/buffer_head.h>
 #include <linux/sched.h>
 #include <linux/bitops.h>
 #include <asm/byteorder.h>
 
+#include "ufs_fs.h"
+#include "ufs.h"
 #include "swab.h"
 #include "util.h"
 
@@ -71,11 +71,11 @@ void ufs_free_inode (struct inode * inode)
 	
 	ino = inode->i_ino;
 
-	lock_super (sb);
+	mutex_lock(&UFS_SB(sb)->s_lock);
 
 	if (!((ino > 1) && (ino < (uspi->s_ncg * uspi->s_ipg )))) {
 		ufs_warning(sb, "ufs_free_inode", "reserved inode or nonexistent inode %u\n", ino);
-		unlock_super (sb);
+		mutex_unlock(&UFS_SB(sb)->s_lock);
 		return;
 	}
 	
@@ -83,7 +83,7 @@ void ufs_free_inode (struct inode * inode)
 	bit = ufs_inotocgoff (ino);
 	ucpi = ufs_load_cylinder (sb, cg);
 	if (!ucpi) {
-		unlock_super (sb);
+		mutex_unlock(&UFS_SB(sb)->s_lock);
 		return;
 	}
 	ucg = ubh_get_ucg(UCPI_UBH(ucpi));
@@ -93,11 +93,6 @@ void ufs_free_inode (struct inode * inode)
 	ucg->cg_time = cpu_to_fs32(sb, get_seconds());
 
 	is_directory = S_ISDIR(inode->i_mode);
-
-	DQUOT_FREE_INODE(inode);
-	DQUOT_DROP(inode);
-
-	clear_inode (inode);
 
 	if (ubh_isclr (UCPI_UBH(ucpi), ucpi->c_iusedoff, bit))
 		ufs_error(sb, "ufs_free_inode", "bit already cleared for inode %u", ino);
@@ -118,13 +113,11 @@ void ufs_free_inode (struct inode * inode)
 
 	ubh_mark_buffer_dirty (USPI_UBH(uspi));
 	ubh_mark_buffer_dirty (UCPI_UBH(ucpi));
-	if (sb->s_flags & MS_SYNCHRONOUS) {
-		ubh_ll_rw_block(SWRITE, UCPI_UBH(ucpi));
-		ubh_wait_on_buffer (UCPI_UBH(ucpi));
-	}
+	if (sb->s_flags & MS_SYNCHRONOUS)
+		ubh_sync_block(UCPI_UBH(ucpi));
 	
-	sb->s_dirt = 1;
-	unlock_super (sb);
+	ufs_mark_sb_dirty(sb);
+	mutex_unlock(&UFS_SB(sb)->s_lock);
 	UFSD("EXIT\n");
 }
 
@@ -161,10 +154,8 @@ static void ufs2_init_inodes_chunk(struct super_block *sb,
 
 	fs32_add(sb, &ucg->cg_u.cg_u2.cg_initediblk, uspi->s_inopb);
 	ubh_mark_buffer_dirty(UCPI_UBH(ucpi));
-	if (sb->s_flags & MS_SYNCHRONOUS) {
-		ubh_ll_rw_block(SWRITE, UCPI_UBH(ucpi));
-		ubh_wait_on_buffer(UCPI_UBH(ucpi));
-	}
+	if (sb->s_flags & MS_SYNCHRONOUS)
+		ubh_sync_block(UCPI_UBH(ucpi));
 
 	UFSD("EXIT\n");
 }
@@ -179,7 +170,7 @@ static void ufs2_init_inodes_chunk(struct super_block *sb,
  * For other inodes, search forward from the parent directory's block
  * group to find a free inode.
  */
-struct inode * ufs_new_inode(struct inode * dir, int mode)
+struct inode *ufs_new_inode(struct inode *dir, umode_t mode)
 {
 	struct super_block * sb;
 	struct ufs_sb_info * sbi;
@@ -206,7 +197,7 @@ struct inode * ufs_new_inode(struct inode * dir, int mode)
 	uspi = sbi->s_uspi;
 	usb1 = ubh_get_usb_first(uspi);
 
-	lock_super (sb);
+	mutex_lock(&sbi->s_lock);
 
 	/*
 	 * Try to place the inode in its parent directory
@@ -295,22 +286,12 @@ cg_found:
 	}
 	ubh_mark_buffer_dirty (USPI_UBH(uspi));
 	ubh_mark_buffer_dirty (UCPI_UBH(ucpi));
-	if (sb->s_flags & MS_SYNCHRONOUS) {
-		ubh_ll_rw_block(SWRITE, UCPI_UBH(ucpi));
-		ubh_wait_on_buffer (UCPI_UBH(ucpi));
-	}
-	sb->s_dirt = 1;
+	if (sb->s_flags & MS_SYNCHRONOUS)
+		ubh_sync_block(UCPI_UBH(ucpi));
+	ufs_mark_sb_dirty(sb);
 
 	inode->i_ino = cg * uspi->s_ipg + bit;
-	inode->i_mode = mode;
-	inode->i_uid = current->fsuid;
-	if (dir->i_mode & S_ISGID) {
-		inode->i_gid = dir->i_gid;
-		if (S_ISDIR(mode))
-			inode->i_mode |= S_ISGID;
-	} else
-		inode->i_gid = current->fsgid;
-
+	inode_init_owner(inode, dir, mode);
 	inode->i_blocks = 0;
 	inode->i_generation = 0;
 	inode->i_mtime = inode->i_atime = inode->i_ctime = CURRENT_TIME_SEC;
@@ -352,28 +333,20 @@ cg_found:
 		brelse(bh);
 	}
 
-	unlock_super (sb);
-
-	if (DQUOT_ALLOC_INODE(inode)) {
-		DQUOT_DROP(inode);
-		err = -EDQUOT;
-		goto fail_without_unlock;
-	}
+	mutex_unlock(&sbi->s_lock);
 
 	UFSD("allocating inode %lu\n", inode->i_ino);
 	UFSD("EXIT\n");
 	return inode;
 
 fail_remove_inode:
-	unlock_super(sb);
-fail_without_unlock:
-	inode->i_flags |= S_NOQUOTA;
-	inode->i_nlink = 0;
+	mutex_unlock(&sbi->s_lock);
+	clear_nlink(inode);
 	iput(inode);
 	UFSD("EXIT (FAILED): err %d\n", err);
 	return ERR_PTR(err);
 failed:
-	unlock_super (sb);
+	mutex_unlock(&sbi->s_lock);
 	make_bad_inode(inode);
 	iput (inode);
 	UFSD("EXIT (FAILED): err %d\n", err);

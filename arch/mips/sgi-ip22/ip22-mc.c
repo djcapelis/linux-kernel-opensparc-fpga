@@ -1,9 +1,10 @@
 /*
  * ip22-mc.c: Routines for manipulating SGI Memory Controller.
  *
- * Copyright (C) 1996 David S. Miller (dm@engr.sgi.com)
+ * Copyright (C) 1996 David S. Miller (davem@davemloft.net)
  * Copyright (C) 1999 Andrew R. Baker (andrewb@uab.edu) - Indigo2 changes
  * Copyright (C) 2003 Ladislav Michl  (ladis@linux-mips.org)
+ * Copyright (C) 2004 Peter Fuerst    (pf@net.alphadv.de) - IP28
  */
 
 #include <linux/init.h>
@@ -47,7 +48,7 @@ struct mem {
 /*
  * Detect installed memory, do some sanity checks and notify kernel about it
  */
-static void probe_memory(void)
+static void __init probe_memory(void)
 {
 	int i, j, found, cnt = 0;
 	struct mem bank[4];
@@ -137,9 +138,12 @@ void __init sgimc_init(void)
 	/* Step 2: Enable all parity checking in cpu control register
 	 *         zero.
 	 */
+	/* don't touch parity settings for IP28 */
 	tmp = sgimc->cpuctrl0;
-	tmp |= (SGIMC_CCTRL0_EPERRGIO | SGIMC_CCTRL0_EPERRMEM |
-		SGIMC_CCTRL0_R4KNOCHKPARR);
+#ifndef CONFIG_SGI_IP28
+	tmp |= SGIMC_CCTRL0_EPERRGIO | SGIMC_CCTRL0_EPERRMEM;
+#endif
+	tmp |= SGIMC_CCTRL0_R4KNOCHKPARR;
 	sgimc->cpuctrl0 = tmp;
 
 	/* Step 3: Setup the MC write buffer depth, this is controlled
@@ -174,7 +178,8 @@ void __init sgimc_init(void)
 	 */
 
 	/* First the basic invariants across all GIO64 implementations. */
-	tmp = SGIMC_GIOPAR_HPC64;	/* All 1st HPC's interface at 64bits */
+	tmp = sgimc->giopar & SGIMC_GIOPAR_GFX64; /* keep gfx 64bit settings */
+	tmp |= SGIMC_GIOPAR_HPC64;	/* All 1st HPC's interface at 64bits */
 	tmp |= SGIMC_GIOPAR_ONEBUS;	/* Only one physical GIO bus exists */
 
 	if (ip22_is_fullhouse()) {
@@ -189,7 +194,6 @@ void __init sgimc_init(void)
 			tmp |= SGIMC_GIOPAR_PLINEEXP0;	/* exp[01] pipelined */
 			tmp |= SGIMC_GIOPAR_PLINEEXP1;
 			tmp |= SGIMC_GIOPAR_MASTEREISA;	/* EISA masters */
-			tmp |= SGIMC_GIOPAR_GFX64;	/* GFX at 64 bits */
 		}
 	} else {
 		/* Guiness specific settings. */
@@ -204,4 +208,30 @@ void __init sgimc_init(void)
 void __init prom_meminit(void) {}
 void __init prom_free_prom_memory(void)
 {
+#ifdef CONFIG_SGI_IP28
+	u32 mconfig1;
+	unsigned long flags;
+	spinlock_t lock;
+
+	/*
+	 * because ARCS accesses memory uncached we wait until ARCS
+	 * isn't needed any longer, before we switch from slow to
+	 * normal mode
+	 */
+	spin_lock_irqsave(&lock, flags);
+	mconfig1 = sgimc->mconfig1;
+	/* map ECC register */
+	sgimc->mconfig1 = (mconfig1 & 0xffff0000) | 0x2060;
+	iob();
+	/* switch to normal mode */
+	*(unsigned long *)PHYS_TO_XKSEG_UNCACHED(0x60000000) = 0;
+	iob();
+	/* reduce WR_COL */
+	sgimc->cmacc = (sgimc->cmacc & ~0xf) | 4;
+	iob();
+	/* restore old config */
+	sgimc->mconfig1 = mconfig1;
+	iob();
+	spin_unlock_irqrestore(&lock, flags);
+#endif
 }

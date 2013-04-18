@@ -1,5 +1,6 @@
 #include <linux/fs.h>
 #include <linux/buffer_head.h>
+#include <linux/exportfs.h>
 #include <linux/iso_fs.h>
 #include <asm/unaligned.h>
 
@@ -34,27 +35,29 @@ struct isofs_sb_info {
 	unsigned long s_log_zone_size;
 	unsigned long s_max_size;
 	
-	unsigned char s_high_sierra; /* A simple flag */
-	unsigned char s_mapping;
 	int           s_rock_offset; /* offset of SUSP fields within SU area */
-	unsigned char s_rock;
 	unsigned char s_joliet_level;
-	unsigned char s_utf8;
-	unsigned char s_cruft; /* Broken disks with high
-				  byte of length containing
-				  junk */
-	unsigned char s_unhide;
-	unsigned char s_nosuid;
-	unsigned char s_nodev;
-	unsigned char s_nocompress;
-	unsigned char s_hide;
-	unsigned char s_showassoc;
+	unsigned char s_mapping;
+	unsigned int  s_high_sierra:1;
+	unsigned int  s_rock:2;
+	unsigned int  s_utf8:1;
+	unsigned int  s_cruft:1; /* Broken disks with high byte of length
+				  * containing junk */
+	unsigned int  s_nocompress:1;
+	unsigned int  s_hide:1;
+	unsigned int  s_showassoc:1;
+	unsigned int  s_overriderockperm:1;
+	unsigned int  s_uid_set:1;
+	unsigned int  s_gid_set:1;
 
-	mode_t s_mode;
-	gid_t s_gid;
-	uid_t s_uid;
+	umode_t s_fmode;
+	umode_t s_dmode;
+	kgid_t s_gid;
+	kuid_t s_uid;
 	struct nls_table *s_nls_iocharset; /* Native language support table */
 };
+
+#define ISOFS_INVALID_MODE ((umode_t) -1)
 
 static inline struct isofs_sb_info *ISOFS_SB(struct super_block *sb)
 {
@@ -76,29 +79,29 @@ static inline int isonum_712(char *p)
 }
 static inline unsigned int isonum_721(char *p)
 {
-	return le16_to_cpu(get_unaligned((__le16 *)p));
+	return get_unaligned_le16(p);
 }
 static inline unsigned int isonum_722(char *p)
 {
-	return be16_to_cpu(get_unaligned((__le16 *)p));
+	return get_unaligned_be16(p);
 }
 static inline unsigned int isonum_723(char *p)
 {
 	/* Ignore bigendian datum due to broken mastering programs */
-	return le16_to_cpu(get_unaligned((__le16 *)p));
+	return get_unaligned_le16(p);
 }
 static inline unsigned int isonum_731(char *p)
 {
-	return le32_to_cpu(get_unaligned((__le32 *)p));
+	return get_unaligned_le32(p);
 }
 static inline unsigned int isonum_732(char *p)
 {
-	return be32_to_cpu(get_unaligned((__le32 *)p));
+	return get_unaligned_be32(p);
 }
 static inline unsigned int isonum_733(char *p)
 {
 	/* Ignore bigendian datum due to broken mastering programs */
-	return le32_to_cpu(get_unaligned((__le32 *)p));
+	return get_unaligned_le32(p);
 }
 extern int iso_date(char *, int);
 
@@ -111,7 +114,7 @@ extern int isofs_name_translate(struct iso_directory_record *, char *, struct in
 int get_joliet_filename(struct iso_directory_record *, unsigned char *, struct inode *);
 int get_acorn_filename(struct iso_directory_record *, char *, struct inode *);
 
-extern struct dentry *isofs_lookup(struct inode *, struct dentry *, struct nameidata *);
+extern struct dentry *isofs_lookup(struct inode *, struct dentry *, unsigned int flags);
 extern struct buffer_head *isofs_bread(struct inode *, sector_t);
 extern int isofs_get_blocks(struct inode *, sector_t, struct buffer_head **, unsigned long);
 
@@ -177,4 +180,4 @@ isofs_normalize_block_and_offset(struct iso_directory_record* de,
 extern const struct inode_operations isofs_dir_inode_operations;
 extern const struct file_operations isofs_dir_operations;
 extern const struct address_space_operations isofs_symlink_aops;
-extern struct export_operations isofs_export_ops;
+extern const struct export_operations isofs_export_ops;

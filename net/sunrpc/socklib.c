@@ -8,11 +8,13 @@
 
 #include <linux/compiler.h>
 #include <linux/netdevice.h>
+#include <linux/gfp.h>
 #include <linux/skbuff.h>
 #include <linux/types.h>
 #include <linux/pagemap.h>
 #include <linux/udp.h>
 #include <linux/sunrpc/xdr.h>
+#include <linux/export.h>
 
 
 /**
@@ -34,6 +36,7 @@ size_t xdr_skb_read_bits(struct xdr_skb_reader *desc, void *to, size_t len)
 	desc->offset += len;
 	return len;
 }
+EXPORT_SYMBOL_GPL(xdr_skb_read_bits);
 
 /**
  * xdr_skb_read_and_csum_bits - copy and checksum from skb to buffer
@@ -71,7 +74,7 @@ ssize_t xdr_partial_copy_from_skb(struct xdr_buf *xdr, unsigned int base, struct
 	struct page	**ppage = xdr->pages;
 	unsigned int	len, pglen = xdr->page_len;
 	ssize_t		copied = 0;
-	int		ret;
+	size_t		ret;
 
 	len = xdr->head[0].iov_len;
 	if (base < len) {
@@ -111,7 +114,7 @@ ssize_t xdr_partial_copy_from_skb(struct xdr_buf *xdr, unsigned int base, struct
 		}
 
 		len = PAGE_CACHE_SIZE;
-		kaddr = kmap_atomic(*ppage, KM_SKB_SUNRPC_DATA);
+		kaddr = kmap_atomic(*ppage);
 		if (base) {
 			len -= base;
 			if (pglen < len)
@@ -124,7 +127,7 @@ ssize_t xdr_partial_copy_from_skb(struct xdr_buf *xdr, unsigned int base, struct
 			ret = copy_actor(desc, kaddr, len);
 		}
 		flush_dcache_page(*ppage);
-		kunmap_atomic(kaddr, KM_SKB_SUNRPC_DATA);
+		kunmap_atomic(kaddr);
 		copied += ret;
 		if (ret != len || !desc->count)
 			goto out;
@@ -137,6 +140,7 @@ copy_tail:
 out:
 	return copied;
 }
+EXPORT_SYMBOL_GPL(xdr_partial_copy_from_skb);
 
 /**
  * csum_partial_copy_to_xdr - checksum and copy data
@@ -179,3 +183,4 @@ no_checksum:
 		return -1;
 	return 0;
 }
+EXPORT_SYMBOL_GPL(csum_partial_copy_to_xdr);

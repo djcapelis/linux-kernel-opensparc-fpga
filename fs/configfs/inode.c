@@ -23,7 +23,8 @@
  *
  * configfs Copyright (C) 2005 Oracle.  All rights reserved.
  *
- * Please see Documentation/filesystems/configfs.txt for more information.
+ * Please see Documentation/filesystems/configfs/configfs.txt for more
+ * information.
  */
 
 #undef DEBUG
@@ -33,21 +34,26 @@
 #include <linux/backing-dev.h>
 #include <linux/capability.h>
 #include <linux/sched.h>
+#include <linux/lockdep.h>
+#include <linux/slab.h>
 
 #include <linux/configfs.h>
 #include "configfs_internal.h"
 
-extern struct super_block * configfs_sb;
+#ifdef CONFIG_LOCKDEP
+static struct lock_class_key default_group_class[MAX_LOCK_DEPTH];
+#endif
 
 static const struct address_space_operations configfs_aops = {
 	.readpage	= simple_readpage,
-	.prepare_write	= simple_prepare_write,
-	.commit_write	= simple_commit_write
+	.write_begin	= simple_write_begin,
+	.write_end	= simple_write_end,
 };
 
 static struct backing_dev_info configfs_backing_dev_info = {
+	.name		= "configfs",
 	.ra_pages	= 0,	/* No readahead */
-	.capabilities	= BDI_CAP_NO_ACCT_DIRTY | BDI_CAP_NO_WRITEBACK,
+	.capabilities	= BDI_CAP_NO_ACCT_AND_WRITEBACK,
 };
 
 static const struct inode_operations configfs_inode_operations ={
@@ -66,15 +72,6 @@ int configfs_setattr(struct dentry * dentry, struct iattr * iattr)
 		return -EINVAL;
 
 	sd_iattr = sd->s_iattr;
-
-	error = inode_change_ok(inode, iattr);
-	if (error)
-		return error;
-
-	error = inode_setattr(inode, iattr);
-	if (error)
-		return error;
-
 	if (!sd_iattr) {
 		/* setting attributes for the first time, allocate now */
 		sd_iattr = kzalloc(sizeof(struct iattr), GFP_KERNEL);
@@ -82,13 +79,16 @@ int configfs_setattr(struct dentry * dentry, struct iattr * iattr)
 			return -ENOMEM;
 		/* assign default attributes */
 		sd_iattr->ia_mode = sd->s_mode;
-		sd_iattr->ia_uid = 0;
-		sd_iattr->ia_gid = 0;
+		sd_iattr->ia_uid = GLOBAL_ROOT_UID;
+		sd_iattr->ia_gid = GLOBAL_ROOT_GID;
 		sd_iattr->ia_atime = sd_iattr->ia_mtime = sd_iattr->ia_ctime = CURRENT_TIME;
 		sd->s_iattr = sd_iattr;
 	}
-
 	/* attributes were changed atleast once in past */
+
+	error = simple_setattr(dentry, iattr);
+	if (error)
+		return error;
 
 	if (ia_valid & ATTR_UID)
 		sd_iattr->ia_uid = iattr->ia_uid;
@@ -114,11 +114,9 @@ int configfs_setattr(struct dentry * dentry, struct iattr * iattr)
 	return error;
 }
 
-static inline void set_default_inode_attr(struct inode * inode, mode_t mode)
+static inline void set_default_inode_attr(struct inode * inode, umode_t mode)
 {
 	inode->i_mode = mode;
-	inode->i_uid = 0;
-	inode->i_gid = 0;
 	inode->i_atime = inode->i_mtime = inode->i_ctime = CURRENT_TIME;
 }
 
@@ -132,11 +130,12 @@ static inline void set_inode_attr(struct inode * inode, struct iattr * iattr)
 	inode->i_ctime = iattr->ia_ctime;
 }
 
-struct inode * configfs_new_inode(mode_t mode, struct configfs_dirent * sd)
+struct inode *configfs_new_inode(umode_t mode, struct configfs_dirent *sd,
+				 struct super_block *s)
 {
-	struct inode * inode = new_inode(configfs_sb);
+	struct inode * inode = new_inode(s);
 	if (inode) {
-		inode->i_blocks = 0;
+		inode->i_ino = get_next_ino();
 		inode->i_mapping->a_ops = &configfs_aops;
 		inode->i_mapping->backing_dev_info = &configfs_backing_dev_info;
 		inode->i_op = &configfs_inode_operations;
@@ -153,38 +152,70 @@ struct inode * configfs_new_inode(mode_t mode, struct configfs_dirent * sd)
 	return inode;
 }
 
-int configfs_create(struct dentry * dentry, int mode, int (*init)(struct inode *))
+#ifdef CONFIG_LOCKDEP
+
+static void configfs_set_inode_lock_class(struct configfs_dirent *sd,
+					  struct inode *inode)
+{
+	int depth = sd->s_depth;
+
+	if (depth > 0) {
+		if (depth <= ARRAY_SIZE(default_group_class)) {
+			lockdep_set_class(&inode->i_mutex,
+					  &default_group_class[depth - 1]);
+		} else {
+			/*
+			 * In practice the maximum level of locking depth is
+			 * already reached. Just inform about possible reasons.
+			 */
+			printk(KERN_INFO "configfs: Too many levels of inodes"
+			       " for the locking correctness validator.\n");
+			printk(KERN_INFO "Spurious warnings may appear.\n");
+		}
+	}
+}
+
+#else /* CONFIG_LOCKDEP */
+
+static void configfs_set_inode_lock_class(struct configfs_dirent *sd,
+					  struct inode *inode)
+{
+}
+
+#endif /* CONFIG_LOCKDEP */
+
+int configfs_create(struct dentry * dentry, umode_t mode, int (*init)(struct inode *))
 {
 	int error = 0;
-	struct inode * inode = NULL;
-	if (dentry) {
-		if (!dentry->d_inode) {
-			struct configfs_dirent *sd = dentry->d_fsdata;
-			if ((inode = configfs_new_inode(mode, sd))) {
-				if (dentry->d_parent && dentry->d_parent->d_inode) {
-					struct inode *p_inode = dentry->d_parent->d_inode;
-					p_inode->i_mtime = p_inode->i_ctime = CURRENT_TIME;
-				}
-				goto Proceed;
-			}
-			else
-				error = -ENOMEM;
-		} else
-			error = -EEXIST;
-	} else
-		error = -ENOENT;
-	goto Done;
+	struct inode *inode = NULL;
+	struct configfs_dirent *sd;
+	struct inode *p_inode;
 
- Proceed:
-	if (init)
+	if (!dentry)
+		return -ENOENT;
+
+	if (dentry->d_inode)
+		return -EEXIST;
+
+	sd = dentry->d_fsdata;
+	inode = configfs_new_inode(mode, sd, dentry->d_sb);
+	if (!inode)
+		return -ENOMEM;
+
+	p_inode = dentry->d_parent->d_inode;
+	p_inode->i_mtime = p_inode->i_ctime = CURRENT_TIME;
+	configfs_set_inode_lock_class(sd, inode);
+
+	if (init) {
 		error = init(inode);
-	if (!error) {
-		d_instantiate(dentry, inode);
-		if (S_ISDIR(mode) || S_ISLNK(mode))
-			dget(dentry);  /* pin link and directory dentries in core */
-	} else
-		iput(inode);
- Done:
+		if (error) {
+			iput(inode);
+			return error;
+		}
+	}
+	d_instantiate(dentry, inode);
+	if (S_ISDIR(mode) || S_ISLNK(mode))
+		dget(dentry);  /* pin link and directory dentries in core */
 	return error;
 }
 
@@ -218,18 +249,14 @@ void configfs_drop_dentry(struct configfs_dirent * sd, struct dentry * parent)
 	struct dentry * dentry = sd->s_dentry;
 
 	if (dentry) {
-		spin_lock(&dcache_lock);
 		spin_lock(&dentry->d_lock);
 		if (!(d_unhashed(dentry) && dentry->d_inode)) {
-			dget_locked(dentry);
+			dget_dlock(dentry);
 			__d_drop(dentry);
 			spin_unlock(&dentry->d_lock);
-			spin_unlock(&dcache_lock);
 			simple_unlink(parent->d_inode, dentry);
-		} else {
+		} else
 			spin_unlock(&dentry->d_lock);
-			spin_unlock(&dcache_lock);
-		}
 	}
 }
 
@@ -247,7 +274,9 @@ void configfs_hash_and_remove(struct dentry * dir, const char * name)
 		if (!sd->s_element)
 			continue;
 		if (!strcmp(configfs_get_name(sd), name)) {
+			spin_lock(&configfs_dirent_lock);
 			list_del_init(&sd->s_sibling);
+			spin_unlock(&configfs_dirent_lock);
 			configfs_drop_dentry(sd, dir);
 			configfs_put(sd);
 			break;
@@ -256,4 +285,12 @@ void configfs_hash_and_remove(struct dentry * dir, const char * name)
 	mutex_unlock(&dir->d_inode->i_mutex);
 }
 
+int __init configfs_inode_init(void)
+{
+	return bdi_init(&configfs_backing_dev_info);
+}
 
+void configfs_inode_exit(void)
+{
+	bdi_destroy(&configfs_backing_dev_info);
+}

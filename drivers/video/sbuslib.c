@@ -9,18 +9,20 @@
 #include <linux/string.h>
 #include <linux/fb.h>
 #include <linux/mm.h>
+#include <linux/uaccess.h>
+#include <linux/of_device.h>
 
-#include <asm/oplib.h>
 #include <asm/fbio.h>
 
 #include "sbuslib.h"
 
-void sbusfb_fill_var(struct fb_var_screeninfo *var, int prom_node, int bpp)
+void sbusfb_fill_var(struct fb_var_screeninfo *var, struct device_node *dp,
+		     int bpp)
 {
 	memset(var, 0, sizeof(*var));
 
-	var->xres = prom_getintdefault(prom_node, "width", 1152);
-	var->yres = prom_getintdefault(prom_node, "height", 900);
+	var->xres = of_getintprop_default(dp, "width", 1152);
+	var->yres = of_getintprop_default(dp, "height", 900);
 	var->xres_virtual = var->xres;
 	var->yres_virtual = var->yres;
 	var->bits_per_pixel = bpp;
@@ -55,9 +57,8 @@ int sbusfb_mmap_helper(struct sbus_mmap_map *map,
 
 	off = vma->vm_pgoff << PAGE_SHIFT;
 
-	/* To stop the swapper from even considering these pages */
-	vma->vm_flags |= (VM_IO | VM_RESERVED);
-	
+	/* VM_IO | VM_DONTEXPAND | VM_DONTDUMP are set by remap_pfn_range() */
+
 	vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
 
 	/* Each page, see which map applies */
@@ -74,7 +75,7 @@ int sbusfb_mmap_helper(struct sbus_mmap_map *map,
 				map_offset = (physbase + map[i].poff) & POFF_MASK;
 				break;
 			}
-		if (!map_size){
+		if (!map_size) {
 			page += PAGE_SIZE;
 			continue;
 		}
@@ -190,17 +191,6 @@ int sbusfb_ioctl_helper(unsigned long cmd, unsigned long arg,
 EXPORT_SYMBOL(sbusfb_ioctl_helper);
 
 #ifdef CONFIG_COMPAT
-struct  fbcmap32 {
-	int             index;          /* first element (0 origin) */
-	int             count;
-	u32		red;
-	u32		green;
-	u32		blue;
-};
-
-#define FBIOPUTCMAP32	_IOW('F', 3, struct fbcmap32)
-#define FBIOGETCMAP32	_IOW('F', 4, struct fbcmap32)
-
 static int fbiogetputcmap(struct fb_info *info, unsigned int cmd, unsigned long arg)
 {
 	struct fbcmap32 __user *argp = (void __user *)arg;
@@ -222,20 +212,6 @@ static int fbiogetputcmap(struct fb_info *info, unsigned int cmd, unsigned long 
 			FBIOPUTCMAP_SPARC : FBIOGETCMAP_SPARC,
 			(unsigned long)p);
 }
-
-struct fbcursor32 {
-	short set;		/* what to set, choose from the list above */
-	short enable;		/* cursor on/off */
-	struct fbcurpos pos;	/* cursor position */
-	struct fbcurpos hot;	/* cursor hot spot */
-	struct fbcmap32 cmap;	/* color map info */
-	struct fbcurpos size;	/* cursor bit map size */
-	u32	image;		/* cursor image bits */
-	u32	mask;		/* cursor mask bits */
-};
-
-#define FBIOSCURSOR32	_IOW('F', 24, struct fbcursor32)
-#define FBIOGCURSOR32	_IOW('F', 25, struct fbcursor32)
 
 static int fbiogscursor(struct fb_info *info, unsigned long arg)
 {

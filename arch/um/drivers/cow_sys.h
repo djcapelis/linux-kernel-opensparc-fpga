@@ -1,14 +1,13 @@
 #ifndef __COW_SYS_H__
 #define __COW_SYS_H__
 
-#include "kern_util.h"
-#include "os.h"
-#include "user.h"
-#include "um_malloc.h"
+#include <kern_util.h>
+#include <os.h>
+#include <um_malloc.h>
 
 static inline void *cow_malloc(int size)
 {
-	return um_kmalloc(size);
+	return uml_kmalloc(size, UM_GFP_KERNEL);
 }
 
 static inline void cow_free(void *ptr)

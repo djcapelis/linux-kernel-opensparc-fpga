@@ -4,6 +4,7 @@
  */
 
 #include <linux/kernel.h>
+#include <linux/gfp.h>
 #include <linux/types.h>
 #include <linux/module.h>
 #include <linux/init.h>
@@ -128,7 +129,7 @@ static const struct esp_driver_ops jazz_esp_ops = {
 	.dma_error	=	jazz_esp_dma_error,
 };
 
-static int __devinit esp_jazz_probe(struct platform_device *dev)
+static int esp_jazz_probe(struct platform_device *dev)
 {
 	struct scsi_host_template *tpnt = &scsi_esp_template;
 	struct Scsi_Host *host;
@@ -143,7 +144,7 @@ static int __devinit esp_jazz_probe(struct platform_device *dev)
 		goto fail;
 
 	host->max_id = 8;
-	esp = host_to_esp(host);
+	esp = shost_priv(host);
 
 	esp->host = host;
 	esp->dev = dev;
@@ -200,7 +201,7 @@ fail:
 	return err;
 }
 
-static int __devexit esp_jazz_remove(struct platform_device *dev)
+static int esp_jazz_remove(struct platform_device *dev)
 {
 	struct esp *esp = dev_get_drvdata(&dev->dev);
 	unsigned int irq = esp->host->irq;
@@ -217,11 +218,15 @@ static int __devexit esp_jazz_remove(struct platform_device *dev)
 	return 0;
 }
 
+/* work with hotplug and coldplug */
+MODULE_ALIAS("platform:jazz_esp");
+
 static struct platform_driver esp_jazz_driver = {
 	.probe		= esp_jazz_probe,
-	.remove		= __devexit_p(esp_jazz_remove),
+	.remove		= esp_jazz_remove,
 	.driver	= {
 		.name	= "jazz_esp",
+		.owner	= THIS_MODULE,
 	},
 };
 

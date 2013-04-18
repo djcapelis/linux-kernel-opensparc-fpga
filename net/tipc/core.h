@@ -2,7 +2,7 @@
  * net/tipc/core.h: Include file for TIPC global declarations
  *
  * Copyright (c) 2005-2006, Ericsson AB
- * Copyright (c) 2005-2006, Wind River Systems
+ * Copyright (c) 2005-2007, 2010-2011, Wind River Systems
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -37,12 +37,10 @@
 #ifndef _TIPC_CORE_H
 #define _TIPC_CORE_H
 
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 #include <linux/tipc.h>
 #include <linux/tipc_config.h>
-#include <net/tipc/tipc_msg.h>
-#include <net/tipc/tipc_port.h>
-#include <net/tipc/tipc_bearer.h>
-#include <net/tipc/tipc.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
@@ -51,150 +49,57 @@
 #include <linux/string.h>
 #include <asm/uaccess.h>
 #include <linux/interrupt.h>
-#include <asm/atomic.h>
+#include <linux/atomic.h>
 #include <asm/hardirq.h>
 #include <linux/netdevice.h>
 #include <linux/in.h>
 #include <linux/list.h>
+#include <linux/slab.h>
 #include <linux/vmalloc.h>
 
-/*
- * TIPC debugging code
- */
 
-#define assert(i)  BUG_ON(!(i))
+#define TIPC_MOD_VER "2.0.0"
 
-struct tipc_msg;
-extern struct print_buf *TIPC_NULL, *TIPC_CONS, *TIPC_LOG;
-extern struct print_buf *TIPC_TEE(struct print_buf *, struct print_buf *);
-void tipc_msg_print(struct print_buf*,struct tipc_msg *,const char*);
-void tipc_printf(struct print_buf *, const char *fmt, ...);
-void tipc_dump(struct print_buf*,const char *fmt, ...);
+#define ULTRA_STRING_MAX_LEN	32768
+#define TIPC_MAX_SUBSCRIPTIONS	65535
+#define TIPC_MAX_PUBLICATIONS	65535
 
-#ifdef CONFIG_TIPC_DEBUG
+struct tipc_msg;	/* msg.h */
 
-/*
- * TIPC debug support included:
- * - system messages are printed to TIPC_OUTPUT print buffer
- * - debug messages are printed to DBG_OUTPUT print buffer
- */
-
-#define err(fmt, arg...)  tipc_printf(TIPC_OUTPUT, KERN_ERR "TIPC: " fmt, ## arg)
-#define warn(fmt, arg...) tipc_printf(TIPC_OUTPUT, KERN_WARNING "TIPC: " fmt, ## arg)
-#define info(fmt, arg...) tipc_printf(TIPC_OUTPUT, KERN_NOTICE "TIPC: " fmt, ## arg)
-
-#define dbg(fmt, arg...)  do {if (DBG_OUTPUT != TIPC_NULL) tipc_printf(DBG_OUTPUT, fmt, ## arg);} while(0)
-#define msg_dbg(msg, txt) do {if (DBG_OUTPUT != TIPC_NULL) tipc_msg_print(DBG_OUTPUT, msg, txt);} while(0)
-#define dump(fmt, arg...) do {if (DBG_OUTPUT != TIPC_NULL) tipc_dump(DBG_OUTPUT, fmt, ##arg);} while(0)
-
-
-/*
- * By default, TIPC_OUTPUT is defined to be system console and TIPC log buffer,
- * while DBG_OUTPUT is the null print buffer.  These defaults can be changed
- * here, or on a per .c file basis, by redefining these symbols.  The following
- * print buffer options are available:
- *
- * TIPC_NULL		   : null buffer (i.e. print nowhere)
- * TIPC_CONS		   : system console
- * TIPC_LOG		   : TIPC log buffer
- * &buf			   : user-defined buffer (struct print_buf *)
- * TIPC_TEE(&buf_a,&buf_b) : list of buffers (eg. TIPC_TEE(TIPC_CONS,TIPC_LOG))
- */
-
-#ifndef TIPC_OUTPUT
-#define TIPC_OUTPUT TIPC_TEE(TIPC_CONS,TIPC_LOG)
-#endif
-
-#ifndef DBG_OUTPUT
-#define DBG_OUTPUT TIPC_NULL
-#endif
-
-#else
-
-/*
- * TIPC debug support not included:
- * - system messages are printed to system console
- * - debug messages are not printed
- */
-
-#define err(fmt, arg...)  printk(KERN_ERR "TIPC: " fmt , ## arg)
-#define info(fmt, arg...) printk(KERN_INFO "TIPC: " fmt , ## arg)
-#define warn(fmt, arg...) printk(KERN_WARNING "TIPC: " fmt , ## arg)
-
-#define dbg(fmt, arg...) do {} while (0)
-#define msg_dbg(msg,txt) do {} while (0)
-#define dump(fmt,arg...) do {} while (0)
-
-
-/*
- * TIPC_OUTPUT is defined to be the system console, while DBG_OUTPUT is
- * the null print buffer.  Thes ensures that any system or debug messages
- * that are generated without using the above macros are handled correctly.
- */
-
-#undef  TIPC_OUTPUT
-#define TIPC_OUTPUT TIPC_CONS
-
-#undef  DBG_OUTPUT
-#define DBG_OUTPUT TIPC_NULL
-
-#endif
-
+int tipc_snprintf(char *buf, int len, const char *fmt, ...);
 
 /*
  * TIPC-specific error codes
  */
-
 #define ELINKCONG EAGAIN	/* link congestion <=> resource unavailable */
 
 /*
  * Global configuration variables
  */
-
-extern u32 tipc_own_addr;
-extern int tipc_max_zones;
-extern int tipc_max_clusters;
-extern int tipc_max_nodes;
-extern int tipc_max_slaves;
-extern int tipc_max_ports;
-extern int tipc_max_subscriptions;
-extern int tipc_max_publications;
-extern int tipc_net_id;
-extern int tipc_remote_management;
+extern u32 tipc_own_addr __read_mostly;
+extern int tipc_max_ports __read_mostly;
+extern int tipc_net_id __read_mostly;
+extern int tipc_remote_management __read_mostly;
 
 /*
  * Other global variables
  */
-
-extern int tipc_mode;
-extern int tipc_random;
-extern const char tipc_alphabet[];
-extern atomic_t tipc_user_count;
-
+extern int tipc_random __read_mostly;
 
 /*
  * Routines available to privileged subsystems
  */
-
-extern int  tipc_core_start(void);
-extern void tipc_core_stop(void);
-extern int  tipc_core_start_net(void);
-extern void tipc_core_stop_net(void);
-
-static inline int delimit(int val, int min, int max)
-{
-	if (val > max)
-		return max;
-	if (val < min)
-		return min;
-	return val;
-}
-
+extern int tipc_core_start_net(unsigned long);
+extern int  tipc_handler_start(void);
+extern void tipc_handler_stop(void);
+extern int  tipc_netlink_start(void);
+extern void tipc_netlink_stop(void);
+extern int  tipc_socket_init(void);
+extern void tipc_socket_stop(void);
 
 /*
  * TIPC timer and signal code
  */
-
 typedef void (*Handler) (unsigned long);
 
 u32 tipc_k_signal(Handler routine, unsigned long argument);
@@ -207,14 +112,10 @@ u32 tipc_k_signal(Handler routine, unsigned long argument);
  *
  * Timer must be initialized before use (and terminated when no longer needed).
  */
-
 static inline void k_init_timer(struct timer_list *timer, Handler routine,
 				unsigned long argument)
 {
-	dbg("initializing timer %p\n", timer);
-	init_timer(timer);
-	timer->function = routine;
-	timer->data = argument;
+	setup_timer(timer, routine, argument);
 }
 
 /**
@@ -230,10 +131,8 @@ static inline void k_init_timer(struct timer_list *timer, Handler routine,
  * then an additional jiffy is added to account for the fact that
  * the starting time may be in the middle of the current jiffy.
  */
-
 static inline void k_start_timer(struct timer_list *timer, unsigned long msec)
 {
-	dbg("starting timer %p for %u\n", timer, msec);
 	mod_timer(timer, jiffies + msecs_to_jiffies(msec) + 1);
 }
 
@@ -247,10 +146,8 @@ static inline void k_start_timer(struct timer_list *timer, unsigned long msec)
  * WARNING: Must not be called when holding locks required by the timer's
  *          timeout routine, otherwise deadlock can occur on SMP systems!
  */
-
 static inline void k_cancel_timer(struct timer_list *timer)
 {
-	dbg("cancelling timer %p\n", timer);
 	del_timer_sync(timer);
 }
 
@@ -265,25 +162,20 @@ static inline void k_cancel_timer(struct timer_list *timer)
  * (Do not "enhance" this routine to automatically cancel an active timer,
  * otherwise deadlock can arise when a timeout routine calls k_term_timer.)
  */
-
 static inline void k_term_timer(struct timer_list *timer)
 {
-	dbg("terminating timer %p\n", timer);
 }
-
 
 /*
  * TIPC message buffer code
  *
- * TIPC message buffer headroom reserves space for a link-level header
- * (in case the message is sent off-node),
- * while ensuring TIPC header is word aligned for quicker access
+ * TIPC message buffer headroom reserves space for the worst-case
+ * link-level device header (in case the message is sent off-node).
  *
- * The largest header currently supported is 18 bytes, which is used when
- * the standard 14 byte Ethernet header has 4 added bytes for VLAN info
+ * Note: Headroom should be a multiple of 4 to ensure the TIPC header fields
+ *       are word aligned for quicker access
  */
-
-#define BUF_HEADROOM 20u
+#define BUF_HEADROOM LL_MAX_HEADER
 
 struct tipc_skb_cb {
 	void *handle;
@@ -291,47 +183,11 @@ struct tipc_skb_cb {
 
 #define TIPC_SKB_CB(__skb) ((struct tipc_skb_cb *)&((__skb)->cb[0]))
 
-
 static inline struct tipc_msg *buf_msg(struct sk_buff *skb)
 {
 	return (struct tipc_msg *)skb->data;
 }
 
-/**
- * buf_acquire - creates a TIPC message buffer
- * @size: message size (including TIPC header)
- *
- * Returns a new buffer with data pointers set to the specified size.
- *
- * NOTE: Headroom is reserved to allow prepending of a data link header.
- *       There may also be unrequested tailroom present at the buffer's end.
- */
-
-static inline struct sk_buff *buf_acquire(u32 size)
-{
-	struct sk_buff *skb;
-	unsigned int buf_size = (BUF_HEADROOM + size + 3) & ~3u;
-
-	skb = alloc_skb(buf_size, GFP_ATOMIC);
-	if (skb) {
-		skb_reserve(skb, BUF_HEADROOM);
-		skb_put(skb, size);
-		skb->next = NULL;
-	}
-	return skb;
-}
-
-/**
- * buf_discard - frees a TIPC message buffer
- * @skb: message buffer
- *
- * Frees a message buffer.  If passed NULL, just returns.
- */
-
-static inline void buf_discard(struct sk_buff *skb)
-{
-	if (likely(skb != NULL))
-		kfree_skb(skb);
-}
+extern struct sk_buff *tipc_buf_acquire(u32 size);
 
 #endif

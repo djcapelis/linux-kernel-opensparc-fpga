@@ -126,7 +126,7 @@ static int rxrpc_abort_connection(struct rxrpc_connection *conn,
  * mark a call as being on a now-secured channel
  * - must be called with softirqs disabled
  */
-void rxrpc_call_is_secure(struct rxrpc_call *call)
+static void rxrpc_call_is_secure(struct rxrpc_call *call)
 {
 	_enter("%p", call);
 	if (call) {
@@ -150,10 +150,14 @@ static int rxrpc_process_event(struct rxrpc_connection *conn,
 	u32 serial;
 	int loop, ret;
 
-	if (conn->state >= RXRPC_CONN_REMOTELY_ABORTED)
+	if (conn->state >= RXRPC_CONN_REMOTELY_ABORTED) {
+		kleave(" = -ECONNABORTED [%u]", conn->state);
 		return -ECONNABORTED;
+	}
 
 	serial = ntohl(sp->hdr.serial);
+
+	_enter("{%d},{%u,%%%u},", conn->debug_id, sp->hdr.type, serial);
 
 	switch (sp->hdr.type) {
 	case RXRPC_PACKET_TYPE_ABORT:
@@ -199,6 +203,7 @@ static int rxrpc_process_event(struct rxrpc_connection *conn,
 		return 0;
 
 	default:
+		_leave(" = -EPROTO [%u]", sp->hdr.type);
 		return -EPROTO;
 	}
 }
@@ -254,7 +259,6 @@ void rxrpc_process_connection(struct work_struct *work)
 {
 	struct rxrpc_connection *conn =
 		container_of(work, struct rxrpc_connection, processor);
-	struct rxrpc_skb_priv *sp;
 	struct sk_buff *skb;
 	u32 abort_code = RX_PROTOCOL_ERROR;
 	int ret;
@@ -271,8 +275,6 @@ void rxrpc_process_connection(struct work_struct *work)
 	/* go through the conn-level event packets, releasing the ref on this
 	 * connection that each one has when we've finished with it */
 	while ((skb = skb_dequeue(&conn->rx_queue))) {
-		sp = rxrpc_skb(skb);
-
 		ret = rxrpc_process_event(conn, skb, &abort_code);
 		switch (ret) {
 		case -EPROTO:

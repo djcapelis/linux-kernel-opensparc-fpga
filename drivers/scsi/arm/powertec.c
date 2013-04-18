@@ -232,7 +232,7 @@ powertecscsi_set_proc_info(struct Scsi_Host *host, char *buffer, int length)
  * Params   : buffer  - a buffer to write information to
  *	      start   - a pointer into this buffer set by this routine to the start
  *		        of the required information.
- *	      offset  - offset into information that we have read upto.
+ *	      offset  - offset into information that we have read up to.
  *	      length  - length of buffer
  *	      inout   - 0 for reading, 1 for writing.
  * Returns  : length of data written to buffer.
@@ -302,14 +302,15 @@ static struct scsi_host_template powertecscsi_template = {
 
 	.can_queue			= 8,
 	.this_id			= 7,
-	.sg_tablesize			= SG_ALL,
+	.sg_tablesize			= SCSI_MAX_SG_CHAIN_SEGMENTS,
+	.dma_boundary			= IOMD_DMA_BOUNDARY,
 	.cmd_per_lun			= 2,
 	.use_clustering			= ENABLE_CLUSTERING,
 	.proc_name			= "powertec",
 };
 
-static int __devinit
-powertecscsi_probe(struct expansion_card *ec, const struct ecard_id *id)
+static int powertecscsi_probe(struct expansion_card *ec,
+			      const struct ecard_id *id)
 {
 	struct Scsi_Host *host;
 	struct powertec_info *info;
@@ -408,7 +409,7 @@ powertecscsi_probe(struct expansion_card *ec, const struct ecard_id *id)
 	return ret;
 }
 
-static void __devexit powertecscsi_remove(struct expansion_card *ec)
+static void powertecscsi_remove(struct expansion_card *ec)
 {
 	struct Scsi_Host *host = ecard_get_drvdata(ec);
 	struct powertec_info *info = (struct powertec_info *)host->hostdata;
@@ -434,7 +435,7 @@ static const struct ecard_id powertecscsi_cids[] = {
 
 static struct ecard_driver powertecscsi_driver = {
 	.probe		= powertecscsi_probe,
-	.remove		= __devexit_p(powertecscsi_remove),
+	.remove		= powertecscsi_remove,
 	.id_table	= powertecscsi_cids,
 	.drv = {
 		.name		= "powertecscsi",

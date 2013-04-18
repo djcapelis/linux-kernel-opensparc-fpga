@@ -60,8 +60,8 @@ typedef void (o2net_post_msg_handler_func)(int status, void *data,
 /* same as hb delay, we're waiting for another node to recognize our hb */
 #define O2NET_RECONNECT_DELAY_MS_DEFAULT	2000
 
-#define O2NET_KEEPALIVE_DELAY_MS_DEFAULT	5000
-#define O2NET_IDLE_TIMEOUT_MS_DEFAULT		10000
+#define O2NET_KEEPALIVE_DELAY_MS_DEFAULT	2000
+#define O2NET_IDLE_TIMEOUT_MS_DEFAULT		30000
 
 
 /* TODO: figure this out.... */
@@ -106,6 +106,8 @@ int o2net_register_handler(u32 msg_type, u32 key, u32 max_len,
 			   struct list_head *unreg_list);
 void o2net_unregister_handler_list(struct list_head *list);
 
+void o2net_fill_node_map(unsigned long *map, unsigned bytes);
+
 struct o2nm_node;
 int o2net_register_hb_callbacks(void);
 void o2net_unregister_hb_callbacks(void);
@@ -116,5 +118,37 @@ int o2net_num_connected_peers(void);
 
 int o2net_init(void);
 void o2net_exit(void);
+
+struct o2net_send_tracking;
+struct o2net_sock_container;
+
+#ifdef CONFIG_DEBUG_FS
+int o2net_debugfs_init(void);
+void o2net_debugfs_exit(void);
+void o2net_debug_add_nst(struct o2net_send_tracking *nst);
+void o2net_debug_del_nst(struct o2net_send_tracking *nst);
+void o2net_debug_add_sc(struct o2net_sock_container *sc);
+void o2net_debug_del_sc(struct o2net_sock_container *sc);
+#else
+static inline int o2net_debugfs_init(void)
+{
+	return 0;
+}
+static inline void o2net_debugfs_exit(void)
+{
+}
+static inline void o2net_debug_add_nst(struct o2net_send_tracking *nst)
+{
+}
+static inline void o2net_debug_del_nst(struct o2net_send_tracking *nst)
+{
+}
+static inline void o2net_debug_add_sc(struct o2net_sock_container *sc)
+{
+}
+static inline void o2net_debug_del_sc(struct o2net_sock_container *sc)
+{
+}
+#endif	/* CONFIG_DEBUG_FS */
 
 #endif /* O2CLUSTER_TCP_H */

@@ -9,19 +9,16 @@
  */
 
 #include <linux/sched.h>
+#include <linux/slab.h>
 #include <linux/err.h>
 #include <linux/fs.h>
-#include <linux/slab.h>
-#include <asm/arch/hwregs/reg_rdwr.h>
-#include <asm/arch/hwregs/reg_map.h>
-#include <asm/arch/hwregs/timer_defs.h>
-#include <asm/arch/hwregs/intr_vect_defs.h>
+#include <hwregs/reg_rdwr.h>
+#include <hwregs/reg_map.h>
+#include <hwregs/timer_defs.h>
+#include <hwregs/intr_vect_defs.h>
+#include <linux/ptrace.h>
 
 extern void stop_watchdog(void);
-
-#ifdef CONFIG_ETRAX_GPIO
-extern void etrax_gpio_wake_up_check(void); /* Defined in drivers/gpio.c. */
-#endif
 
 extern int cris_hlt_counter;
 
@@ -82,7 +79,7 @@ hard_reset_now(void)
 	wd_ctrl.cmd = regk_timer_start;
 
         arch_enable_nmi();
-	REG_WR(timer, regi_timer, rw_wd_ctrl, wd_ctrl);
+	REG_WR(timer, regi_timer0, rw_wd_ctrl, wd_ctrl);
 }
 #endif
 
@@ -98,31 +95,6 @@ unsigned long thread_saved_pc(struct task_struct *t)
 	return task_pt_regs(t)->erp;
 }
 
-static void
-kernel_thread_helper(void* dummy, int (*fn)(void *), void * arg)
-{
-	fn(arg);
-	do_exit(-1); /* Should never be called, return bad exit value. */
-}
-
-/* Create a kernel thread. */
-int
-kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
-{
-	struct pt_regs regs;
-
-	memset(&regs, 0, sizeof(regs));
-
-        /* Don't use r10 since that is set to 0 in copy_thread. */
-	regs.r11 = (unsigned long) fn;
-	regs.r12 = (unsigned long) arg;
-	regs.erp = (unsigned long) kernel_thread_helper;
-	regs.ccs = 1 << (I_CCS_BITNR + CCS_SHIFT);
-
-	/* Create the new process. */
-        return do_fork(flags | CLONE_VM | CLONE_UNTRACED, 0, &regs, 0, NULL, NULL);
-}
-
 /*
  * Setup the child's kernel stack with a pt_regs and call switch_stack() on it.
  * It will be unnested during _resume and _ret_from_sys_call when the new thread
@@ -133,36 +105,44 @@ kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
  */
 
 extern asmlinkage void ret_from_fork(void);
+extern asmlinkage void ret_from_kernel_thread(void);
 
 int
-copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
-	unsigned long unused,
-	struct task_struct *p, struct pt_regs *regs)
+copy_thread(unsigned long clone_flags, unsigned long usp,
+	unsigned long arg, struct task_struct *p)
 {
-	struct pt_regs *childregs;
-	struct switch_stack *swstack;
+	struct pt_regs *childregs = task_pt_regs(p);
+	struct switch_stack *swstack = ((struct switch_stack *) childregs) - 1;
 
 	/*
 	 * Put the pt_regs structure at the end of the new kernel stack page and
 	 * fix it up. Note: the task_struct doubles as the kernel stack for the
 	 * task.
 	 */
-	childregs = task_pt_regs(p);
-	*childregs = *regs;	/* Struct copy of pt_regs. */
-        p->set_child_tid = p->clear_child_tid = NULL;
+	if (unlikely(p->flags & PF_KTHREAD)) {
+		memset(swstack, 0,
+			sizeof(struct switch_stack) + sizeof(struct pt_regs));
+		swstack->r1 = usp;
+		swstack->r2 = arg;
+		childregs->ccs = 1 << (I_CCS_BITNR + CCS_SHIFT);
+		swstack->return_ip = (unsigned long) ret_from_kernel_thread;
+		p->thread.ksp = (unsigned long) swstack;
+		p->thread.usp = 0;
+		return 0;
+	}
+	*childregs = *current_pt_regs();	/* Struct copy of pt_regs. */
         childregs->r10 = 0;	/* Child returns 0 after a fork/clone. */
 
 	/* Set a new TLS ?
-	 * The TLS is in $mof beacuse it is the 5th argument to sys_clone.
+	 * The TLS is in $mof because it is the 5th argument to sys_clone.
 	 */
 	if (p->mm && (clone_flags & CLONE_SETTLS)) {
-		task_thread_info(p)->tls = regs->mof;
+		task_thread_info(p)->tls = childregs->mof;
 	}
 
 	/* Put the switch stack right below the pt_regs. */
-	swstack = ((struct switch_stack *) childregs) - 1;
 
-	/* Paramater to ret_from_sys_call. 0 is don't restart the syscall. */
+	/* Parameter to ret_from_sys_call. 0 is don't restart the syscall. */
 	swstack->r9 = 0;
 
 	/*
@@ -172,72 +152,10 @@ copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
 	swstack->return_ip = (unsigned long) ret_from_fork;
 
 	/* Fix the user-mode and kernel-mode stackpointer. */
-	p->thread.usp = usp;
+	p->thread.usp = usp ?: rdusp();
 	p->thread.ksp = (unsigned long) swstack;
 
 	return 0;
-}
-
-/*
- * Be aware of the "magic" 7th argument in the four system-calls below.
- * They need the latest stackframe, which is put as the 7th argument by
- * entry.S. The previous arguments are dummies or actually used, but need
- * to be defined to reach the 7th argument.
- *
- * N.B.: Another method to get the stackframe is to use current_regs(). But
- * it returns the latest stack-frame stacked when going from _user mode_ and
- * some of these (at least sys_clone) are called from kernel-mode sometimes
- * (for example during kernel_thread, above) and thus cannot use it. Thus,
- * to be sure not to get any surprises, we use the method for the other calls
- * as well.
- */
-asmlinkage int
-sys_fork(long r10, long r11, long r12, long r13, long mof, long srp,
-	struct pt_regs *regs)
-{
-	return do_fork(SIGCHLD, rdusp(), regs, 0, NULL, NULL);
-}
-
-/* FIXME: Is parent_tid/child_tid really third/fourth argument? Update lib? */
-asmlinkage int
-sys_clone(unsigned long newusp, unsigned long flags, int *parent_tid, int *child_tid,
-	unsigned long tls, long srp, struct pt_regs *regs)
-{
-	if (!newusp)
-		newusp = rdusp();
-
-	return do_fork(flags, newusp, regs, 0, parent_tid, child_tid);
-}
-
-/*
- * vfork is a system call in i386 because of register-pressure - maybe
- * we can remove it and handle it in libc but we put it here until then.
- */
-asmlinkage int
-sys_vfork(long r10, long r11, long r12, long r13, long mof, long srp,
-	struct pt_regs *regs)
-{
-	return do_fork(CLONE_VFORK | CLONE_VM | SIGCHLD, rdusp(), regs, 0, NULL, NULL);
-}
-
-/* sys_execve() executes a new program. */
-asmlinkage int
-sys_execve(const char *fname, char **argv, char **envp, long r13, long mof, long srp,
-	struct pt_regs *regs)
-{
-	int error;
-	char *filename;
-
-	filename = getname(fname);
-	error = PTR_ERR(filename);
-
-	if (IS_ERR(filename))
-	        goto out;
-
-	error = do_execve(filename, argv, envp, regs);
-	putname(filename);
- out:
-	return error;
 }
 
 unsigned long

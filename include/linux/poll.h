@@ -1,17 +1,17 @@
 #ifndef _LINUX_POLL_H
 #define _LINUX_POLL_H
 
-#include <asm/poll.h>
-
-#ifdef __KERNEL__
 
 #include <linux/compiler.h>
+#include <linux/ktime.h>
 #include <linux/wait.h>
 #include <linux/string.h>
 #include <linux/fs.h>
-#include <linux/sched.h>
+#include <linux/sysctl.h>
 #include <asm/uaccess.h>
+#include <uapi/linux/poll.h>
 
+extern struct ctl_table epoll_table[]; /* for sysctl */
 /* ~832 bytes of stack space used max in sys_select/sys_poll before allocating
    additional memory. */
 #define MAX_STACK_ALLOC 832
@@ -21,6 +21,8 @@
 #define WQUEUES_STACK_ALLOC	(MAX_STACK_ALLOC - FRONTEND_STACK_ALLOC)
 #define N_INLINE_POLL_ENTRIES	(WQUEUES_STACK_ALLOC / sizeof(struct poll_table_entry))
 
+#define DEFAULT_POLLMASK (POLLIN | POLLOUT | POLLRDNORM | POLLWRNORM)
+
 struct poll_table_struct;
 
 /* 
@@ -28,33 +30,63 @@ struct poll_table_struct;
  */
 typedef void (*poll_queue_proc)(struct file *, wait_queue_head_t *, struct poll_table_struct *);
 
+/*
+ * Do not touch the structure directly, use the access functions
+ * poll_does_not_wait() and poll_requested_events() instead.
+ */
 typedef struct poll_table_struct {
-	poll_queue_proc qproc;
+	poll_queue_proc _qproc;
+	unsigned long _key;
 } poll_table;
 
 static inline void poll_wait(struct file * filp, wait_queue_head_t * wait_address, poll_table *p)
 {
-	if (p && wait_address)
-		p->qproc(filp, wait_address, p);
+	if (p && p->_qproc && wait_address)
+		p->_qproc(filp, wait_address, p);
+}
+
+/*
+ * Return true if it is guaranteed that poll will not wait. This is the case
+ * if the poll() of another file descriptor in the set got an event, so there
+ * is no need for waiting.
+ */
+static inline bool poll_does_not_wait(const poll_table *p)
+{
+	return p == NULL || p->_qproc == NULL;
+}
+
+/*
+ * Return the set of events that the application wants to poll for.
+ * This is useful for drivers that need to know whether a DMA transfer has
+ * to be started implicitly on poll(). You typically only want to do that
+ * if the application is actually polling for POLLIN and/or POLLOUT.
+ */
+static inline unsigned long poll_requested_events(const poll_table *p)
+{
+	return p ? p->_key : ~0UL;
 }
 
 static inline void init_poll_funcptr(poll_table *pt, poll_queue_proc qproc)
 {
-	pt->qproc = qproc;
+	pt->_qproc = qproc;
+	pt->_key   = ~0UL; /* all events enabled */
 }
 
 struct poll_table_entry {
-	struct file * filp;
+	struct file *filp;
+	unsigned long key;
 	wait_queue_t wait;
-	wait_queue_head_t * wait_address;
+	wait_queue_head_t *wait_address;
 };
 
 /*
- * Structures and helpers for sys_poll/sys_poll
+ * Structures and helpers for select/poll syscall
  */
 struct poll_wqueues {
 	poll_table pt;
-	struct poll_table_page * table;
+	struct poll_table_page *table;
+	struct task_struct *polling_task;
+	int triggered;
 	int error;
 	int inline_index;
 	struct poll_table_entry inline_entries[N_INLINE_POLL_ENTRIES];
@@ -62,9 +94,18 @@ struct poll_wqueues {
 
 extern void poll_initwait(struct poll_wqueues *pwq);
 extern void poll_freewait(struct poll_wqueues *pwq);
+extern int poll_schedule_timeout(struct poll_wqueues *pwq, int state,
+				 ktime_t *expires, unsigned long slack);
+extern long select_estimate_accuracy(struct timespec *tv);
+
+
+static inline int poll_schedule(struct poll_wqueues *pwq, int state)
+{
+	return poll_schedule_timeout(pwq, state, NULL, 0);
+}
 
 /*
- * Scaleable version of the fd_set.
+ * Scalable version of the fd_set.
  */
 
 typedef struct {
@@ -112,10 +153,12 @@ void zero_fd_set(unsigned long nr, unsigned long *fdset)
 
 #define MAX_INT64_SECONDS (((s64)(~((u64)0)>>1)/HZ)-1)
 
-extern int do_select(int n, fd_set_bits *fds, s64 *timeout);
+extern int do_select(int n, fd_set_bits *fds, struct timespec *end_time);
 extern int do_sys_poll(struct pollfd __user * ufds, unsigned int nfds,
-		       s64 *timeout);
+		       struct timespec *end_time);
+extern int core_sys_select(int n, fd_set __user *inp, fd_set __user *outp,
+			   fd_set __user *exp, struct timespec *end_time);
 
-#endif /* KERNEL */
+extern int poll_select_set_timeout(struct timespec *to, long sec, long nsec);
 
 #endif /* _LINUX_POLL_H */

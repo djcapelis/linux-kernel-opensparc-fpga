@@ -1,7 +1,7 @@
 /*
  *	w1_therm.c
  *
- * Copyright (c) 2004 Evgeniy Polyakov <johnpol@2ka.mipt.ru>
+ * Copyright (c) 2004 Evgeniy Polyakov <zbr@ioremap.net>
  *
  *
  * This program is free software; you can redistribute it and/or modify
@@ -34,34 +34,36 @@
 #include "../w1_family.h"
 
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Evgeniy Polyakov <johnpol@2ka.mipt.ru>");
+MODULE_AUTHOR("Evgeniy Polyakov <zbr@ioremap.net>");
 MODULE_DESCRIPTION("Driver for 1-wire Dallas network protocol, temperature family.");
+
+/* Allow the strong pullup to be disabled, but default to enabled.
+ * If it was disabled a parasite powered device might not get the require
+ * current to do a temperature conversion.  If it is enabled parasite powered
+ * devices have a better chance of getting the current required.
+ */
+static int w1_strong_pullup = 1;
+module_param_named(strong_pullup, w1_strong_pullup, int, 0);
 
 static u8 bad_roms[][9] = {
 				{0xaa, 0x00, 0x4b, 0x46, 0xff, 0xff, 0x0c, 0x10, 0x87},
 				{}
 			};
 
-static ssize_t w1_therm_read_bin(struct kobject *, char *, loff_t, size_t);
+static ssize_t w1_therm_read(struct device *device,
+	struct device_attribute *attr, char *buf);
 
-static struct bin_attribute w1_therm_bin_attr = {
-	.attr = {
-		.name = "w1_slave",
-		.mode = S_IRUGO,
-		.owner = THIS_MODULE,
-	},
-	.size = W1_SLAVE_DATA_SIZE,
-	.read = w1_therm_read_bin,
-};
+static struct device_attribute w1_therm_attr =
+	__ATTR(w1_slave, S_IRUGO, w1_therm_read, NULL);
 
 static int w1_therm_add_slave(struct w1_slave *sl)
 {
-	return sysfs_create_bin_file(&sl->dev.kobj, &w1_therm_bin_attr);
+	return device_create_file(&sl->dev, &w1_therm_attr);
 }
 
 static void w1_therm_remove_slave(struct w1_slave *sl)
 {
-	sysfs_remove_bin_file(&sl->dev.kobj, &w1_therm_bin_attr);
+	device_remove_file(&sl->dev, &w1_therm_attr);
 }
 
 static struct w1_family_ops w1_therm_fops = {
@@ -84,6 +86,16 @@ static struct w1_family w1_therm_family_DS1822 = {
 	.fops = &w1_therm_fops,
 };
 
+static struct w1_family w1_therm_family_DS28EA00 = {
+	.fid = W1_THERM_DS28EA00,
+	.fops = &w1_therm_fops,
+};
+
+static struct w1_family w1_therm_family_DS1825 = {
+	.fid = W1_THERM_DS1825,
+	.fops = &w1_therm_fops,
+};
+
 struct w1_therm_family_converter
 {
 	u8			broken;
@@ -92,6 +104,7 @@ struct w1_therm_family_converter
 	int			(*convert)(u8 rom[9]);
 };
 
+/* The return value is millidegrees Centigrade. */
 static inline int w1_DS18B20_convert_temp(u8 rom[9]);
 static inline int w1_DS18S20_convert_temp(u8 rom[9]);
 
@@ -108,13 +121,20 @@ static struct w1_therm_family_converter w1_therm_families[] = {
 		.f		= &w1_therm_family_DS18B20,
 		.convert 	= w1_DS18B20_convert_temp
 	},
+	{
+		.f		= &w1_therm_family_DS28EA00,
+		.convert	= w1_DS18B20_convert_temp
+	},
+	{
+		.f		= &w1_therm_family_DS1825,
+		.convert	= w1_DS18B20_convert_temp
+	}
 };
 
 static inline int w1_DS18B20_convert_temp(u8 rom[9])
 {
-	int t = (rom[1] << 8) | rom[0];
-	t /= 16;
-	return t;
+	s16 t = le16_to_cpup((__le16 *)rom);
+	return t*1000/16;
 }
 
 static inline int w1_DS18S20_convert_temp(u8 rom[9])
@@ -159,28 +179,21 @@ static int w1_therm_check_rom(u8 rom[9])
 	return 0;
 }
 
-static ssize_t w1_therm_read_bin(struct kobject *kobj, char *buf, loff_t off, size_t count)
+static ssize_t w1_therm_read(struct device *device,
+	struct device_attribute *attr, char *buf)
 {
-	struct w1_slave *sl = kobj_to_w1_slave(kobj);
+	struct w1_slave *sl = dev_to_w1_slave(device);
 	struct w1_master *dev = sl->master;
-	u8 rom[9], crc, verdict;
+	u8 rom[9], crc, verdict, external_power;
 	int i, max_trying = 10;
+	ssize_t c = PAGE_SIZE;
 
-	mutex_lock(&sl->master->mutex);
+	i = mutex_lock_interruptible(&dev->bus_mutex);
+	if (i != 0)
+		return i;
 
-	if (off > W1_SLAVE_DATA_SIZE) {
-		count = 0;
-		goto out;
-	}
-	if (off + count > W1_SLAVE_DATA_SIZE) {
-		count = 0;
-		goto out;
-	}
-
-	memset(buf, 0, count);
 	memset(rom, 0, sizeof(rom));
 
-	count = 0;
 	verdict = 0;
 	crc = 0;
 
@@ -188,21 +201,50 @@ static ssize_t w1_therm_read_bin(struct kobject *kobj, char *buf, loff_t off, si
 		if (!w1_reset_select_slave(sl)) {
 			int count = 0;
 			unsigned int tm = 750;
+			unsigned long sleep_rem;
+
+			w1_write_8(dev, W1_READ_PSUPPLY);
+			external_power = w1_read_8(dev);
+
+			if (w1_reset_select_slave(sl))
+				continue;
+
+			/* 750ms strong pullup (or delay) after the convert */
+			if (!external_power && w1_strong_pullup)
+				w1_next_pullup(dev, tm);
 
 			w1_write_8(dev, W1_CONVERT_TEMP);
 
-			msleep(tm);
+			if (external_power) {
+				mutex_unlock(&dev->bus_mutex);
+
+				sleep_rem = msleep_interruptible(tm);
+				if (sleep_rem != 0)
+					return -EINTR;
+
+				i = mutex_lock_interruptible(&dev->bus_mutex);
+				if (i != 0)
+					return i;
+			} else if (!w1_strong_pullup) {
+				sleep_rem = msleep_interruptible(tm);
+				if (sleep_rem != 0) {
+					mutex_unlock(&dev->bus_mutex);
+					return -EINTR;
+				}
+			}
 
 			if (!w1_reset_select_slave(sl)) {
 
 				w1_write_8(dev, W1_READ_SCRATCHPAD);
 				if ((count = w1_read_block(dev, rom, 9)) != 9) {
-					dev_warn(&dev->dev, "w1_read_block() returned %d instead of 9.\n", count);
+					dev_warn(device, "w1_read_block() "
+						"returned %u instead of 9.\n",
+						count);
 				}
 
 				crc = w1_calc_crc8(rom, 8);
 
-				if (rom[8] == crc && rom[0])
+				if (rom[8] == crc)
 					verdict = 1;
 			}
 		}
@@ -212,22 +254,22 @@ static ssize_t w1_therm_read_bin(struct kobject *kobj, char *buf, loff_t off, si
 	}
 
 	for (i = 0; i < 9; ++i)
-		count += sprintf(buf + count, "%02x ", rom[i]);
-	count += sprintf(buf + count, ": crc=%02x %s\n",
+		c -= snprintf(buf + PAGE_SIZE - c, c, "%02x ", rom[i]);
+	c -= snprintf(buf + PAGE_SIZE - c, c, ": crc=%02x %s\n",
 			   crc, (verdict) ? "YES" : "NO");
 	if (verdict)
 		memcpy(sl->rom, rom, sizeof(sl->rom));
 	else
-		dev_warn(&dev->dev, "18S20 doesn't respond to CONVERT_TEMP.\n");
+		dev_warn(device, "18S20 doesn't respond to CONVERT_TEMP.\n");
 
 	for (i = 0; i < 9; ++i)
-		count += sprintf(buf + count, "%02x ", sl->rom[i]);
+		c -= snprintf(buf + PAGE_SIZE - c, c, "%02x ", sl->rom[i]);
 
-	count += sprintf(buf + count, "t=%d\n", w1_convert_temp(rom, sl->family->fid));
-out:
-	mutex_unlock(&dev->mutex);
+	c -= snprintf(buf + PAGE_SIZE - c, c, "t=%d\n",
+		w1_convert_temp(rom, sl->family->fid));
+	mutex_unlock(&dev->bus_mutex);
 
-	return count;
+	return PAGE_SIZE - c;
 }
 
 static int __init w1_therm_init(void)

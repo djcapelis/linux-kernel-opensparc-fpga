@@ -8,16 +8,15 @@
 
 #include <linux/percpu.h>
 #include <linux/types.h>
-#include <linux/module.h>
+#include <linux/export.h>
+#include <linux/of_device.h>
+#include <linux/of_platform.h>
 
 #include <asm/io.h>
 #include <asm/pgtable.h>
 #include <asm/prom.h>
 #include <asm/ptrace.h>
-#include <asm/of_device.h>
-#include <asm/of_platform.h>
-
-#include "cbe_regs.h"
+#include <asm/cell-regs.h>
 
 /*
  * Current implementation uses "cpu" nodes. We build our own mapping
@@ -46,8 +45,8 @@ static struct cbe_thread_map
 	unsigned int cbe_id;
 } cbe_thread_map[NR_CPUS];
 
-static cpumask_t cbe_local_mask[MAX_CBE] = { [0 ... MAX_CBE-1] = CPU_MASK_NONE };
-static cpumask_t cbe_first_online_cpu = CPU_MASK_NONE;
+static cpumask_t cbe_local_mask[MAX_CBE] = { [0 ... MAX_CBE-1] = {CPU_BITS_NONE} };
+static cpumask_t cbe_first_online_cpu = { CPU_BITS_NONE };
 
 static struct cbe_regs_map *cbe_find_map(struct device_node *np)
 {
@@ -160,7 +159,8 @@ EXPORT_SYMBOL_GPL(cbe_cpu_to_node);
 
 u32 cbe_node_to_cpu(int node)
 {
-	return find_first_bit( (unsigned long *) &cbe_local_mask[node], sizeof(cpumask_t));
+	return cpumask_first(&cbe_local_mask[node]);
+
 }
 EXPORT_SYMBOL_GPL(cbe_node_to_cpu);
 
@@ -173,6 +173,13 @@ static struct device_node *cbe_get_be_node(int cpu_id)
 		const phandle *cpu_handle;
 
 		cpu_handle = of_get_property(np, "cpus", &len);
+
+		/*
+		 * the CAB SLOF tree is non compliant, so we just assume
+		 * there is only one node
+		 */
+		if (WARN_ON_ONCE(!cpu_handle))
+			return np;
 
 		for (i=0; i<len; i++)
 			if (of_find_node_by_phandle(cpu_handle[i]) == of_get_cpu_node(cpu_id, NULL))
@@ -250,6 +257,7 @@ void __init cbe_regs_init(void)
 			printk(KERN_ERR "cbe_regs: More BE chips than supported"
 			       "!\n");
 			cbe_regs_map_count--;
+			of_node_put(cpu);
 			return;
 		}
 		map->cpu_node = cpu;
@@ -261,9 +269,9 @@ void __init cbe_regs_init(void)
 				thread->regs = map;
 				thread->cbe_id = cbe_id;
 				map->be_node = thread->be_node;
-				cpu_set(i, cbe_local_mask[cbe_id]);
+				cpumask_set_cpu(i, &cbe_local_mask[cbe_id]);
 				if(thread->thread_id == 0)
-					cpu_set(i, cbe_first_online_cpu);
+					cpumask_set_cpu(i, &cbe_first_online_cpu);
 			}
 		}
 

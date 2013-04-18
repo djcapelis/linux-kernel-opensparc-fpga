@@ -23,11 +23,11 @@
 #include <linux/init.h>
 #include <linux/delay.h>
 #include <linux/platform_device.h>
+#include <linux/slab.h>
+#include <linux/io.h>
 
 #include <linux/i2c.h>
 #include <linux/i2c-algo-bit.h>
-
-#include <asm/io.h>
 
 struct simtec_i2c_data {
 	struct resource		*ioarea;
@@ -92,7 +92,7 @@ static int simtec_i2c_probe(struct platform_device *dev)
 		goto err;
 	}
 
-	size = (res->end-res->start)+1;
+	size = resource_size(res);
 
 	pd->ioarea = request_mem_region(res->start, size, dev->name);
 	if (pd->ioarea == NULL) {
@@ -156,7 +156,6 @@ static int simtec_i2c_remove(struct platform_device *dev)
 	return 0;
 }
 
-
 /* device driver */
 
 static struct platform_driver simtec_i2c_driver = {
@@ -168,19 +167,9 @@ static struct platform_driver simtec_i2c_driver = {
 	.remove		= simtec_i2c_remove,
 };
 
-static int __init i2c_adap_simtec_init(void)
-{
-	return platform_driver_register(&simtec_i2c_driver);
-}
-
-static void __exit i2c_adap_simtec_exit(void)
-{
-	platform_driver_unregister(&simtec_i2c_driver);
-}
-
-module_init(i2c_adap_simtec_init);
-module_exit(i2c_adap_simtec_exit);
+module_platform_driver(simtec_i2c_driver);
 
 MODULE_DESCRIPTION("Simtec Generic I2C Bus driver");
 MODULE_AUTHOR("Ben Dooks <ben@simtec.co.uk>");
 MODULE_LICENSE("GPL");
+MODULE_ALIAS("platform:simtec-i2c");

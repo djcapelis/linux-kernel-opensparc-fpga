@@ -3,7 +3,7 @@
  *
  * Board support code for the GLAN Tank.
  *
- * Copyright (C) 2006 Martin Michlmayr <tbm@cyrius.com>
+ * Copyright (C) 2006, 2007 Martin Michlmayr <tbm@cyrius.com>
  * Copyright (C) 2006 Lennert Buytenhek <buytenh@wantstofly.org>
  *
  * This program is free software; you can redistribute it and/or modify it
@@ -14,16 +14,18 @@
 
 #include <linux/mm.h>
 #include <linux/init.h>
+#include <linux/f75375s.h>
 #include <linux/kernel.h>
 #include <linux/pci.h>
+#include <linux/pm.h>
 #include <linux/string.h>
-#include <linux/slab.h>
 #include <linux/serial_core.h>
 #include <linux/serial_8250.h>
 #include <linux/mtd/physmap.h>
+#include <linux/i2c.h>
 #include <linux/platform_device.h>
-#include <asm/hardware.h>
-#include <asm/io.h>
+#include <linux/io.h>
+#include <mach/hardware.h>
 #include <asm/irq.h>
 #include <asm/mach/arch.h>
 #include <asm/mach/map.h>
@@ -31,7 +33,7 @@
 #include <asm/mach/time.h>
 #include <asm/mach-types.h>
 #include <asm/page.h>
-#include <asm/arch/time.h>
+#include <mach/time.h>
 
 /*
  * GLAN Tank timer tick configuration.
@@ -44,7 +46,6 @@ static void __init glantank_timer_init(void)
 
 static struct sys_timer glantank_timer = {
 	.init		= glantank_timer_init,
-	.offset		= iop_gettimeoffset,
 };
 
 
@@ -76,7 +77,7 @@ void __init glantank_map_io(void)
 #define INTD	IRQ_IOP32X_XINT3
 
 static int __init
-glantank_pci_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
+glantank_pci_map_irq(const struct pci_dev *dev, u8 slot, u8 pin)
 {
 	static int pci_irq_table[][4] = {
 		/*
@@ -95,11 +96,10 @@ glantank_pci_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
 }
 
 static struct hw_pci glantank_pci __initdata = {
-	.swizzle	= pci_std_swizzle,
 	.nr_controllers = 1,
+	.ops		= &iop3xx_ops,
 	.setup		= iop3xx_pci_setup,
 	.preinit	= iop3xx_pci_preinit,
-	.scan		= iop3xx_pci_scan_bus,
 	.map_irq	= glantank_pci_map_irq,
 };
 
@@ -118,7 +118,7 @@ subsys_initcall(glantank_pci_init);
  * GLAN Tank machine initialization.
  */
 static struct physmap_flash_data glantank_flash_data = {
-	.width		= 1,
+	.width		= 2,
 };
 
 static struct resource glantank_flash_resource = {
@@ -166,9 +166,24 @@ static struct platform_device glantank_serial_device = {
 	.resource	= &glantank_uart_resource,
 };
 
+static struct f75375s_platform_data glantank_f75375s = {
+	.pwm		= { 255, 255 },
+	.pwm_enable	= { 0, 0 },
+};
+
+static struct i2c_board_info __initdata glantank_i2c_devices[] = {
+	{
+		I2C_BOARD_INFO("rs5c372a", 0x32),
+	},
+	{
+		I2C_BOARD_INFO("f75375", 0x2e),
+		.platform_data = &glantank_f75375s,
+	},
+};
+
 static void glantank_power_off(void)
 {
-	__raw_writeb(0x01, 0xfe8d0004);
+	__raw_writeb(0x01, IOMEM(0xfe8d0004));
 
 	while (1)
 		;
@@ -180,17 +195,21 @@ static void __init glantank_init_machine(void)
 	platform_device_register(&iop3xx_i2c1_device);
 	platform_device_register(&glantank_flash_device);
 	platform_device_register(&glantank_serial_device);
+	platform_device_register(&iop3xx_dma_0_channel);
+	platform_device_register(&iop3xx_dma_1_channel);
+
+	i2c_register_board_info(0, glantank_i2c_devices,
+		ARRAY_SIZE(glantank_i2c_devices));
 
 	pm_power_off = glantank_power_off;
 }
 
 MACHINE_START(GLANTANK, "GLAN Tank")
 	/* Maintainer: Lennert Buytenhek <buytenh@wantstofly.org> */
-	.phys_io	= GLANTANK_UART,
-	.io_pg_offst	= ((GLANTANK_UART) >> 18) & 0xfffc,
-	.boot_params	= 0xa0000100,
+	.atag_offset	= 0x100,
 	.map_io		= glantank_map_io,
 	.init_irq	= iop32x_init_irq,
 	.timer		= &glantank_timer,
 	.init_machine	= glantank_init_machine,
+	.restart	= iop3xx_restart,
 MACHINE_END

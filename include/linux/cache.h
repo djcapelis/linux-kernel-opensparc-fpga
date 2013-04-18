@@ -31,7 +31,7 @@
 #ifndef __cacheline_aligned
 #define __cacheline_aligned					\
   __attribute__((__aligned__(SMP_CACHE_BYTES),			\
-		 __section__(".data.cacheline_aligned")))
+		 __section__(".data..cacheline_aligned")))
 #endif /* __cacheline_aligned */
 
 #ifndef __cacheline_aligned_in_smp
@@ -58,6 +58,10 @@
 #else
 #define ____cacheline_internodealigned_in_smp
 #endif
+#endif
+
+#ifndef CONFIG_ARCH_HAS_CACHE_LINE_SIZE
+#define cache_line_size()	L1_CACHE_BYTES
 #endif
 
 #endif /* __LINUX_CACHE_H */

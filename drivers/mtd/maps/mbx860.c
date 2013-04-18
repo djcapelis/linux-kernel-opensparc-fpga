@@ -1,6 +1,4 @@
 /*
- * $Id: mbx860.c,v 1.9 2005/11/07 11:14:27 gleixner Exp $
- *
  * Handle mapping of the flash on MBX860 boards
  *
  * Author:	Anton Todorov
@@ -57,7 +55,7 @@ struct map_info mbx_map = {
 	.bankwidth = 4,
 };
 
-int __init init_mbx(void)
+static int __init init_mbx(void)
 {
 	printk(KERN_NOTICE "Motorola MBX flash device: 0x%x at 0x%x\n", WINDOW_SIZE*4, WINDOW_ADDR);
 	mbx_map.virt = ioremap(WINDOW_ADDR, WINDOW_SIZE * 4);
@@ -71,8 +69,8 @@ int __init init_mbx(void)
 	mymtd = do_map_probe("jedec_probe", &mbx_map);
 	if (mymtd) {
 		mymtd->owner = THIS_MODULE;
-		add_mtd_device(mymtd);
-                add_mtd_partitions(mymtd, partition_info, NUM_PARTITIONS);
+		mtd_device_register(mymtd, NULL, 0);
+		mtd_device_register(mymtd, partition_info, NUM_PARTITIONS);
 		return 0;
 	}
 
@@ -83,7 +81,7 @@ int __init init_mbx(void)
 static void __exit cleanup_mbx(void)
 {
 	if (mymtd) {
-		del_mtd_device(mymtd);
+		mtd_device_unregister(mymtd);
 		map_destroy(mymtd);
 	}
 	if (mbx_map.virt) {

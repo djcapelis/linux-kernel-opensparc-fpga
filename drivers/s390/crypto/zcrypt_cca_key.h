@@ -1,9 +1,7 @@
 /*
- *  linux/drivers/s390/crypto/zcrypt_cca_key.h
- *
  *  zcrypt 2.1.0
  *
- *  Copyright (C)  2001, 2006 IBM Corporation
+ *  Copyright IBM Corp. 2001, 2006
  *  Author(s): Robert Burroughs
  *	       Eric Rossman (edrossma@us.ibm.com)
  *
@@ -174,7 +172,7 @@ static inline int zcrypt_type6_mex_key_de(struct ica_rsa_modexpo *mex,
 	key->pvtMeHdr = static_pvt_me_hdr;
 	key->pvtMeSec = static_pvt_me_sec;
 	key->pubMeSec = static_pub_me_sec;
-	/**
+	/*
 	 * In a private key, the modulus doesn't appear in the public
 	 * section. So, an arbitrary public exponent of 0x010001 will be
 	 * used.
@@ -338,7 +336,7 @@ static inline int zcrypt_type6_crt_key(struct ica_rsa_modexpo_crt *crt,
 	pub = (struct cca_public_sec *)(key->key_parts + key_len);
 	*pub = static_cca_pub_sec;
 	pub->modulus_bit_len = 8 * crt->inputdatalength;
-	/**
+	/*
 	 * In a private key, the modulus doesn't appear in the public
 	 * section. So, an arbitrary public exponent of 0x010001 will be
 	 * used.

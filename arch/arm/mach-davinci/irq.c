@@ -22,12 +22,12 @@
 #include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/irq.h>
+#include <linux/io.h>
 
-#include <asm/hardware.h>
-#include <asm/io.h>
+#include <mach/hardware.h>
+#include <mach/cputype.h>
+#include <mach/common.h>
 #include <asm/mach/irq.h>
-
-#define IRQ_BIT(irq)		((irq) & 0x1f)
 
 #define FIQ_REG0_OFFSET		0x0000
 #define FIQ_REG1_OFFSET		0x0004
@@ -40,148 +40,45 @@
 #define IRQ_INTPRI0_REG_OFFSET	0x0030
 #define IRQ_INTPRI7_REG_OFFSET	0x004C
 
-static inline unsigned int davinci_irq_readl(int offset)
-{
-	return davinci_readl(DAVINCI_ARM_INTC_BASE + offset);
-}
-
 static inline void davinci_irq_writel(unsigned long value, int offset)
 {
-	davinci_writel(value, DAVINCI_ARM_INTC_BASE + offset);
+	__raw_writel(value, davinci_intc_base + offset);
 }
 
-/* Disable interrupt */
-static void davinci_mask_irq(unsigned int irq)
+static __init void
+davinci_alloc_gc(void __iomem *base, unsigned int irq_start, unsigned int num)
 {
-	unsigned int mask;
-	u32 l;
+	struct irq_chip_generic *gc;
+	struct irq_chip_type *ct;
 
-	mask = 1 << IRQ_BIT(irq);
-
-	if (irq > 31) {
-		l = davinci_irq_readl(IRQ_ENT_REG1_OFFSET);
-		l &= ~mask;
-		davinci_irq_writel(l, IRQ_ENT_REG1_OFFSET);
-	} else {
-		l = davinci_irq_readl(IRQ_ENT_REG0_OFFSET);
-		l &= ~mask;
-		davinci_irq_writel(l, IRQ_ENT_REG0_OFFSET);
+	gc = irq_alloc_generic_chip("AINTC", 1, irq_start, base, handle_edge_irq);
+	if (!gc) {
+		pr_err("%s: irq_alloc_generic_chip for IRQ %u failed\n",
+		       __func__, irq_start);
+		return;
 	}
+
+	ct = gc->chip_types;
+	ct->chip.irq_ack = irq_gc_ack_set_bit;
+	ct->chip.irq_mask = irq_gc_mask_clr_bit;
+	ct->chip.irq_unmask = irq_gc_mask_set_bit;
+
+	ct->regs.ack = IRQ_REG0_OFFSET;
+	ct->regs.mask = IRQ_ENT_REG0_OFFSET;
+	irq_setup_generic_chip(gc, IRQ_MSK(num), IRQ_GC_INIT_MASK_CACHE,
+			       IRQ_NOREQUEST | IRQ_NOPROBE, 0);
 }
-
-/* Enable interrupt */
-static void davinci_unmask_irq(unsigned int irq)
-{
-	unsigned int mask;
-	u32 l;
-
-	mask = 1 << IRQ_BIT(irq);
-
-	if (irq > 31) {
-		l = davinci_irq_readl(IRQ_ENT_REG1_OFFSET);
-		l |= mask;
-		davinci_irq_writel(l, IRQ_ENT_REG1_OFFSET);
-	} else {
-		l = davinci_irq_readl(IRQ_ENT_REG0_OFFSET);
-		l |= mask;
-		davinci_irq_writel(l, IRQ_ENT_REG0_OFFSET);
-	}
-}
-
-/* EOI interrupt */
-static void davinci_ack_irq(unsigned int irq)
-{
-	unsigned int mask;
-
-	mask = 1 << IRQ_BIT(irq);
-
-	if (irq > 31)
-		davinci_irq_writel(mask, IRQ_REG1_OFFSET);
-	else
-		davinci_irq_writel(mask, IRQ_REG0_OFFSET);
-}
-
-static struct irq_chip davinci_irq_chip_0 = {
-	.name	= "AINTC",
-	.ack	= davinci_ack_irq,
-	.mask	= davinci_mask_irq,
-	.unmask = davinci_unmask_irq,
-};
-
-
-/* FIQ are pri 0-1; otherwise 2-7, with 7 lowest priority */
-static const u8 default_priorities[DAVINCI_N_AINTC_IRQ] __initdata = {
-	[IRQ_VDINT0]		= 2,
-	[IRQ_VDINT1]		= 6,
-	[IRQ_VDINT2]		= 6,
-	[IRQ_HISTINT]		= 6,
-	[IRQ_H3AINT]		= 6,
-	[IRQ_PRVUINT]		= 6,
-	[IRQ_RSZINT]		= 6,
-	[7]			= 7,
-	[IRQ_VENCINT]		= 6,
-	[IRQ_ASQINT]		= 6,
-	[IRQ_IMXINT]		= 6,
-	[IRQ_VLCDINT]		= 6,
-	[IRQ_USBINT]		= 4,
-	[IRQ_EMACINT]		= 4,
-	[14]			= 7,
-	[15]			= 7,
-	[IRQ_CCINT0]		= 5,	/* dma */
-	[IRQ_CCERRINT]		= 5,	/* dma */
-	[IRQ_TCERRINT0]		= 5,	/* dma */
-	[IRQ_TCERRINT]		= 5,	/* dma */
-	[IRQ_PSCIN]		= 7,
-	[21]			= 7,
-	[IRQ_IDE]		= 4,
-	[23]			= 7,
-	[IRQ_MBXINT]		= 7,
-	[IRQ_MBRINT]		= 7,
-	[IRQ_MMCINT]		= 7,
-	[IRQ_SDIOINT]		= 7,
-	[28]			= 7,
-	[IRQ_DDRINT]		= 7,
-	[IRQ_AEMIFINT]		= 7,
-	[IRQ_VLQINT]		= 4,
-	[IRQ_TINT0_TINT12]	= 2,	/* clockevent */
-	[IRQ_TINT0_TINT34]	= 2,	/* clocksource */
-	[IRQ_TINT1_TINT12]	= 7,	/* DSP timer */
-	[IRQ_TINT1_TINT34]	= 7,	/* system tick */
-	[IRQ_PWMINT0]		= 7,
-	[IRQ_PWMINT1]		= 7,
-	[IRQ_PWMINT2]		= 7,
-	[IRQ_I2C]		= 3,
-	[IRQ_UARTINT0]		= 3,
-	[IRQ_UARTINT1]		= 3,
-	[IRQ_UARTINT2]		= 3,
-	[IRQ_SPINT0]		= 3,
-	[IRQ_SPINT1]		= 3,
-	[45]			= 7,
-	[IRQ_DSP2ARM0]		= 4,
-	[IRQ_DSP2ARM1]		= 4,
-	[IRQ_GPIO0]		= 7,
-	[IRQ_GPIO1]		= 7,
-	[IRQ_GPIO2]		= 7,
-	[IRQ_GPIO3]		= 7,
-	[IRQ_GPIO4]		= 7,
-	[IRQ_GPIO5]		= 7,
-	[IRQ_GPIO6]		= 7,
-	[IRQ_GPIO7]		= 7,
-	[IRQ_GPIOBNK0]		= 7,
-	[IRQ_GPIOBNK1]		= 7,
-	[IRQ_GPIOBNK2]		= 7,
-	[IRQ_GPIOBNK3]		= 7,
-	[IRQ_GPIOBNK4]		= 7,
-	[IRQ_COMMTX]		= 7,
-	[IRQ_COMMRX]		= 7,
-	[IRQ_EMUINT]		= 7,
-};
 
 /* ARM Interrupt Controller Initialization */
 void __init davinci_irq_init(void)
 {
-	unsigned i;
-	const u8 *priority = default_priorities;
+	unsigned i, j;
+	const u8 *davinci_def_priorities = davinci_soc_info.intc_irq_prios;
+
+	davinci_intc_type = DAVINCI_INTC_TYPE_AINTC;
+	davinci_intc_base = ioremap(davinci_soc_info.intc_base, SZ_4K);
+	if (WARN_ON(!davinci_intc_base))
+		return;
 
 	/* Clear all interrupt requests */
 	davinci_irq_writel(~0x0, FIQ_REG0_OFFSET);
@@ -206,21 +103,15 @@ void __init davinci_irq_init(void)
 	davinci_irq_writel(~0x0, IRQ_REG1_OFFSET);
 
 	for (i = IRQ_INTPRI0_REG_OFFSET; i <= IRQ_INTPRI7_REG_OFFSET; i += 4) {
-		unsigned	j;
 		u32		pri;
 
-		for (j = 0, pri = 0; j < 32; j += 4, priority++)
-			pri |= (*priority & 0x07) << j;
+		for (j = 0, pri = 0; j < 32; j += 4, davinci_def_priorities++)
+			pri |= (*davinci_def_priorities & 0x07) << j;
 		davinci_irq_writel(pri, i);
 	}
 
-	/* set up genirq dispatch for ARM INTC */
-	for (i = 0; i < DAVINCI_N_AINTC_IRQ; i++) {
-		set_irq_chip(i, &davinci_irq_chip_0);
-		set_irq_flags(i, IRQF_VALID | IRQF_PROBE);
-		if (i != IRQ_TINT1_TINT34)
-			set_irq_handler(i, handle_edge_irq);
-		else
-			set_irq_handler(i, handle_level_irq);
-	}
+	for (i = 0, j = 0; i < davinci_soc_info.intc_irq_num; i += 32, j += 0x04)
+		davinci_alloc_gc(davinci_intc_base + j, i, 32);
+
+	irq_set_handler(IRQ_TINT1_TINT34, handle_level_irq);
 }

@@ -110,7 +110,7 @@ static int skbd_connect(struct serio *serio, struct serio_driver *drv)
 	input_dev->id.version = 0x0100;
 	input_dev->dev.parent = &serio->dev;
 
-	input_dev->evbit[0] = BIT(EV_KEY) | BIT(EV_REP);
+	input_dev->evbit[0] = BIT_MASK(EV_KEY) | BIT_MASK(EV_REP);
 	input_dev->keycode = skbd->keycode;
 	input_dev->keycodesize = sizeof(unsigned char);
 	input_dev->keycodemax = ARRAY_SIZE(skbd_keycode);
@@ -170,15 +170,4 @@ static struct serio_driver skbd_drv = {
 	.disconnect	= skbd_disconnect,
 };
 
-static int __init skbd_init(void)
-{
-	return serio_register_driver(&skbd_drv);
-}
-
-static void __exit skbd_exit(void)
-{
-	serio_unregister_driver(&skbd_drv);
-}
-
-module_init(skbd_init);
-module_exit(skbd_exit);
+module_serio_driver(skbd_drv);

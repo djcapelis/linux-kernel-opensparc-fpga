@@ -20,7 +20,6 @@
 #include <linux/ptrace.h>
 #include <linux/hardirq.h>
 
-#include <asm/system.h>
 #include <asm/pgtable.h>
 #include <asm/uaccess.h>
 #include <asm/gdb-stub.h>
@@ -40,6 +39,7 @@ asmlinkage void do_page_fault(int datammu, unsigned long esr0, unsigned long ear
 	pud_t *pue;
 	pte_t *pte;
 	int write;
+	int fault;
 
 #if 0
 	const char *atxc[16] = {
@@ -162,18 +162,18 @@ asmlinkage void do_page_fault(int datammu, unsigned long esr0, unsigned long ear
 	 * make sure we exit gracefully rather than endlessly redo
 	 * the fault.
 	 */
-	switch (handle_mm_fault(mm, vma, ear0, write)) {
-	case VM_FAULT_MINOR:
-		current->min_flt++;
-		break;
-	case VM_FAULT_MAJOR:
-		current->maj_flt++;
-		break;
-	case VM_FAULT_SIGBUS:
-		goto do_sigbus;
-	default:
-		goto out_of_memory;
+	fault = handle_mm_fault(mm, vma, ear0, write ? FAULT_FLAG_WRITE : 0);
+	if (unlikely(fault & VM_FAULT_ERROR)) {
+		if (fault & VM_FAULT_OOM)
+			goto out_of_memory;
+		else if (fault & VM_FAULT_SIGBUS)
+			goto do_sigbus;
+		BUG();
 	}
+	if (fault & VM_FAULT_MAJOR)
+		current->maj_flt++;
+	else
+		current->min_flt++;
 
 	up_read(&mm->mmap_sem);
 	return;
@@ -256,10 +256,10 @@ asmlinkage void do_page_fault(int datammu, unsigned long esr0, unsigned long ear
  */
  out_of_memory:
 	up_read(&mm->mmap_sem);
-	printk("VM: killing process %s\n", current->comm);
-	if (user_mode(__frame))
-		do_exit(SIGKILL);
-	goto no_context;
+	if (!user_mode(__frame))
+		goto no_context;
+	pagefault_out_of_memory();
+	return;
 
  do_sigbus:
 	up_read(&mm->mmap_sem);

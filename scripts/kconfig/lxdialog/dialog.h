@@ -26,6 +26,12 @@
 #include <string.h>
 #include <stdbool.h>
 
+#ifndef KBUILD_NO_NLS
+# include <libintl.h>
+#else
+# define gettext(Msgid) ((const char *) (Msgid))
+#endif
+
 #ifdef __sun__
 #define CURS_MACROS
 #endif
@@ -138,6 +144,7 @@ struct dialog_info {
  */
 extern struct dialog_info dlg;
 extern char dialog_input_result[];
+extern int saved_x, saved_y;		/* Needed in signal handler in mconf.c */
 
 /*
  * Function prototypes
@@ -187,10 +194,9 @@ int item_is_tag(char tag);
 int on_key_esc(WINDOW *win);
 int on_key_resize(void);
 
-void init_dialog(const char *backtitle);
+int init_dialog(const char *backtitle);
 void set_dialog_backtitle(const char *backtitle);
-void reset_dialog(void);
-void end_dialog(void);
+void end_dialog(int x, int y);
 void attr_clear(WINDOW * win, int height, int width, chtype attr);
 void dialog_clear(void);
 void print_autowrap(WINDOW * win, const char *prompt, int width, int y, int x);
@@ -204,7 +210,13 @@ int first_alpha(const char *string, const char *exempt);
 int dialog_yesno(const char *title, const char *prompt, int height, int width);
 int dialog_msgbox(const char *title, const char *prompt, int height,
 		  int width, int pause);
-int dialog_textbox(const char *title, const char *file, int height, int width);
+
+
+typedef void (*update_text_fn)(char *buf, size_t start, size_t end, void
+			       *_data);
+int dialog_textbox(const char *title, char *tbuf, int initial_height,
+		   int initial_width, int *keys, int *_vscroll, int *_hscroll,
+		   update_text_fn update_text, void *data);
 int dialog_menu(const char *title, const char *prompt,
 		const void *selected, int *s_scroll);
 int dialog_checklist(const char *title, const char *prompt, int height,

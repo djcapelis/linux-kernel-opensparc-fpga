@@ -7,13 +7,13 @@
  * the kernel global pointer and jump to the kernel entry-point.
  */
 
-#include <asm/system.h>
+#include <linux/init.h>
 #include <asm/asm-offsets.h>
+#include <asm/pal.h>
+#include <asm/setup.h>
 
-.globl swapper_pg_dir
+__HEAD
 .globl _stext
-swapper_pg_dir=SWAPPER_PGD
-
 	.set noreorder
 	.globl	__start
 	.ent	__start

@@ -135,7 +135,7 @@ BEGIN_FTR_SECTION
 	DSSALL
 	sync
 END_FTR_SECTION_IFSET(CPU_FTR_ALTIVEC)
-	rlwinm	r9,r1,0,0,31-THREAD_SHIFT	/* current thread_info */
+	CURRENT_THREAD_INFO(r9, r1)
 	lwz	r8,TI_LOCAL_FLAGS(r9)	/* set napping bit */
 	ori	r8,r8,_TLF_NAPPING	/* so when we take an exception */
 	stw	r8,TI_LOCAL_FLAGS(r9)	/* it will return to our caller */
@@ -153,12 +153,12 @@ END_FTR_SECTION_IFSET(CPU_FTR_ALTIVEC)
  * address of current.  R11 points to the exception frame (physical
  * address).  We have to preserve r10.
  */
-_GLOBAL(power_save_6xx_restore)
+_GLOBAL(power_save_ppc32_restore)
 	lwz	r9,_LINK(r11)		/* interrupted in ppc6xx_idle: */
 	stw	r9,_NIP(r11)		/* make it do a blr */
 
 #ifdef CONFIG_SMP
-	mfspr	r12,SPRN_SPRG3
+	CURRENT_THREAD_INFO(r12, r11)
 	lwz	r11,TI_CPU(r12)		/* get cpu number * 4 */
 	slwi	r11,r11,2
 #else

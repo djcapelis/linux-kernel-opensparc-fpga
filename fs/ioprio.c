@@ -19,48 +19,53 @@
  * See also Documentation/block/ioprio.txt
  *
  */
+#include <linux/gfp.h>
 #include <linux/kernel.h>
+#include <linux/export.h>
 #include <linux/ioprio.h>
 #include <linux/blkdev.h>
 #include <linux/capability.h>
 #include <linux/syscalls.h>
 #include <linux/security.h>
+#include <linux/pid_namespace.h>
 
-static int set_task_ioprio(struct task_struct *task, int ioprio)
+int set_task_ioprio(struct task_struct *task, int ioprio)
 {
 	int err;
 	struct io_context *ioc;
+	const struct cred *cred = current_cred(), *tcred;
 
-	if (task->uid != current->euid &&
-	    task->uid != current->uid && !capable(CAP_SYS_NICE))
+	rcu_read_lock();
+	tcred = __task_cred(task);
+	if (!uid_eq(tcred->uid, cred->euid) &&
+	    !uid_eq(tcred->uid, cred->uid) && !capable(CAP_SYS_NICE)) {
+		rcu_read_unlock();
 		return -EPERM;
+	}
+	rcu_read_unlock();
 
 	err = security_task_setioprio(task, ioprio);
 	if (err)
 		return err;
 
-	task_lock(task);
+	ioc = get_task_io_context(task, GFP_ATOMIC, NUMA_NO_NODE);
+	if (ioc) {
+		ioc->ioprio = ioprio;
+		put_io_context(ioc);
+	}
 
-	task->ioprio = ioprio;
-
-	ioc = task->io_context;
-	/* see wmb() in current_io_context() */
-	smp_read_barrier_depends();
-
-	if (ioc)
-		ioc->ioprio_changed = 1;
-
-	task_unlock(task);
-	return 0;
+	return err;
 }
+EXPORT_SYMBOL_GPL(set_task_ioprio);
 
-asmlinkage long sys_ioprio_set(int which, int who, int ioprio)
+SYSCALL_DEFINE3(ioprio_set, int, which, int, who, int, ioprio)
 {
 	int class = IOPRIO_PRIO_CLASS(ioprio);
 	int data = IOPRIO_PRIO_DATA(ioprio);
 	struct task_struct *p, *g;
 	struct user_struct *user;
 	struct pid *pgrp;
+	kuid_t uid;
 	int ret;
 
 	switch (class) {
@@ -74,26 +79,23 @@ asmlinkage long sys_ioprio_set(int which, int who, int ioprio)
 
 			break;
 		case IOPRIO_CLASS_IDLE:
-			if (!capable(CAP_SYS_ADMIN))
-				return -EPERM;
+			break;
+		case IOPRIO_CLASS_NONE:
+			if (data)
+				return -EINVAL;
 			break;
 		default:
 			return -EINVAL;
 	}
 
 	ret = -ESRCH;
-	/*
-	 * We want IOPRIO_WHO_PGRP/IOPRIO_WHO_USER to be "atomic",
-	 * so we can't use rcu_read_lock(). See re-copy of ->ioprio
-	 * in copy_process().
-	 */
-	read_lock(&tasklist_lock);
+	rcu_read_lock();
 	switch (which) {
 		case IOPRIO_WHO_PROCESS:
 			if (!who)
 				p = current;
 			else
-				p = find_task_by_pid(who);
+				p = find_task_by_vpid(who);
 			if (p)
 				ret = set_task_ioprio(p, ioprio);
 			break;
@@ -101,24 +103,27 @@ asmlinkage long sys_ioprio_set(int which, int who, int ioprio)
 			if (!who)
 				pgrp = task_pgrp(current);
 			else
-				pgrp = find_pid(who);
-			do_each_pid_task(pgrp, PIDTYPE_PGID, p) {
+				pgrp = find_vpid(who);
+			do_each_pid_thread(pgrp, PIDTYPE_PGID, p) {
 				ret = set_task_ioprio(p, ioprio);
 				if (ret)
 					break;
-			} while_each_pid_task(pgrp, PIDTYPE_PGID, p);
+			} while_each_pid_thread(pgrp, PIDTYPE_PGID, p);
 			break;
 		case IOPRIO_WHO_USER:
+			uid = make_kuid(current_user_ns(), who);
+			if (!uid_valid(uid))
+				break;
 			if (!who)
-				user = current->user;
+				user = current_user();
 			else
-				user = find_user(who);
+				user = find_user(uid);
 
 			if (!user)
 				break;
 
 			do_each_thread(g, p) {
-				if (p->uid != who)
+				if (!uid_eq(task_uid(p), uid))
 					continue;
 				ret = set_task_ioprio(p, ioprio);
 				if (ret)
@@ -132,7 +137,7 @@ free_uid:
 			ret = -EINVAL;
 	}
 
-	read_unlock(&tasklist_lock);
+	rcu_read_unlock();
 	return ret;
 }
 
@@ -143,7 +148,9 @@ static int get_task_ioprio(struct task_struct *p)
 	ret = security_task_getioprio(p);
 	if (ret)
 		goto out;
-	ret = p->ioprio;
+	ret = IOPRIO_PRIO_VALUE(IOPRIO_CLASS_NONE, IOPRIO_NORM);
+	if (p->io_context)
+		ret = p->io_context->ioprio;
 out:
 	return ret;
 }
@@ -166,21 +173,22 @@ int ioprio_best(unsigned short aprio, unsigned short bprio)
 		return aprio;
 }
 
-asmlinkage long sys_ioprio_get(int which, int who)
+SYSCALL_DEFINE2(ioprio_get, int, which, int, who)
 {
 	struct task_struct *g, *p;
 	struct user_struct *user;
 	struct pid *pgrp;
+	kuid_t uid;
 	int ret = -ESRCH;
 	int tmpio;
 
-	read_lock(&tasklist_lock);
+	rcu_read_lock();
 	switch (which) {
 		case IOPRIO_WHO_PROCESS:
 			if (!who)
 				p = current;
 			else
-				p = find_task_by_pid(who);
+				p = find_task_by_vpid(who);
 			if (p)
 				ret = get_task_ioprio(p);
 			break;
@@ -188,8 +196,8 @@ asmlinkage long sys_ioprio_get(int which, int who)
 			if (!who)
 				pgrp = task_pgrp(current);
 			else
-				pgrp = find_pid(who);
-			do_each_pid_task(pgrp, PIDTYPE_PGID, p) {
+				pgrp = find_vpid(who);
+			do_each_pid_thread(pgrp, PIDTYPE_PGID, p) {
 				tmpio = get_task_ioprio(p);
 				if (tmpio < 0)
 					continue;
@@ -197,19 +205,20 @@ asmlinkage long sys_ioprio_get(int which, int who)
 					ret = tmpio;
 				else
 					ret = ioprio_best(ret, tmpio);
-			} while_each_pid_task(pgrp, PIDTYPE_PGID, p);
+			} while_each_pid_thread(pgrp, PIDTYPE_PGID, p);
 			break;
 		case IOPRIO_WHO_USER:
+			uid = make_kuid(current_user_ns(), who);
 			if (!who)
-				user = current->user;
+				user = current_user();
 			else
-				user = find_user(who);
+				user = find_user(uid);
 
 			if (!user)
 				break;
 
 			do_each_thread(g, p) {
-				if (p->uid != user->uid)
+				if (!uid_eq(task_uid(p), user->uid))
 					continue;
 				tmpio = get_task_ioprio(p);
 				if (tmpio < 0)
@@ -227,7 +236,6 @@ asmlinkage long sys_ioprio_get(int which, int who)
 			ret = -EINVAL;
 	}
 
-	read_unlock(&tasklist_lock);
+	rcu_read_unlock();
 	return ret;
 }
-

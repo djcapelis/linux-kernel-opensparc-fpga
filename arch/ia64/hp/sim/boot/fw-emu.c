@@ -13,6 +13,7 @@
 #include <asm/io.h>
 #include <asm/pal.h>
 #include <asm/sal.h>
+#include <asm/setup.h>
 
 #include "ssc.h"
 
@@ -160,28 +161,19 @@ sal_emulator (long index, unsigned long in1, unsigned long in2,
 	 */
 	status = 0;
 	if (index == SAL_FREQ_BASE) {
-		switch (in1) {
-		      case SAL_FREQ_BASE_PLATFORM:
+		if (in1 == SAL_FREQ_BASE_PLATFORM)
 			r9 = 200000000;
-			break;
-
-		      case SAL_FREQ_BASE_INTERVAL_TIMER:
+		else if (in1 == SAL_FREQ_BASE_INTERVAL_TIMER) {
 			/*
 			 * Is this supposed to be the cr.itc frequency
 			 * or something platform specific?  The SAL
 			 * doc ain't exactly clear on this...
 			 */
 			r9 = 700000000;
-			break;
-
-		      case SAL_FREQ_BASE_REALTIME_CLOCK:
+		} else if (in1 == SAL_FREQ_BASE_REALTIME_CLOCK)
 			r9 = 1;
-			break;
-
-		      default:
+		else
 			status = -1;
-			break;
-		}
 	} else if (index == SAL_SET_VECTORS) {
 		;
 	} else if (index == SAL_GET_STATE_INFO) {
@@ -285,7 +277,7 @@ sys_fw_init (const char *args, int arglen)
 	}
 	cmd_line[arglen] = '\0';
 
-	memset(efi_systab, 0, sizeof(efi_systab));
+	memset(efi_systab, 0, sizeof(*efi_systab));
 	efi_systab->hdr.signature = EFI_SYSTEM_TABLE_SIGNATURE;
 	efi_systab->hdr.revision  = ((1 << 16) | 00);
 	efi_systab->hdr.headersize = sizeof(efi_systab->hdr);
@@ -327,11 +319,6 @@ sys_fw_init (const char *args, int arglen)
 #ifdef CONFIG_IA64_HP_SIM
 	strcpy(sal_systab->oem_id, "Hewlett-Packard");
 	strcpy(sal_systab->product_id, "HP-simulator");
-#endif
-
-#ifdef CONFIG_IA64_SDV
-	strcpy(sal_systab->oem_id, "Intel");
-	strcpy(sal_systab->product_id, "SDV");
 #endif
 
 	/* fill in an entry point: */

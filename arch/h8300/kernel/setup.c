@@ -20,6 +20,7 @@
 #include <linux/sched.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
+#include <linux/mm.h>
 #include <linux/fs.h>
 #include <linux/fb.h>
 #include <linux/console.h>
@@ -34,6 +35,7 @@
 #include <asm/setup.h>
 #include <asm/irq.h>
 #include <asm/pgtable.h>
+#include <asm/sections.h>
 
 #if defined(__H8300H__)
 #define CPU "H8/300H"
@@ -45,7 +47,7 @@
 #include <asm/regs267x.h>
 #endif
 
-#define STUBSIZE 0xc000;
+#define STUBSIZE 0xc000
 
 unsigned long rom_length;
 unsigned long memory_start;
@@ -53,7 +55,6 @@ unsigned long memory_end;
 
 char __initdata command_line[COMMAND_LINE_SIZE];
 
-extern int _stext, _etext, _sdata, _edata, _sbss, _ebss, _end;
 extern int _ramstart, _ramend;
 extern char _target_name[];
 extern void h8300_gpio_init(void);
@@ -118,9 +119,9 @@ void __init setup_arch(char **cmdline_p)
 	    memory_end = CONFIG_BLKDEV_RESERVE_ADDRESS; 
 #endif
 
-	init_mm.start_code = (unsigned long) &_stext;
-	init_mm.end_code = (unsigned long) &_etext;
-	init_mm.end_data = (unsigned long) &_edata;
+	init_mm.start_code = (unsigned long) _stext;
+	init_mm.end_code = (unsigned long) _etext;
+	init_mm.end_data = (unsigned long) _edata;
 	init_mm.brk = (unsigned long) 0; 
 
 #if (defined(CONFIG_H8300H_SIM) || defined(CONFIG_H8S_SIM)) && defined(CONFIG_GDB_MAGICPRINT)
@@ -133,15 +134,12 @@ void __init setup_arch(char **cmdline_p)
 	printk(KERN_INFO "H8/300 series support by Yoshinori Sato <ysato@users.sourceforge.jp>\n");
 
 #ifdef DEBUG
-	printk(KERN_DEBUG "KERNEL -> TEXT=0x%06x-0x%06x DATA=0x%06x-0x%06x "
-		"BSS=0x%06x-0x%06x\n", (int) &_stext, (int) &_etext,
-		(int) &_sdata, (int) &_edata,
-		(int) &_sbss, (int) &_ebss);
-	printk(KERN_DEBUG "KERNEL -> ROMFS=0x%06x-0x%06x MEM=0x%06x-0x%06x "
-		"STACK=0x%06x-0x%06x\n",
-	       (int) &_ebss, (int) memory_start,
-		(int) memory_start, (int) memory_end,
-		(int) memory_end, (int) &_ramend);
+	printk(KERN_DEBUG "KERNEL -> TEXT=0x%p-0x%p DATA=0x%p-0x%p "
+		"BSS=0x%p-0x%p\n", _stext, _etext, _sdata, _edata, __bss_start,
+		__bss_stop);
+	printk(KERN_DEBUG "KERNEL -> ROMFS=0x%p-0x%06lx MEM=0x%06lx-0x%06lx "
+		"STACK=0x%06lx-0x%p\n", __bss_stop, memory_start, memory_start,
+		memory_end, memory_end, &_ramend);
 #endif
 
 #ifdef CONFIG_DEFAULT_CMDLINE
@@ -173,7 +171,7 @@ void __init setup_arch(char **cmdline_p)
 	 * the bootmem bitmap so we then reserve it after freeing it :-)
 	 */
 	free_bootmem(memory_start, memory_end - memory_start);
-	reserve_bootmem(memory_start, bootmap_size);
+	reserve_bootmem(memory_start, bootmap_size, BOOTMEM_DEFAULT);
 	/*
 	 * get kmalloc into gear
 	 */
@@ -236,7 +234,7 @@ static void c_stop(struct seq_file *m, void *v)
 {
 }
 
-struct seq_operations cpuinfo_op = {
+const struct seq_operations cpuinfo_op = {
 	.start	= c_start,
 	.next	= c_next,
 	.stop	= c_stop,

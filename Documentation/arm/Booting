@@ -65,12 +65,18 @@ looks at the connected hardware is beyond the scope of this document.
 The boot loader must ultimately be able to provide a MACH_TYPE_xxx
 value to the kernel. (see linux/arch/arm/tools/mach-types).
 
-
-4. Setup the kernel tagged list
--------------------------------
+4. Setup boot data
+------------------
 
 Existing boot loaders:		OPTIONAL, HIGHLY RECOMMENDED
 New boot loaders:		MANDATORY
+
+The boot loader must provide either a tagged list or a dtb image for
+passing configuration data to the kernel.  The physical address of the
+boot data is passed to the kernel in register r2.
+
+4a. Setup the kernel tagged list
+--------------------------------
 
 The boot loader must create and initialise the kernel tagged list.
 A valid tagged list starts with ATAG_CORE and ends with ATAG_NONE.
@@ -101,6 +107,24 @@ The tagged list must be placed in a region of memory where neither
 the kernel decompressor nor initrd 'bootp' program will overwrite
 it.  The recommended placement is in the first 16KiB of RAM.
 
+4b. Setup the device tree
+-------------------------
+
+The boot loader must load a device tree image (dtb) into system ram
+at a 64bit aligned address and initialize it with the boot data.  The
+dtb format is documented in Documentation/devicetree/booting-without-of.txt.
+The kernel will look for the dtb magic value of 0xd00dfeed at the dtb
+physical address to determine if a dtb has been passed instead of a
+tagged list.
+
+The boot loader must pass at a minimum the size and location of the
+system memory, and the root filesystem location.  The dtb must be
+placed in a region of memory where the kernel decompressor will not
+overwrite it.  The recommended placement is in the first 16KiB of RAM
+with the caveat that it may not be located at physical address 0 since
+the kernel interprets a value of 0 in r2 to mean neither a tagged list
+nor a dtb were passed.
+
 5. Calling the kernel image
 ---------------------------
 
@@ -125,17 +149,43 @@ In either case, the following conditions must be met:
 - CPU register settings
   r0 = 0,
   r1 = machine type number discovered in (3) above.
-  r2 = physical address of tagged list in system RAM.
+  r2 = physical address of tagged list in system RAM, or
+       physical address of device tree block (dtb) in system RAM
 
 - CPU mode
   All forms of interrupts must be disabled (IRQs and FIQs)
-  The CPU must be in SVC mode.  (A special exception exists for Angel)
+
+  For CPUs which do not include the ARM virtualization extensions, the
+  CPU must be in SVC mode.  (A special exception exists for Angel)
+
+  CPUs which include support for the virtualization extensions can be
+  entered in HYP mode in order to enable the kernel to make full use of
+  these extensions.  This is the recommended boot method for such CPUs,
+  unless the virtualisations are already in use by a pre-installed
+  hypervisor.
+
+  If the kernel is not entered in HYP mode for any reason, it must be
+  entered in SVC mode.
 
 - Caches, MMUs
   The MMU must be off.
   Instruction cache may be on or off.
   Data cache must be off.
 
+  If the kernel is entered in HYP mode, the above requirements apply to
+  the HYP mode configuration in addition to the ordinary PL1 (privileged
+  kernel modes) configuration.  In addition, all traps into the
+  hypervisor must be disabled, and PL1 access must be granted for all
+  peripherals and CPU resources for which this is architecturally
+  possible.  Except for entering in HYP mode, the system configuration
+  should be such that a kernel which does not include support for the
+  virtualization extensions can boot correctly without extra help.
+
 - The boot loader is expected to call the kernel image by jumping
   directly to the first instruction of the kernel image.
 
+  On CPUs supporting the ARM instruction set, the entry must be
+  made in ARM state, even for a Thumb-2 kernel.
+
+  On CPUs supporting only the Thumb instruction set such as
+  Cortex-M class CPUs, the entry must be made in Thumb state.

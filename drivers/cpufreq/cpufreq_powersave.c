@@ -10,13 +10,12 @@
  *
  */
 
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/cpufreq.h>
 #include <linux/init.h>
-
-#define dprintk(msg...) \
-	cpufreq_debug_printk(CPUFREQ_DEBUG_GOVERNOR, "powersave", msg)
 
 static int cpufreq_governor_powersave(struct cpufreq_policy *policy,
 					unsigned int event)
@@ -24,7 +23,7 @@ static int cpufreq_governor_powersave(struct cpufreq_policy *policy,
 	switch (event) {
 	case CPUFREQ_GOV_START:
 	case CPUFREQ_GOV_LIMITS:
-		dprintk("setting to %u kHz because of event %u\n",
+		pr_debug("setting to %u kHz because of event %u\n",
 							policy->min, event);
 		__cpufreq_driver_target(policy, policy->min,
 						CPUFREQ_RELATION_L);
@@ -35,12 +34,14 @@ static int cpufreq_governor_powersave(struct cpufreq_policy *policy,
 	return 0;
 }
 
-static struct cpufreq_governor cpufreq_gov_powersave = {
+#ifndef CONFIG_CPU_FREQ_DEFAULT_GOV_POWERSAVE
+static
+#endif
+struct cpufreq_governor cpufreq_gov_powersave = {
 	.name		= "powersave",
 	.governor	= cpufreq_governor_powersave,
 	.owner		= THIS_MODULE,
 };
-
 
 static int __init cpufreq_gov_powersave_init(void)
 {
@@ -58,5 +59,9 @@ MODULE_AUTHOR("Dominik Brodowski <linux@brodo.de>");
 MODULE_DESCRIPTION("CPUfreq policy governor 'powersave'");
 MODULE_LICENSE("GPL");
 
+#ifdef CONFIG_CPU_FREQ_DEFAULT_GOV_POWERSAVE
+fs_initcall(cpufreq_gov_powersave_init);
+#else
 module_init(cpufreq_gov_powersave_init);
+#endif
 module_exit(cpufreq_gov_powersave_exit);

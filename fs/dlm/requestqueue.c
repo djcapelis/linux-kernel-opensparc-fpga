@@ -1,7 +1,7 @@
 /******************************************************************************
 *******************************************************************************
 **
-**  Copyright (C) 2005 Red Hat, Inc.  All rights reserved.
+**  Copyright (C) 2005-2007 Red Hat, Inc.  All rights reserved.
 **
 **  This copyrighted material is made available to anyone wishing to use,
 **  modify, copy, or redistribute it subject to the terms and conditions
@@ -19,8 +19,9 @@
 
 struct rq_entry {
 	struct list_head list;
+	uint32_t recover_seq;
 	int nodeid;
-	char request[1];
+	struct dlm_message request;
 };
 
 /*
@@ -30,42 +31,41 @@ struct rq_entry {
  * lockspace is enabled on some while still suspended on others.
  */
 
-int dlm_add_requestqueue(struct dlm_ls *ls, int nodeid, struct dlm_header *hd)
+void dlm_add_requestqueue(struct dlm_ls *ls, int nodeid, struct dlm_message *ms)
 {
 	struct rq_entry *e;
-	int length = hd->h_length;
-	int rv = 0;
+	int length = ms->m_header.h_length - sizeof(struct dlm_message);
 
-	e = kmalloc(sizeof(struct rq_entry) + length, GFP_KERNEL);
+	e = kmalloc(sizeof(struct rq_entry) + length, GFP_NOFS);
 	if (!e) {
-		log_print("dlm_add_requestqueue: out of memory\n");
-		return 0;
+		log_print("dlm_add_requestqueue: out of memory len %d", length);
+		return;
 	}
 
+	e->recover_seq = ls->ls_recover_seq & 0xFFFFFFFF;
 	e->nodeid = nodeid;
-	memcpy(e->request, hd, length);
-
-	/* We need to check dlm_locking_stopped() after taking the mutex to
-	   avoid a race where dlm_recoverd enables locking and runs
-	   process_requestqueue between our earlier dlm_locking_stopped check
-	   and this addition to the requestqueue. */
+	memcpy(&e->request, ms, ms->m_header.h_length);
 
 	mutex_lock(&ls->ls_requestqueue_mutex);
-	if (dlm_locking_stopped(ls))
-		list_add_tail(&e->list, &ls->ls_requestqueue);
-	else {
-		log_debug(ls, "dlm_add_requestqueue skip from %d", nodeid);
-		kfree(e);
-		rv = -EAGAIN;
-	}
+	list_add_tail(&e->list, &ls->ls_requestqueue);
 	mutex_unlock(&ls->ls_requestqueue_mutex);
-	return rv;
 }
+
+/*
+ * Called by dlm_recoverd to process normal messages saved while recovery was
+ * happening.  Normal locking has been enabled before this is called.  dlm_recv
+ * upon receiving a message, will wait for all saved messages to be drained
+ * here before processing the message it got.  If a new dlm_ls_stop() arrives
+ * while we're processing these saved messages, it may block trying to suspend
+ * dlm_recv if dlm_recv is waiting for us in dlm_wait_requestqueue.  In that
+ * case, we don't abort since locking_stopped is still 0.  If dlm_recv is not
+ * waiting for us, then this processing may be aborted due to locking_stopped.
+ */
 
 int dlm_process_requestqueue(struct dlm_ls *ls)
 {
 	struct rq_entry *e;
-	struct dlm_header *hd;
+	struct dlm_message *ms;
 	int error = 0;
 
 	mutex_lock(&ls->ls_requestqueue_mutex);
@@ -79,14 +79,15 @@ int dlm_process_requestqueue(struct dlm_ls *ls)
 		e = list_entry(ls->ls_requestqueue.next, struct rq_entry, list);
 		mutex_unlock(&ls->ls_requestqueue_mutex);
 
-		hd = (struct dlm_header *) e->request;
-		error = dlm_receive_message(hd, e->nodeid, 1);
+		ms = &e->request;
 
-		if (error == -EINTR) {
-			/* entry is left on requestqueue */
-			log_debug(ls, "process_requestqueue abort eintr");
-			break;
-		}
+		log_limit(ls, "dlm_process_requestqueue msg %d from %d "
+			  "lkid %x remid %x result %d seq %u",
+			  ms->m_type, ms->m_header.h_nodeid,
+			  ms->m_lkid, ms->m_remid, ms->m_result,
+			  e->recover_seq);
+
+		dlm_receive_message_saved(ls, &e->request, e->recover_seq);
 
 		mutex_lock(&ls->ls_requestqueue_mutex);
 		list_del(&e->list);
@@ -106,10 +107,12 @@ int dlm_process_requestqueue(struct dlm_ls *ls)
 
 /*
  * After recovery is done, locking is resumed and dlm_recoverd takes all the
- * saved requests and processes them as they would have been by dlm_recvd.  At
- * the same time, dlm_recvd will start receiving new requests from remote
- * nodes.  We want to delay dlm_recvd processing new requests until
- * dlm_recoverd has finished processing the old saved requests.
+ * saved requests and processes them as they would have been by dlm_recv.  At
+ * the same time, dlm_recv will start receiving new requests from remote nodes.
+ * We want to delay dlm_recv processing new requests until dlm_recoverd has
+ * finished processing the old saved requests.  We don't check for locking
+ * stopped here because dlm_ls_stop won't stop locking until it's suspended us
+ * (dlm_recv).
  */
 
 void dlm_wait_requestqueue(struct dlm_ls *ls)
@@ -117,8 +120,6 @@ void dlm_wait_requestqueue(struct dlm_ls *ls)
 	for (;;) {
 		mutex_lock(&ls->ls_requestqueue_mutex);
 		if (list_empty(&ls->ls_requestqueue))
-			break;
-		if (dlm_locking_stopped(ls))
 			break;
 		mutex_unlock(&ls->ls_requestqueue_mutex);
 		schedule();
@@ -148,35 +149,7 @@ static int purge_request(struct dlm_ls *ls, struct dlm_message *ms, int nodeid)
 	if (!dlm_no_directory(ls))
 		return 0;
 
-	/* with no directory, the master is likely to change as a part of
-	   recovery; requests to/from the defunct master need to be purged */
-
-	switch (type) {
-	case DLM_MSG_REQUEST:
-	case DLM_MSG_CONVERT:
-	case DLM_MSG_UNLOCK:
-	case DLM_MSG_CANCEL:
-		/* we're no longer the master of this resource, the sender
-		   will resend to the new master (see waiter_needs_recovery) */
-
-		if (dlm_hash2nodeid(ls, ms->m_hash) != dlm_our_nodeid())
-			return 1;
-		break;
-
-	case DLM_MSG_REQUEST_REPLY:
-	case DLM_MSG_CONVERT_REPLY:
-	case DLM_MSG_UNLOCK_REPLY:
-	case DLM_MSG_CANCEL_REPLY:
-	case DLM_MSG_GRANT:
-		/* this reply is from the former master of the resource,
-		   we'll resend to the new master if needed */
-
-		if (dlm_hash2nodeid(ls, ms->m_hash) != nodeid)
-			return 1;
-		break;
-	}
-
-	return 0;
+	return 1;
 }
 
 void dlm_purge_requestqueue(struct dlm_ls *ls)
@@ -186,7 +159,7 @@ void dlm_purge_requestqueue(struct dlm_ls *ls)
 
 	mutex_lock(&ls->ls_requestqueue_mutex);
 	list_for_each_entry_safe(e, safe, &ls->ls_requestqueue, list) {
-		ms = (struct dlm_message *) e->request;
+		ms =  &e->request;
 
 		if (purge_request(ls, ms, e->nodeid)) {
 			list_del(&e->list);

@@ -34,8 +34,6 @@
 	 * is changed.
 	 */
 
-        __INIT
-
 	.set	mips64
 	.set	noreorder
 	.set	noat
@@ -50,6 +48,8 @@
 	 * since the final 16 bytes of the exception vector memory
 	 * (0x170-0x17f) are used to preserve k0, k1, and ra.
 	 */
+
+	__CPUINIT
 
 LEAF(except_vec2_sb1)
 	/*
@@ -79,7 +79,7 @@ LEAF(except_vec2_sb1)
 recovered_dcache:
 	/*
 	 * Unlock CacheErr-D (which in turn unlocks CacheErr-DPA).
-	 * Ought to log the occurence of this recovered dcache error.
+	 * Ought to log the occurrence of this recovered dcache error.
 	 */
 	b	recovered
 	 mtc0	$0,C0_CERR_D

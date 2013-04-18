@@ -22,9 +22,9 @@
 
 #include <net/netfilter/nf_nat.h>
 #include <net/netfilter/nf_nat_helper.h>
-#include <net/netfilter/nf_nat_rule.h>
 #include <net/netfilter/nf_conntrack_helper.h>
 #include <net/netfilter/nf_conntrack_expect.h>
+#include <net/netfilter/nf_conntrack_zones.h>
 #include <linux/netfilter/nf_conntrack_proto_gre.h>
 #include <linux/netfilter/nf_conntrack_pptp.h>
 
@@ -37,30 +37,23 @@ MODULE_AUTHOR("Harald Welte <laforge@gnumonks.org>");
 MODULE_DESCRIPTION("Netfilter NAT helper module for PPTP");
 MODULE_ALIAS("ip_nat_pptp");
 
-#if 0
-extern const char *pptp_msg_name[];
-#define DEBUGP(format, args...) printk(KERN_DEBUG "%s:%s: " format, __FILE__, \
-				       __FUNCTION__, ## args)
-#else
-#define DEBUGP(format, args...)
-#endif
-
 static void pptp_nat_expected(struct nf_conn *ct,
 			      struct nf_conntrack_expect *exp)
 {
-	struct nf_conn *master = ct->master;
+	struct net *net = nf_ct_net(ct);
+	const struct nf_conn *master = ct->master;
 	struct nf_conntrack_expect *other_exp;
 	struct nf_conntrack_tuple t;
-	struct nf_ct_pptp_master *ct_pptp_info;
-	struct nf_nat_pptp *nat_pptp_info;
+	const struct nf_ct_pptp_master *ct_pptp_info;
+	const struct nf_nat_pptp *nat_pptp_info;
 	struct nf_nat_range range;
 
-	ct_pptp_info = &nfct_help(master)->help.ct_pptp_info;
+	ct_pptp_info = nfct_help_data(master);
 	nat_pptp_info = &nfct_nat(master)->help.nat_pptp_info;
 
 	/* And here goes the grand finale of corrosion... */
 	if (exp->dir == IP_CT_DIR_ORIGINAL) {
-		DEBUGP("we are PNS->PAC\n");
+		pr_debug("we are PNS->PAC\n");
 		/* therefore, build tuple for PAC->PNS */
 		t.src.l3num = AF_INET;
 		t.src.u3.ip = master->tuplehash[!exp->dir].tuple.src.u3.ip;
@@ -69,7 +62,7 @@ static void pptp_nat_expected(struct nf_conn *ct,
 		t.dst.u.gre.key = ct_pptp_info->pns_call_id;
 		t.dst.protonum = IPPROTO_GRE;
 	} else {
-		DEBUGP("we are PAC->PNS\n");
+		pr_debug("we are PAC->PNS\n");
 		/* build tuple for PNS->PAC */
 		t.src.l3num = AF_INET;
 		t.src.u3.ip = master->tuplehash[!exp->dir].tuple.src.u3.ip;
@@ -79,48 +72,47 @@ static void pptp_nat_expected(struct nf_conn *ct,
 		t.dst.protonum = IPPROTO_GRE;
 	}
 
-	DEBUGP("trying to unexpect other dir: ");
-	NF_CT_DUMP_TUPLE(&t);
-	other_exp = nf_conntrack_expect_find_get(&t);
+	pr_debug("trying to unexpect other dir: ");
+	nf_ct_dump_tuple_ip(&t);
+	other_exp = nf_ct_expect_find_get(net, nf_ct_zone(ct), &t);
 	if (other_exp) {
-		nf_conntrack_unexpect_related(other_exp);
-		nf_conntrack_expect_put(other_exp);
-		DEBUGP("success\n");
+		nf_ct_unexpect_related(other_exp);
+		nf_ct_expect_put(other_exp);
+		pr_debug("success\n");
 	} else {
-		DEBUGP("not found!\n");
+		pr_debug("not found!\n");
 	}
 
 	/* This must be a fresh one. */
 	BUG_ON(ct->status & IPS_NAT_DONE_MASK);
 
 	/* Change src to where master sends to */
-	range.flags = IP_NAT_RANGE_MAP_IPS;
-	range.min_ip = range.max_ip
-		= ct->master->tuplehash[!exp->dir].tuple.dst.u3.ip;
+	range.flags = NF_NAT_RANGE_MAP_IPS;
+	range.min_addr = range.max_addr
+		= ct->master->tuplehash[!exp->dir].tuple.dst.u3;
 	if (exp->dir == IP_CT_DIR_ORIGINAL) {
-		range.flags |= IP_NAT_RANGE_PROTO_SPECIFIED;
-		range.min = range.max = exp->saved_proto;
+		range.flags |= NF_NAT_RANGE_PROTO_SPECIFIED;
+		range.min_proto = range.max_proto = exp->saved_proto;
 	}
-	/* hook doesn't matter, but it has to do source manip */
-	nf_nat_setup_info(ct, &range, NF_IP_POST_ROUTING);
+	nf_nat_setup_info(ct, &range, NF_NAT_MANIP_SRC);
 
 	/* For DST manip, map port here to where it's expected. */
-	range.flags = IP_NAT_RANGE_MAP_IPS;
-	range.min_ip = range.max_ip
-		= ct->master->tuplehash[!exp->dir].tuple.src.u3.ip;
+	range.flags = NF_NAT_RANGE_MAP_IPS;
+	range.min_addr = range.max_addr
+		= ct->master->tuplehash[!exp->dir].tuple.src.u3;
 	if (exp->dir == IP_CT_DIR_REPLY) {
-		range.flags |= IP_NAT_RANGE_PROTO_SPECIFIED;
-		range.min = range.max = exp->saved_proto;
+		range.flags |= NF_NAT_RANGE_PROTO_SPECIFIED;
+		range.min_proto = range.max_proto = exp->saved_proto;
 	}
-	/* hook doesn't matter, but it has to do destination manip */
-	nf_nat_setup_info(ct, &range, NF_IP_PRE_ROUTING);
+	nf_nat_setup_info(ct, &range, NF_NAT_MANIP_DST);
 }
 
 /* outbound packets == from PNS to PAC */
 static int
-pptp_outbound_pkt(struct sk_buff **pskb,
+pptp_outbound_pkt(struct sk_buff *skb,
 		  struct nf_conn *ct,
 		  enum ip_conntrack_info ctinfo,
+		  unsigned int protoff,
 		  struct PptpControlHeader *ctlh,
 		  union pptp_ctrl_union *pptpReq)
 
@@ -131,7 +123,7 @@ pptp_outbound_pkt(struct sk_buff **pskb,
 	__be16 new_callid;
 	unsigned int cid_off;
 
-	ct_pptp_info  = &nfct_help(ct)->help.ct_pptp_info;
+	ct_pptp_info = nfct_help_data(ct);
 	nat_pptp_info = &nfct_nat(ct)->help.nat_pptp_info;
 
 	new_callid = ct_pptp_info->pns_call_id;
@@ -161,9 +153,9 @@ pptp_outbound_pkt(struct sk_buff **pskb,
 		cid_off = offsetof(union pptp_ctrl_union, clrreq.callID);
 		break;
 	default:
-		DEBUGP("unknown outbound packet 0x%04x:%s\n", msg,
-		      (msg <= PPTP_MSG_MAX)?
-		      pptp_msg_name[msg]:pptp_msg_name[0]);
+		pr_debug("unknown outbound packet 0x%04x:%s\n", msg,
+			 msg <= PPTP_MSG_MAX ? pptp_msg_name[msg] :
+					       pptp_msg_name[0]);
 		/* fall through */
 	case PPTP_SET_LINK_INFO:
 		/* only need to NAT in case PAC is behind NAT box */
@@ -179,11 +171,11 @@ pptp_outbound_pkt(struct sk_buff **pskb,
 
 	/* only OUT_CALL_REQUEST, IN_CALL_REPLY, CALL_CLEAR_REQUEST pass
 	 * down to here */
-	DEBUGP("altering call id from 0x%04x to 0x%04x\n",
-		ntohs(REQ_CID(pptpReq, cid_off)), ntohs(new_callid));
+	pr_debug("altering call id from 0x%04x to 0x%04x\n",
+		 ntohs(REQ_CID(pptpReq, cid_off)), ntohs(new_callid));
 
 	/* mangle packet */
-	if (nf_nat_mangle_tcp_packet(pskb, ct, ctinfo,
+	if (nf_nat_mangle_tcp_packet(skb, ct, ctinfo, protoff,
 				     cid_off + sizeof(struct pptp_pkt_hdr) +
 				     sizeof(struct PptpControlHeader),
 				     sizeof(new_callid), (char *)&new_callid,
@@ -196,11 +188,11 @@ static void
 pptp_exp_gre(struct nf_conntrack_expect *expect_orig,
 	     struct nf_conntrack_expect *expect_reply)
 {
-	struct nf_conn *ct = expect_orig->master;
+	const struct nf_conn *ct = expect_orig->master;
 	struct nf_ct_pptp_master *ct_pptp_info;
 	struct nf_nat_pptp *nat_pptp_info;
 
-	ct_pptp_info  = &nfct_help(ct)->help.ct_pptp_info;
+	ct_pptp_info = nfct_help_data(ct);
 	nat_pptp_info = &nfct_nat(ct)->help.nat_pptp_info;
 
 	/* save original PAC call ID in nat_info */
@@ -221,13 +213,14 @@ pptp_exp_gre(struct nf_conntrack_expect *expect_orig,
 
 /* inbound packets == from PAC to PNS */
 static int
-pptp_inbound_pkt(struct sk_buff **pskb,
+pptp_inbound_pkt(struct sk_buff *skb,
 		 struct nf_conn *ct,
 		 enum ip_conntrack_info ctinfo,
+		 unsigned int protoff,
 		 struct PptpControlHeader *ctlh,
 		 union pptp_ctrl_union *pptpReq)
 {
-	struct nf_nat_pptp *nat_pptp_info;
+	const struct nf_nat_pptp *nat_pptp_info;
 	u_int16_t msg;
 	__be16 new_pcid;
 	unsigned int pcid_off;
@@ -255,8 +248,9 @@ pptp_inbound_pkt(struct sk_buff **pskb,
 		pcid_off = offsetof(union pptp_ctrl_union, setlink.peersCallID);
 		break;
 	default:
-		DEBUGP("unknown inbound packet %s\n", (msg <= PPTP_MSG_MAX)?
-			pptp_msg_name[msg]:pptp_msg_name[0]);
+		pr_debug("unknown inbound packet %s\n",
+			 msg <= PPTP_MSG_MAX ? pptp_msg_name[msg] :
+					       pptp_msg_name[0]);
 		/* fall through */
 	case PPTP_START_SESSION_REQUEST:
 	case PPTP_START_SESSION_REPLY:
@@ -272,10 +266,10 @@ pptp_inbound_pkt(struct sk_buff **pskb,
 	 * WAN_ERROR_NOTIFY, CALL_DISCONNECT_NOTIFY pass down here */
 
 	/* mangle packet */
-	DEBUGP("altering peer call id from 0x%04x to 0x%04x\n",
-		ntohs(REQ_CID(pptpReq, pcid_off)), ntohs(new_pcid));
+	pr_debug("altering peer call id from 0x%04x to 0x%04x\n",
+		 ntohs(REQ_CID(pptpReq, pcid_off)), ntohs(new_pcid));
 
-	if (nf_nat_mangle_tcp_packet(pskb, ct, ctinfo,
+	if (nf_nat_mangle_tcp_packet(skb, ct, ctinfo, protoff,
 				     pcid_off + sizeof(struct pptp_pkt_hdr) +
 				     sizeof(struct PptpControlHeader),
 				     sizeof(new_pcid), (char *)&new_pcid,
@@ -288,26 +282,26 @@ static int __init nf_nat_helper_pptp_init(void)
 {
 	nf_nat_need_gre();
 
-	BUG_ON(rcu_dereference(nf_nat_pptp_hook_outbound));
-	rcu_assign_pointer(nf_nat_pptp_hook_outbound, pptp_outbound_pkt);
+	BUG_ON(nf_nat_pptp_hook_outbound != NULL);
+	RCU_INIT_POINTER(nf_nat_pptp_hook_outbound, pptp_outbound_pkt);
 
-	BUG_ON(rcu_dereference(nf_nat_pptp_hook_inbound));
-	rcu_assign_pointer(nf_nat_pptp_hook_inbound, pptp_inbound_pkt);
+	BUG_ON(nf_nat_pptp_hook_inbound != NULL);
+	RCU_INIT_POINTER(nf_nat_pptp_hook_inbound, pptp_inbound_pkt);
 
-	BUG_ON(rcu_dereference(nf_nat_pptp_hook_exp_gre));
-	rcu_assign_pointer(nf_nat_pptp_hook_exp_gre, pptp_exp_gre);
+	BUG_ON(nf_nat_pptp_hook_exp_gre != NULL);
+	RCU_INIT_POINTER(nf_nat_pptp_hook_exp_gre, pptp_exp_gre);
 
-	BUG_ON(rcu_dereference(nf_nat_pptp_hook_expectfn));
-	rcu_assign_pointer(nf_nat_pptp_hook_expectfn, pptp_nat_expected);
+	BUG_ON(nf_nat_pptp_hook_expectfn != NULL);
+	RCU_INIT_POINTER(nf_nat_pptp_hook_expectfn, pptp_nat_expected);
 	return 0;
 }
 
 static void __exit nf_nat_helper_pptp_fini(void)
 {
-	rcu_assign_pointer(nf_nat_pptp_hook_expectfn, NULL);
-	rcu_assign_pointer(nf_nat_pptp_hook_exp_gre, NULL);
-	rcu_assign_pointer(nf_nat_pptp_hook_inbound, NULL);
-	rcu_assign_pointer(nf_nat_pptp_hook_outbound, NULL);
+	RCU_INIT_POINTER(nf_nat_pptp_hook_expectfn, NULL);
+	RCU_INIT_POINTER(nf_nat_pptp_hook_exp_gre, NULL);
+	RCU_INIT_POINTER(nf_nat_pptp_hook_inbound, NULL);
+	RCU_INIT_POINTER(nf_nat_pptp_hook_outbound, NULL);
 	synchronize_rcu();
 }
 

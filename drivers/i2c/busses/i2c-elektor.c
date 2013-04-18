@@ -19,17 +19,16 @@
     Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.		     */
 /* ------------------------------------------------------------------------- */
 
-/* With some changes from Kyösti Mälkki <kmalkki@cc.hut.fi> and even
+/* With some changes from KyÃ¶sti MÃ¤lkki <kmalkki@cc.hut.fi> and even
    Frodo Looijaard <frodol@dds.nl> */
 
-/* Partialy rewriten by Oleg I. Vdovikin for mmapped support of
+/* Partially rewriten by Oleg I. Vdovikin for mmapped support of
    for Alpha Processor Inc. UP-2000(+) boards */
 
 #include <linux/kernel.h>
 #include <linux/ioport.h>
 #include <linux/module.h>
 #include <linux/delay.h>
-#include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/pci.h>
@@ -38,8 +37,8 @@
 #include <linux/isa.h>
 #include <linux/i2c.h>
 #include <linux/i2c-algo-pcf.h>
+#include <linux/io.h>
 
-#include <asm/io.h>
 #include <asm/irq.h>
 
 #include "../algos/i2c-algo-pcf.h"
@@ -104,7 +103,8 @@ static int pcf_isa_getclock(void *data)
 	return (clock);
 }
 
-static void pcf_isa_waitforpin(void) {
+static void pcf_isa_waitforpin(void *data)
+{
 	DEFINE_WAIT(wait);
 	int timeout = 2;
 	unsigned long flags;
@@ -196,19 +196,16 @@ static struct i2c_algo_pcf_data pcf_isa_data = {
 	.getown	    = pcf_isa_getown,
 	.getclock   = pcf_isa_getclock,
 	.waitforpin = pcf_isa_waitforpin,
-	.udelay	    = 10,
-	.timeout    = 100,
 };
 
 static struct i2c_adapter pcf_isa_ops = {
 	.owner		= THIS_MODULE,
-	.class		= I2C_CLASS_HWMON,
-	.id		= I2C_HW_P_ELEK,
+	.class		= I2C_CLASS_HWMON | I2C_CLASS_SPD,
 	.algo_data	= &pcf_isa_data,
 	.name		= "i2c-elektor",
 };
 
-static int __devinit elektor_match(struct device *dev, unsigned int id)
+static int elektor_match(struct device *dev, unsigned int id)
 {
 #ifdef __alpha__
 	/* check to see we have memory mapped PCF8584 connected to the
@@ -267,7 +264,7 @@ static int __devinit elektor_match(struct device *dev, unsigned int id)
 	return 1;
 }
 
-static int __devinit elektor_probe(struct device *dev, unsigned int id)
+static int elektor_probe(struct device *dev, unsigned int id)
 {
 	init_waitqueue_head(&pcf_wait);
 	if (pcf_isa_init())
@@ -296,7 +293,7 @@ static int __devinit elektor_probe(struct device *dev, unsigned int id)
 	return -ENODEV;
 }
 
-static int __devexit elektor_remove(struct device *dev, unsigned int id)
+static int elektor_remove(struct device *dev, unsigned int id)
 {
 	i2c_del_adapter(&pcf_isa_ops);
 
@@ -319,7 +316,7 @@ static int __devexit elektor_remove(struct device *dev, unsigned int id)
 static struct isa_driver i2c_elektor_driver = {
 	.match		= elektor_match,
 	.probe		= elektor_probe,
-	.remove		= __devexit_p(elektor_remove),
+	.remove		= elektor_remove,
 	.driver = {
 		.owner	= THIS_MODULE,
 		.name	= "i2c-elektor",

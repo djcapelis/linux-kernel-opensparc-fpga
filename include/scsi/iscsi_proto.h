@@ -21,13 +21,46 @@
 #ifndef ISCSI_PROTO_H
 #define ISCSI_PROTO_H
 
+#include <linux/types.h>
+#include <scsi/scsi.h>
+
 #define ISCSI_DRAFT20_VERSION	0x00
 
 /* default iSCSI listen port for incoming connections */
 #define ISCSI_LISTEN_PORT	3260
 
+/* iSCSI header length */
+#define ISCSI_HDR_LEN		48
+
+/* iSCSI CRC32C length */
+#define ISCSI_CRC_LEN		4
+
 /* Padding word length */
-#define PAD_WORD_LEN		4
+#define ISCSI_PAD_LEN		4
+
+/*
+ * Serial Number Arithmetic, 32 bits, RFC1982
+ */
+
+static inline int iscsi_sna_lt(u32 n1, u32 n2)
+{
+	return (s32)(n1 - n2) < 0;
+}
+
+static inline int iscsi_sna_lte(u32 n1, u32 n2)
+{
+	return (s32)(n1 - n2) <= 0;
+}
+
+static inline int iscsi_sna_gt(u32 n1, u32 n2)
+{
+	return (s32)(n1 - n2) > 0;
+}
+
+static inline int iscsi_sna_gte(u32 n1, u32 n2)
+{
+	return (s32)(n1 - n2) >= 0;
+}
 
 /*
  * useful common(control and data pathes) macro
@@ -43,8 +76,8 @@
 /* initiator tags; opaque for target */
 typedef uint32_t __bitwise__ itt_t;
 /* below makes sense only for initiator that created this tag */
-#define build_itt(itt, id, age) ((__force itt_t)\
-	((itt) | ((id) << ISCSI_CID_SHIFT) | ((age) << ISCSI_AGE_SHIFT)))
+#define build_itt(itt, age) ((__force itt_t)\
+	((itt) | ((age) << ISCSI_AGE_SHIFT)))
 #define get_itt(itt) ((__force uint32_t)(itt_t)(itt) & ISCSI_ITT_MASK)
 #define RESERVED_ITT ((__force itt_t)0xffffffff)
 
@@ -57,7 +90,7 @@ struct iscsi_hdr {
 	uint8_t		rsvd2[2];
 	uint8_t		hlength;	/* AHSs total length */
 	uint8_t		dlength[3];	/* Data length */
-	uint8_t		lun[8];
+	struct scsi_lun	lun;
 	itt_t		itt;		/* Initiator Task Tag, opaque for target */
 	__be32		ttt;		/* Target Task Tag */
 	__be32		statsn;
@@ -110,20 +143,21 @@ struct iscsi_ahs_hdr {
 
 #define ISCSI_AHSTYPE_CDB		1
 #define ISCSI_AHSTYPE_RLENGTH		2
+#define ISCSI_CDB_SIZE			16
 
 /* iSCSI PDU Header */
-struct iscsi_cmd {
+struct iscsi_scsi_req {
 	uint8_t opcode;
 	uint8_t flags;
 	__be16 rsvd2;
 	uint8_t hlength;
 	uint8_t dlength[3];
-	uint8_t lun[8];
+	struct scsi_lun lun;
 	itt_t	 itt;	/* Initiator Task Tag */
 	__be32 data_length;
 	__be32 cmdsn;
 	__be32 exp_statsn;
-	uint8_t cdb[16];	/* SCSI Command Block */
+	uint8_t cdb[ISCSI_CDB_SIZE];	/* SCSI Command Block */
 	/* Additional Data (Command Dependent) */
 };
 
@@ -147,8 +181,17 @@ struct iscsi_rlength_ahdr {
 	__be32 read_length;
 };
 
+/* Extended CDB AHS */
+struct iscsi_ecdb_ahdr {
+	__be16 ahslength;	/* CDB length - 15, including reserved byte */
+	uint8_t ahstype;
+	uint8_t reserved;
+	/* 4-byte aligned extended CDB spillover */
+	uint8_t ecdb[SCSI_MAX_VARLEN_CDB_SIZE - ISCSI_CDB_SIZE];
+};
+
 /* SCSI Response Header */
-struct iscsi_cmd_rsp {
+struct iscsi_scsi_rsp {
 	uint8_t opcode;
 	uint8_t flags;
 	uint8_t response;
@@ -185,7 +228,7 @@ struct iscsi_async {
 	uint8_t rsvd2[2];
 	uint8_t rsvd3;
 	uint8_t dlength[3];
-	uint8_t lun[8];
+	struct scsi_lun	lun;
 	uint8_t rsvd4[8];
 	__be32	statsn;
 	__be32	exp_cmdsn;
@@ -213,7 +256,7 @@ struct iscsi_nopout {
 	__be16	rsvd2;
 	uint8_t rsvd3;
 	uint8_t dlength[3];
-	uint8_t lun[8];
+	struct scsi_lun	lun;
 	itt_t	 itt;	/* Initiator Task Tag */
 	__be32	ttt;	/* Target Transfer Tag */
 	__be32	cmdsn;
@@ -228,7 +271,7 @@ struct iscsi_nopin {
 	__be16	rsvd2;
 	uint8_t rsvd3;
 	uint8_t dlength[3];
-	uint8_t lun[8];
+	struct scsi_lun	lun;
 	itt_t	 itt;	/* Initiator Task Tag */
 	__be32	ttt;	/* Target Transfer Tag */
 	__be32	statsn;
@@ -244,7 +287,7 @@ struct iscsi_tm {
 	uint8_t rsvd1[2];
 	uint8_t hlength;
 	uint8_t dlength[3];
-	uint8_t lun[8];
+	struct scsi_lun lun;
 	itt_t	 itt;	/* Initiator Task Tag */
 	itt_t	 rtt;	/* Reference Task Tag */
 	__be32	cmdsn;
@@ -265,6 +308,8 @@ struct iscsi_tm {
 #define ISCSI_TM_FUNC_TARGET_WARM_RESET		6
 #define ISCSI_TM_FUNC_TARGET_COLD_RESET		7
 #define ISCSI_TM_FUNC_TASK_REASSIGN		8
+
+#define ISCSI_TM_FUNC_VALUE(hdr) ((hdr)->flags & ISCSI_FLAG_TM_FUNC_MASK)
 
 /* SCSI Task Management Response Header */
 struct iscsi_tm_rsp {
@@ -300,7 +345,7 @@ struct iscsi_r2t_rsp {
 	uint8_t rsvd2[2];
 	uint8_t	hlength;
 	uint8_t	dlength[3];
-	uint8_t lun[8];
+	struct scsi_lun	lun;
 	itt_t	 itt;	/* Initiator Task Tag */
 	__be32	ttt;	/* Target Transfer Tag */
 	__be32	statsn;
@@ -318,7 +363,7 @@ struct iscsi_data {
 	uint8_t rsvd2[2];
 	uint8_t rsvd3;
 	uint8_t dlength[3];
-	uint8_t lun[8];
+	struct scsi_lun lun;
 	itt_t	 itt;
 	__be32	ttt;
 	__be32	rsvd4;
@@ -338,7 +383,7 @@ struct iscsi_data_rsp {
 	uint8_t cmd_status;
 	uint8_t hlength;
 	uint8_t dlength[3];
-	uint8_t lun[8];
+	struct scsi_lun	lun;
 	itt_t	 itt;
 	__be32	ttt;
 	__be32	statsn;
@@ -391,7 +436,7 @@ struct iscsi_text_rsp {
 };
 
 /* Login Header */
-struct iscsi_login {
+struct iscsi_login_req {
 	uint8_t opcode;
 	uint8_t flags;
 	uint8_t max_version;	/* Max. version supported */
@@ -412,7 +457,13 @@ struct iscsi_login {
 #define ISCSI_FLAG_LOGIN_TRANSIT		0x80
 #define ISCSI_FLAG_LOGIN_CONTINUE		0x40
 #define ISCSI_FLAG_LOGIN_CURRENT_STAGE_MASK	0x0C	/* 2 bits */
+#define ISCSI_FLAG_LOGIN_CURRENT_STAGE1		0x04
+#define ISCSI_FLAG_LOGIN_CURRENT_STAGE2		0x08
+#define ISCSI_FLAG_LOGIN_CURRENT_STAGE3		0x0C
 #define ISCSI_FLAG_LOGIN_NEXT_STAGE_MASK	0x03	/* 2 bits */
+#define ISCSI_FLAG_LOGIN_NEXT_STAGE1		0x01
+#define ISCSI_FLAG_LOGIN_NEXT_STAGE2		0x02
+#define ISCSI_FLAG_LOGIN_NEXT_STAGE3		0x03
 
 #define ISCSI_LOGIN_CURRENT_STAGE(flags) \
 	((flags & ISCSI_FLAG_LOGIN_CURRENT_STAGE_MASK) >> 2)
@@ -535,17 +586,25 @@ struct iscsi_logout_rsp {
 struct iscsi_snack {
 	uint8_t opcode;
 	uint8_t flags;
-	uint8_t rsvd2[14];
+	uint8_t rsvd2[2];
+	uint8_t hlength;
+	uint8_t dlength[3];
+	uint8_t lun[8];
 	itt_t	 itt;
+	__be32  ttt;
+	uint8_t rsvd3[4];
+	__be32  exp_statsn;
+	uint8_t rsvd4[8];
 	__be32	begrun;
 	__be32	runlength;
-	__be32	exp_statsn;
-	__be32	rsvd3;
-	__be32	exp_datasn;
-	uint8_t rsvd6[8];
 };
 
 /* SNACK PDU flags */
+#define ISCSI_FLAG_SNACK_TYPE_DATA		0
+#define ISCSI_FLAG_SNACK_TYPE_R2T		0
+#define ISCSI_FLAG_SNACK_TYPE_STATUS		1
+#define ISCSI_FLAG_SNACK_TYPE_DATA_ACK		2
+#define ISCSI_FLAG_SNACK_TYPE_RDATA		3
 #define ISCSI_FLAG_SNACK_TYPE_MASK	0x0F	/* 4 bits */
 
 /* Reject Message Header */
@@ -599,6 +658,10 @@ struct iscsi_reject {
 #define ISCSI_DEF_MAX_BURST_LEN			262144
 #define ISCSI_MIN_MAX_BURST_LEN			512
 #define ISCSI_MAX_MAX_BURST_LEN			16777215
+
+#define ISCSI_DEF_TIME2WAIT			2
+
+#define ISCSI_NAME_LEN				224
 
 /************************* RFC 3720 End *****************************/
 

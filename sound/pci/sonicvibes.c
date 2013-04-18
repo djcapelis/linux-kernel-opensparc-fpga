@@ -1,6 +1,6 @@
 /*
  *  Driver for S3 SonicVibes soundcard
- *  Copyright (c) by Jaroslav Kysela <perex@suse.cz>
+ *  Copyright (c) by Jaroslav Kysela <perex@perex.cz>
  *
  *  BUGS:
  *    It looks like 86c617 rev 3 doesn't supports DDMA buffers above 16MB?
@@ -22,14 +22,13 @@
  *
  */
 
-#include <sound/driver.h>
 #include <linux/delay.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/pci.h>
 #include <linux/slab.h>
 #include <linux/gameport.h>
-#include <linux/moduleparam.h>
+#include <linux/module.h>
 #include <linux/dma-mapping.h>
 
 #include <sound/core.h>
@@ -42,7 +41,7 @@
 
 #include <asm/io.h>
 
-MODULE_AUTHOR("Jaroslav Kysela <perex@suse.cz>");
+MODULE_AUTHOR("Jaroslav Kysela <perex@perex.cz>");
 MODULE_DESCRIPTION("S3 SonicVibes PCI");
 MODULE_LICENSE("GPL");
 MODULE_SUPPORTED_DEVICE("{{S3,SonicVibes PCI}}");
@@ -53,9 +52,9 @@ MODULE_SUPPORTED_DEVICE("{{S3,SonicVibes PCI}}");
 
 static int index[SNDRV_CARDS] = SNDRV_DEFAULT_IDX;	/* Index 0-MAX */
 static char *id[SNDRV_CARDS] = SNDRV_DEFAULT_STR;	/* ID for this card */
-static int enable[SNDRV_CARDS] = SNDRV_DEFAULT_ENABLE_PNP;	/* Enable this card */
-static int reverb[SNDRV_CARDS];
-static int mge[SNDRV_CARDS];
+static bool enable[SNDRV_CARDS] = SNDRV_DEFAULT_ENABLE_PNP;	/* Enable this card */
+static bool reverb[SNDRV_CARDS];
+static bool mge[SNDRV_CARDS];
 static unsigned int dmaio = 0x7a00;	/* DDMA i/o address */
 
 module_param_array(index, int, NULL, 0444);
@@ -243,8 +242,8 @@ struct sonicvibes {
 #endif
 };
 
-static struct pci_device_id snd_sonic_ids[] = {
-	{ 0x5333, 0xca00, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0, },
+static DEFINE_PCI_DEVICE_TABLE(snd_sonic_ids) = {
+	{ PCI_VDEVICE(S3, 0xca00), 0, },
         { 0, }
 };
 
@@ -274,7 +273,8 @@ static inline void snd_sonicvibes_setdmaa(struct sonicvibes * sonic,
 	outl(count, sonic->dmaa_port + SV_DMA_COUNT0);
 	outb(0x18, sonic->dmaa_port + SV_DMA_MODE);
 #if 0
-	printk("program dmaa: addr = 0x%x, paddr = 0x%x\n", addr, inl(sonic->dmaa_port + SV_DMA_ADDR0));
+	printk(KERN_DEBUG "program dmaa: addr = 0x%x, paddr = 0x%x\n",
+	       addr, inl(sonic->dmaa_port + SV_DMA_ADDR0));
 #endif
 }
 
@@ -289,7 +289,8 @@ static inline void snd_sonicvibes_setdmac(struct sonicvibes * sonic,
 	outl(count, sonic->dmac_port + SV_DMA_COUNT0);
 	outb(0x14, sonic->dmac_port + SV_DMA_MODE);
 #if 0
-	printk("program dmac: addr = 0x%x, paddr = 0x%x\n", addr, inl(sonic->dmac_port + SV_DMA_ADDR0));
+	printk(KERN_DEBUG "program dmac: addr = 0x%x, paddr = 0x%x\n",
+	       addr, inl(sonic->dmac_port + SV_DMA_ADDR0));
 #endif
 }
 
@@ -356,71 +357,104 @@ static unsigned char snd_sonicvibes_in(struct sonicvibes * sonic, unsigned char 
 #if 0
 static void snd_sonicvibes_debug(struct sonicvibes * sonic)
 {
-	printk("SV REGS:          INDEX = 0x%02x  ", inb(SV_REG(sonic, INDEX)));
+	printk(KERN_DEBUG
+	       "SV REGS:          INDEX = 0x%02x  ", inb(SV_REG(sonic, INDEX)));
 	printk("                 STATUS = 0x%02x\n", inb(SV_REG(sonic, STATUS)));
-	printk("  0x00: left input      = 0x%02x  ", snd_sonicvibes_in(sonic, 0x00));
+	printk(KERN_DEBUG
+	       "  0x00: left input      = 0x%02x  ", snd_sonicvibes_in(sonic, 0x00));
 	printk("  0x20: synth rate low  = 0x%02x\n", snd_sonicvibes_in(sonic, 0x20));
-	printk("  0x01: right input     = 0x%02x  ", snd_sonicvibes_in(sonic, 0x01));
+	printk(KERN_DEBUG
+	       "  0x01: right input     = 0x%02x  ", snd_sonicvibes_in(sonic, 0x01));
 	printk("  0x21: synth rate high = 0x%02x\n", snd_sonicvibes_in(sonic, 0x21));
-	printk("  0x02: left AUX1       = 0x%02x  ", snd_sonicvibes_in(sonic, 0x02));
+	printk(KERN_DEBUG
+	       "  0x02: left AUX1       = 0x%02x  ", snd_sonicvibes_in(sonic, 0x02));
 	printk("  0x22: ADC clock       = 0x%02x\n", snd_sonicvibes_in(sonic, 0x22));
-	printk("  0x03: right AUX1      = 0x%02x  ", snd_sonicvibes_in(sonic, 0x03));
+	printk(KERN_DEBUG
+	       "  0x03: right AUX1      = 0x%02x  ", snd_sonicvibes_in(sonic, 0x03));
 	printk("  0x23: ADC alt rate    = 0x%02x\n", snd_sonicvibes_in(sonic, 0x23));
-	printk("  0x04: left CD         = 0x%02x  ", snd_sonicvibes_in(sonic, 0x04));
+	printk(KERN_DEBUG
+	       "  0x04: left CD         = 0x%02x  ", snd_sonicvibes_in(sonic, 0x04));
 	printk("  0x24: ADC pll M       = 0x%02x\n", snd_sonicvibes_in(sonic, 0x24));
-	printk("  0x05: right CD        = 0x%02x  ", snd_sonicvibes_in(sonic, 0x05));
+	printk(KERN_DEBUG
+	       "  0x05: right CD        = 0x%02x  ", snd_sonicvibes_in(sonic, 0x05));
 	printk("  0x25: ADC pll N       = 0x%02x\n", snd_sonicvibes_in(sonic, 0x25));
-	printk("  0x06: left line       = 0x%02x  ", snd_sonicvibes_in(sonic, 0x06));
+	printk(KERN_DEBUG
+	       "  0x06: left line       = 0x%02x  ", snd_sonicvibes_in(sonic, 0x06));
 	printk("  0x26: Synth pll M     = 0x%02x\n", snd_sonicvibes_in(sonic, 0x26));
-	printk("  0x07: right line      = 0x%02x  ", snd_sonicvibes_in(sonic, 0x07));
+	printk(KERN_DEBUG
+	       "  0x07: right line      = 0x%02x  ", snd_sonicvibes_in(sonic, 0x07));
 	printk("  0x27: Synth pll N     = 0x%02x\n", snd_sonicvibes_in(sonic, 0x27));
-	printk("  0x08: MIC             = 0x%02x  ", snd_sonicvibes_in(sonic, 0x08));
+	printk(KERN_DEBUG
+	       "  0x08: MIC             = 0x%02x  ", snd_sonicvibes_in(sonic, 0x08));
 	printk("  0x28: ---             = 0x%02x\n", snd_sonicvibes_in(sonic, 0x28));
-	printk("  0x09: Game port       = 0x%02x  ", snd_sonicvibes_in(sonic, 0x09));
+	printk(KERN_DEBUG
+	       "  0x09: Game port       = 0x%02x  ", snd_sonicvibes_in(sonic, 0x09));
 	printk("  0x29: ---             = 0x%02x\n", snd_sonicvibes_in(sonic, 0x29));
-	printk("  0x0a: left synth      = 0x%02x  ", snd_sonicvibes_in(sonic, 0x0a));
+	printk(KERN_DEBUG
+	       "  0x0a: left synth      = 0x%02x  ", snd_sonicvibes_in(sonic, 0x0a));
 	printk("  0x2a: MPU401          = 0x%02x\n", snd_sonicvibes_in(sonic, 0x2a));
-	printk("  0x0b: right synth     = 0x%02x  ", snd_sonicvibes_in(sonic, 0x0b));
+	printk(KERN_DEBUG
+	       "  0x0b: right synth     = 0x%02x  ", snd_sonicvibes_in(sonic, 0x0b));
 	printk("  0x2b: drive ctrl      = 0x%02x\n", snd_sonicvibes_in(sonic, 0x2b));
-	printk("  0x0c: left AUX2       = 0x%02x  ", snd_sonicvibes_in(sonic, 0x0c));
+	printk(KERN_DEBUG
+	       "  0x0c: left AUX2       = 0x%02x  ", snd_sonicvibes_in(sonic, 0x0c));
 	printk("  0x2c: SRS space       = 0x%02x\n", snd_sonicvibes_in(sonic, 0x2c));
-	printk("  0x0d: right AUX2      = 0x%02x  ", snd_sonicvibes_in(sonic, 0x0d));
+	printk(KERN_DEBUG
+	       "  0x0d: right AUX2      = 0x%02x  ", snd_sonicvibes_in(sonic, 0x0d));
 	printk("  0x2d: SRS center      = 0x%02x\n", snd_sonicvibes_in(sonic, 0x2d));
-	printk("  0x0e: left analog     = 0x%02x  ", snd_sonicvibes_in(sonic, 0x0e));
+	printk(KERN_DEBUG
+	       "  0x0e: left analog     = 0x%02x  ", snd_sonicvibes_in(sonic, 0x0e));
 	printk("  0x2e: wave source     = 0x%02x\n", snd_sonicvibes_in(sonic, 0x2e));
-	printk("  0x0f: right analog    = 0x%02x  ", snd_sonicvibes_in(sonic, 0x0f));
+	printk(KERN_DEBUG
+	       "  0x0f: right analog    = 0x%02x  ", snd_sonicvibes_in(sonic, 0x0f));
 	printk("  0x2f: ---             = 0x%02x\n", snd_sonicvibes_in(sonic, 0x2f));
-	printk("  0x10: left PCM        = 0x%02x  ", snd_sonicvibes_in(sonic, 0x10));
+	printk(KERN_DEBUG
+	       "  0x10: left PCM        = 0x%02x  ", snd_sonicvibes_in(sonic, 0x10));
 	printk("  0x30: analog power    = 0x%02x\n", snd_sonicvibes_in(sonic, 0x30));
-	printk("  0x11: right PCM       = 0x%02x  ", snd_sonicvibes_in(sonic, 0x11));
+	printk(KERN_DEBUG
+	       "  0x11: right PCM       = 0x%02x  ", snd_sonicvibes_in(sonic, 0x11));
 	printk("  0x31: analog power    = 0x%02x\n", snd_sonicvibes_in(sonic, 0x31));
-	printk("  0x12: DMA data format = 0x%02x  ", snd_sonicvibes_in(sonic, 0x12));
+	printk(KERN_DEBUG
+	       "  0x12: DMA data format = 0x%02x  ", snd_sonicvibes_in(sonic, 0x12));
 	printk("  0x32: ---             = 0x%02x\n", snd_sonicvibes_in(sonic, 0x32));
-	printk("  0x13: P/C enable      = 0x%02x  ", snd_sonicvibes_in(sonic, 0x13));
+	printk(KERN_DEBUG
+	       "  0x13: P/C enable      = 0x%02x  ", snd_sonicvibes_in(sonic, 0x13));
 	printk("  0x33: ---             = 0x%02x\n", snd_sonicvibes_in(sonic, 0x33));
-	printk("  0x14: U/D button      = 0x%02x  ", snd_sonicvibes_in(sonic, 0x14));
+	printk(KERN_DEBUG
+	       "  0x14: U/D button      = 0x%02x  ", snd_sonicvibes_in(sonic, 0x14));
 	printk("  0x34: ---             = 0x%02x\n", snd_sonicvibes_in(sonic, 0x34));
-	printk("  0x15: revision        = 0x%02x  ", snd_sonicvibes_in(sonic, 0x15));
+	printk(KERN_DEBUG
+	       "  0x15: revision        = 0x%02x  ", snd_sonicvibes_in(sonic, 0x15));
 	printk("  0x35: ---             = 0x%02x\n", snd_sonicvibes_in(sonic, 0x35));
-	printk("  0x16: ADC output ctrl = 0x%02x  ", snd_sonicvibes_in(sonic, 0x16));
+	printk(KERN_DEBUG
+	       "  0x16: ADC output ctrl = 0x%02x  ", snd_sonicvibes_in(sonic, 0x16));
 	printk("  0x36: ---             = 0x%02x\n", snd_sonicvibes_in(sonic, 0x36));
-	printk("  0x17: ---             = 0x%02x  ", snd_sonicvibes_in(sonic, 0x17));
+	printk(KERN_DEBUG
+	       "  0x17: ---             = 0x%02x  ", snd_sonicvibes_in(sonic, 0x17));
 	printk("  0x37: ---             = 0x%02x\n", snd_sonicvibes_in(sonic, 0x37));
-	printk("  0x18: DMA A upper cnt = 0x%02x  ", snd_sonicvibes_in(sonic, 0x18));
+	printk(KERN_DEBUG
+	       "  0x18: DMA A upper cnt = 0x%02x  ", snd_sonicvibes_in(sonic, 0x18));
 	printk("  0x38: ---             = 0x%02x\n", snd_sonicvibes_in(sonic, 0x38));
-	printk("  0x19: DMA A lower cnt = 0x%02x  ", snd_sonicvibes_in(sonic, 0x19));
+	printk(KERN_DEBUG
+	       "  0x19: DMA A lower cnt = 0x%02x  ", snd_sonicvibes_in(sonic, 0x19));
 	printk("  0x39: ---             = 0x%02x\n", snd_sonicvibes_in(sonic, 0x39));
-	printk("  0x1a: ---             = 0x%02x  ", snd_sonicvibes_in(sonic, 0x1a));
+	printk(KERN_DEBUG
+	       "  0x1a: ---             = 0x%02x  ", snd_sonicvibes_in(sonic, 0x1a));
 	printk("  0x3a: ---             = 0x%02x\n", snd_sonicvibes_in(sonic, 0x3a));
-	printk("  0x1b: ---             = 0x%02x  ", snd_sonicvibes_in(sonic, 0x1b));
+	printk(KERN_DEBUG
+	       "  0x1b: ---             = 0x%02x  ", snd_sonicvibes_in(sonic, 0x1b));
 	printk("  0x3b: ---             = 0x%02x\n", snd_sonicvibes_in(sonic, 0x3b));
-	printk("  0x1c: DMA C upper cnt = 0x%02x  ", snd_sonicvibes_in(sonic, 0x1c));
+	printk(KERN_DEBUG
+	       "  0x1c: DMA C upper cnt = 0x%02x  ", snd_sonicvibes_in(sonic, 0x1c));
 	printk("  0x3c: ---             = 0x%02x\n", snd_sonicvibes_in(sonic, 0x3c));
-	printk("  0x1d: DMA C upper cnt = 0x%02x  ", snd_sonicvibes_in(sonic, 0x1d));
+	printk(KERN_DEBUG
+	       "  0x1d: DMA C upper cnt = 0x%02x  ", snd_sonicvibes_in(sonic, 0x1d));
 	printk("  0x3d: ---             = 0x%02x\n", snd_sonicvibes_in(sonic, 0x3d));
-	printk("  0x1e: PCM rate low    = 0x%02x  ", snd_sonicvibes_in(sonic, 0x1e));
+	printk(KERN_DEBUG
+	       "  0x1e: PCM rate low    = 0x%02x  ", snd_sonicvibes_in(sonic, 0x1e));
 	printk("  0x3e: ---             = 0x%02x\n", snd_sonicvibes_in(sonic, 0x3e));
-	printk("  0x1f: PCM rate high   = 0x%02x  ", snd_sonicvibes_in(sonic, 0x1f));
+	printk(KERN_DEBUG
+	       "  0x1f: PCM rate high   = 0x%02x  ", snd_sonicvibes_in(sonic, 0x1f));
 	printk("  0x3f: ---             = 0x%02x\n", snd_sonicvibes_in(sonic, 0x3f));
 }
 
@@ -477,8 +511,8 @@ static void snd_sonicvibes_pll(unsigned int rate,
 	*res_m = m;
 	*res_n = n;
 #if 0
-	printk("metric = %i, xm = %i, xn = %i\n", metric, xm, xn);
-	printk("pll: m = 0x%x, r = 0x%x, n = 0x%x\n", reg, m, r, n);
+	printk(KERN_DEBUG "metric = %i, xm = %i, xn = %i\n", metric, xm, xn);
+	printk(KERN_DEBUG "pll: m = 0x%x, r = 0x%x, n = 0x%x\n", reg, m, r, n);
 #endif
 }
 
@@ -535,8 +569,8 @@ static int snd_sonicvibes_hw_constraint_dac_rate(struct snd_pcm_hw_params *param
 			params->rate_den = 1;
 		} else {
 			snd_sonicvibes_pll(rate, &r, &m, &n);
-			snd_assert((SV_REFFREQUENCY % 16) == 0, return -EINVAL);
-			snd_assert((SV_ADCMULT % 512) == 0, return -EINVAL);
+			snd_BUG_ON(SV_REFFREQUENCY % 16);
+			snd_BUG_ON(SV_ADCMULT % 512);
 			params->rate_num = (SV_REFFREQUENCY/16) * (n+2) * r;
 			params->rate_den = (SV_ADCMULT/512) * (m+2);
 		}
@@ -843,14 +877,16 @@ static struct snd_pcm_ops snd_sonicvibes_capture_ops = {
 	.pointer =	snd_sonicvibes_capture_pointer,
 };
 
-static int __devinit snd_sonicvibes_pcm(struct sonicvibes * sonic, int device, struct snd_pcm ** rpcm)
+static int snd_sonicvibes_pcm(struct sonicvibes *sonic, int device,
+			      struct snd_pcm **rpcm)
 {
 	struct snd_pcm *pcm;
 	int err;
 
 	if ((err = snd_pcm_new(sonic->card, "s3_86c617", device, 1, 1, &pcm)) < 0)
 		return err;
-	snd_assert(pcm != NULL, return -EINVAL);
+	if (snd_BUG_ON(!pcm))
+		return -EINVAL;
 
 	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK, &snd_sonicvibes_playback_ops);
 	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_CAPTURE, &snd_sonicvibes_capture_ops);
@@ -1052,7 +1088,7 @@ static int snd_sonicvibes_put_double(struct snd_kcontrol *kcontrol, struct snd_c
 	return change;
 }
 
-static struct snd_kcontrol_new snd_sonicvibes_controls[] __devinitdata = {
+static struct snd_kcontrol_new snd_sonicvibes_controls[] = {
 SONICVIBES_DOUBLE("Capture Volume", 0, SV_IREG_LEFT_ADC, SV_IREG_RIGHT_ADC, 0, 0, 15, 0),
 SONICVIBES_DOUBLE("Aux Playback Switch", 0, SV_IREG_LEFT_AUX1, SV_IREG_RIGHT_AUX1, 7, 7, 1, 1),
 SONICVIBES_DOUBLE("Aux Playback Volume", 0, SV_IREG_LEFT_AUX1, SV_IREG_RIGHT_AUX1, 0, 0, 31, 1),
@@ -1083,14 +1119,15 @@ static void snd_sonicvibes_master_free(struct snd_kcontrol *kcontrol)
 	sonic->master_volume = NULL;
 }
 
-static int __devinit snd_sonicvibes_mixer(struct sonicvibes * sonic)
+static int snd_sonicvibes_mixer(struct sonicvibes *sonic)
 {
 	struct snd_card *card;
 	struct snd_kcontrol *kctl;
 	unsigned int idx;
 	int err;
 
-	snd_assert(sonic != NULL && sonic->card != NULL, return -EINVAL);
+	if (snd_BUG_ON(!sonic || !sonic->card))
+		return -EINVAL;
 	card = sonic->card;
 	strcpy(card->mixername, "S3 SonicVibes");
 
@@ -1139,7 +1176,7 @@ static void snd_sonicvibes_proc_read(struct snd_info_entry *entry,
 	snd_iprintf(buffer, "MIDI to ext. Tx  : %s\n", tmp & 0x04 ? "on" : "off");
 }
 
-static void __devinit snd_sonicvibes_proc_init(struct sonicvibes * sonic)
+static void snd_sonicvibes_proc_init(struct sonicvibes *sonic)
 {
 	struct snd_info_entry *entry;
 
@@ -1152,10 +1189,10 @@ static void __devinit snd_sonicvibes_proc_init(struct sonicvibes * sonic)
  */
 
 #ifdef SUPPORT_JOYSTICK
-static struct snd_kcontrol_new snd_sonicvibes_game_control __devinitdata =
+static struct snd_kcontrol_new snd_sonicvibes_game_control =
 SONICVIBES_SINGLE("Joystick Speed", 0, SV_IREG_GAME_PORT, 1, 15, 0);
 
-static int __devinit snd_sonicvibes_create_gameport(struct sonicvibes *sonic)
+static int snd_sonicvibes_create_gameport(struct sonicvibes *sonic)
 {
 	struct gameport *gp;
 
@@ -1210,11 +1247,11 @@ static int snd_sonicvibes_dev_free(struct snd_device *device)
 	return snd_sonicvibes_free(sonic);
 }
 
-static int __devinit snd_sonicvibes_create(struct snd_card *card,
-					struct pci_dev *pci,
-					int reverb,
-					int mge,
-					struct sonicvibes ** rsonic)
+static int snd_sonicvibes_create(struct snd_card *card,
+				 struct pci_dev *pci,
+				 int reverb,
+				 int mge,
+				 struct sonicvibes **rsonic)
 {
 	struct sonicvibes *sonic;
 	unsigned int dmaa, dmac;
@@ -1228,8 +1265,8 @@ static int __devinit snd_sonicvibes_create(struct snd_card *card,
 	if ((err = pci_enable_device(pci)) < 0)
 		return err;
 	/* check, if we can restrict PCI DMA transfers to 24 bits */
-        if (pci_set_dma_mask(pci, DMA_24BIT_MASK) < 0 ||
-	    pci_set_consistent_dma_mask(pci, DMA_24BIT_MASK) < 0) {
+        if (pci_set_dma_mask(pci, DMA_BIT_MASK(24)) < 0 ||
+	    pci_set_consistent_dma_mask(pci, DMA_BIT_MASK(24)) < 0) {
 		snd_printk(KERN_ERR "architecture does not support 24bit PCI busmaster DMA\n");
 		pci_disable_device(pci);
                 return -ENXIO;
@@ -1258,7 +1295,7 @@ static int __devinit snd_sonicvibes_create(struct snd_card *card,
 	sonic->game_port = pci_resource_start(pci, 4);
 
 	if (request_irq(pci->irq, snd_sonicvibes_interrupt, IRQF_SHARED,
-			"S3 SonicVibes", sonic)) {
+			KBUILD_MODNAME, sonic)) {
 		snd_printk(KERN_ERR "unable to grab IRQ %d\n", pci->irq);
 		snd_sonicvibes_free(sonic);
 		return -EBUSY;
@@ -1365,7 +1402,7 @@ static int __devinit snd_sonicvibes_create(struct snd_card *card,
  *  MIDI section
  */
 
-static struct snd_kcontrol_new snd_sonicvibes_midi_controls[] __devinitdata = {
+static struct snd_kcontrol_new snd_sonicvibes_midi_controls[] = {
 SONICVIBES_SINGLE("SonicVibes Wave Source RAM", 0, SV_IREG_WAVE_SOURCE, 0, 1, 0),
 SONICVIBES_SINGLE("SonicVibes Wave Source RAM+ROM", 0, SV_IREG_WAVE_SOURCE, 1, 1, 0),
 SONICVIBES_SINGLE("SonicVibes Onboard Synth", 0, SV_IREG_MPU401, 0, 1, 0),
@@ -1386,8 +1423,8 @@ static void snd_sonicvibes_midi_input_close(struct snd_mpu401 * mpu)
 	outb(sonic->irqmask |= SV_MIDI_MASK, SV_REG(sonic, IRQMASK));
 }
 
-static int __devinit snd_sonicvibes_midi(struct sonicvibes * sonic,
-					 struct snd_rawmidi *rmidi)
+static int snd_sonicvibes_midi(struct sonicvibes *sonic,
+			       struct snd_rawmidi *rmidi)
 {
 	struct snd_mpu401 * mpu = rmidi->private_data;
 	struct snd_card *card = sonic->card;
@@ -1405,8 +1442,8 @@ static int __devinit snd_sonicvibes_midi(struct sonicvibes * sonic,
 	return 0;
 }
 
-static int __devinit snd_sonic_probe(struct pci_dev *pci,
-				     const struct pci_device_id *pci_id)
+static int snd_sonic_probe(struct pci_dev *pci,
+			   const struct pci_device_id *pci_id)
 {
 	static int dev;
 	struct snd_card *card;
@@ -1422,9 +1459,9 @@ static int __devinit snd_sonic_probe(struct pci_dev *pci,
 		return -ENOENT;
 	}
  
-	card = snd_card_new(index[dev], id[dev], THIS_MODULE, 0);
-	if (card == NULL)
-		return -ENOMEM;
+	err = snd_card_create(index[dev], id[dev], THIS_MODULE, 0, &card);
+	if (err < 0)
+		return err;
 	for (idx = 0; idx < 5; idx++) {
 		if (pci_resource_start(pci, idx) == 0 ||
 		    !(pci_resource_flags(pci, idx) & IORESOURCE_IO)) {
@@ -1457,9 +1494,10 @@ static int __devinit snd_sonic_probe(struct pci_dev *pci,
 		return err;
 	}
 	if ((err = snd_mpu401_uart_new(card, 0, MPU401_HW_SONICVIBES,
-				       sonic->midi_port, MPU401_INFO_INTEGRATED,
-				       sonic->irq, 0,
-				       &midi_uart)) < 0) {
+				       sonic->midi_port,
+				       MPU401_INFO_INTEGRATED |
+				       MPU401_INFO_IRQ_HOOK,
+				       -1, &midi_uart)) < 0) {
 		snd_card_free(card);
 		return err;
 	}
@@ -1487,28 +1525,17 @@ static int __devinit snd_sonic_probe(struct pci_dev *pci,
 	return 0;
 }
 
-static void __devexit snd_sonic_remove(struct pci_dev *pci)
+static void snd_sonic_remove(struct pci_dev *pci)
 {
 	snd_card_free(pci_get_drvdata(pci));
 	pci_set_drvdata(pci, NULL);
 }
 
-static struct pci_driver driver = {
-	.name = "S3 SonicVibes",
+static struct pci_driver sonicvibes_driver = {
+	.name = KBUILD_MODNAME,
 	.id_table = snd_sonic_ids,
 	.probe = snd_sonic_probe,
-	.remove = __devexit_p(snd_sonic_remove),
+	.remove = snd_sonic_remove,
 };
 
-static int __init alsa_card_sonicvibes_init(void)
-{
-	return pci_register_driver(&driver);
-}
-
-static void __exit alsa_card_sonicvibes_exit(void)
-{
-	pci_unregister_driver(&driver);
-}
-
-module_init(alsa_card_sonicvibes_init)
-module_exit(alsa_card_sonicvibes_exit)
+module_pci_driver(sonicvibes_driver);

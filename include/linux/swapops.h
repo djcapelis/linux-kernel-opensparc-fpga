@@ -1,15 +1,23 @@
+#ifndef _LINUX_SWAPOPS_H
+#define _LINUX_SWAPOPS_H
+
+#include <linux/radix-tree.h>
+#include <linux/bug.h>
+
 /*
  * swapcache pages are stored in the swapper_space radix tree.  We want to
  * get good packing density in that tree, so the index should be dense in
  * the low-order bits.
  *
- * We arrange the `type' and `offset' fields so that `type' is at the five
+ * We arrange the `type' and `offset' fields so that `type' is at the seven
  * high-order bits of the swp_entry_t and `offset' is right-aligned in the
- * remaining bits.
+ * remaining bits.  Although `type' itself needs only five bits, we allow for
+ * shmem/tmpfs to shift it all up a further two bits: see swp_to_radix_entry().
  *
  * swp_entry_t's are *never* stored anywhere in their arch-dependent format.
  */
-#define SWP_TYPE_SHIFT(e)	(sizeof(e.val) * 8 - MAX_SWAPFILES_SHIFT)
+#define SWP_TYPE_SHIFT(e)	((sizeof(e.val) * 8) - \
+			(MAX_SWAPFILES_SHIFT + RADIX_TREE_EXCEPTIONAL_SHIFT))
 #define SWP_OFFSET_MASK(e)	((1UL << SWP_TYPE_SHIFT(e)) - 1)
 
 /*
@@ -42,6 +50,14 @@ static inline pgoff_t swp_offset(swp_entry_t entry)
 	return entry.val & SWP_OFFSET_MASK(entry);
 }
 
+#ifdef CONFIG_MMU
+/* check whether a pte points to a swap entry */
+static inline int is_swap_pte(pte_t pte)
+{
+	return !pte_none(pte) && !pte_present(pte) && !pte_file(pte);
+}
+#endif
+
 /*
  * Convert the arch-dependent pte representation of a swp_entry_t into an
  * arch-independent swp_entry_t.
@@ -66,6 +82,22 @@ static inline pte_t swp_entry_to_pte(swp_entry_t entry)
 	arch_entry = __swp_entry(swp_type(entry), swp_offset(entry));
 	BUG_ON(pte_file(__swp_entry_to_pte(arch_entry)));
 	return __swp_entry_to_pte(arch_entry);
+}
+
+static inline swp_entry_t radix_to_swp_entry(void *arg)
+{
+	swp_entry_t entry;
+
+	entry.val = (unsigned long)arg >> RADIX_TREE_EXCEPTIONAL_SHIFT;
+	return entry;
+}
+
+static inline void *swp_to_radix_entry(swp_entry_t entry)
+{
+	unsigned long value;
+
+	value = entry.val << RADIX_TREE_EXCEPTIONAL_SHIFT;
+	return (void *)(value | RADIX_TREE_EXCEPTIONAL_ENTRY);
 }
 
 #ifdef CONFIG_MIGRATION
@@ -123,3 +155,43 @@ static inline int is_write_migration_entry(swp_entry_t entry)
 
 #endif
 
+#ifdef CONFIG_MEMORY_FAILURE
+/*
+ * Support for hardware poisoned pages
+ */
+static inline swp_entry_t make_hwpoison_entry(struct page *page)
+{
+	BUG_ON(!PageLocked(page));
+	return swp_entry(SWP_HWPOISON, page_to_pfn(page));
+}
+
+static inline int is_hwpoison_entry(swp_entry_t entry)
+{
+	return swp_type(entry) == SWP_HWPOISON;
+}
+#else
+
+static inline swp_entry_t make_hwpoison_entry(struct page *page)
+{
+	return swp_entry(0, 0);
+}
+
+static inline int is_hwpoison_entry(swp_entry_t swp)
+{
+	return 0;
+}
+#endif
+
+#if defined(CONFIG_MEMORY_FAILURE) || defined(CONFIG_MIGRATION)
+static inline int non_swap_entry(swp_entry_t entry)
+{
+	return swp_type(entry) >= MAX_SWAPFILES;
+}
+#else
+static inline int non_swap_entry(swp_entry_t entry)
+{
+	return 0;
+}
+#endif
+
+#endif /* _LINUX_SWAPOPS_H */

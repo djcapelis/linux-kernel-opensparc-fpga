@@ -32,14 +32,17 @@
  * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
  * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
- *
- * $Id: mthca_provider.c 4859 2006-01-09 21:55:10Z roland $
  */
 
 #include <rdma/ib_smi.h>
 #include <rdma/ib_umem.h>
 #include <rdma/ib_user_verbs.h>
+
+#include <linux/sched.h>
+#include <linux/slab.h>
+#include <linux/stat.h>
 #include <linux/mm.h>
+#include <linux/export.h>
 
 #include "mthca_dev.h"
 #include "mthca_cmd.h"
@@ -60,9 +63,7 @@ static int mthca_query_device(struct ib_device *ibdev,
 	struct ib_smp *in_mad  = NULL;
 	struct ib_smp *out_mad = NULL;
 	int err = -ENOMEM;
-	struct mthca_dev* mdev = to_mdev(ibdev);
-
-	u8 status;
+	struct mthca_dev *mdev = to_mdev(ibdev);
 
 	in_mad  = kzalloc(sizeof *in_mad, GFP_KERNEL);
 	out_mad = kmalloc(sizeof *out_mad, GFP_KERNEL);
@@ -77,14 +78,9 @@ static int mthca_query_device(struct ib_device *ibdev,
 	in_mad->attr_id = IB_SMP_ATTR_NODE_INFO;
 
 	err = mthca_MAD_IFC(mdev, 1, 1,
-			    1, NULL, NULL, in_mad, out_mad,
-			    &status);
+			    1, NULL, NULL, in_mad, out_mad);
 	if (err)
 		goto out;
-	if (status) {
-		err = -EINVAL;
-		goto out;
-	}
 
 	props->device_cap_flags    = mdev->device_cap_flags;
 	props->vendor_id           = be32_to_cpup((__be32 *) (out_mad->data + 36)) &
@@ -140,7 +136,6 @@ static int mthca_query_port(struct ib_device *ibdev,
 	struct ib_smp *in_mad  = NULL;
 	struct ib_smp *out_mad = NULL;
 	int err = -ENOMEM;
-	u8 status;
 
 	in_mad  = kzalloc(sizeof *in_mad, GFP_KERNEL);
 	out_mad = kmalloc(sizeof *out_mad, GFP_KERNEL);
@@ -154,14 +149,9 @@ static int mthca_query_port(struct ib_device *ibdev,
 	in_mad->attr_mod = cpu_to_be32(port);
 
 	err = mthca_MAD_IFC(to_mdev(ibdev), 1, 1,
-			    port, NULL, NULL, in_mad, out_mad,
-			    &status);
+			    port, NULL, NULL, in_mad, out_mad);
 	if (err)
 		goto out;
-	if (status) {
-		err = -EINVAL;
-		goto out;
-	}
 
 	props->lid               = be16_to_cpup((__be16 *) (out_mad->data + 16));
 	props->lmc               = out_mad->data[34] & 0x7;
@@ -213,7 +203,6 @@ static int mthca_modify_port(struct ib_device *ibdev,
 	struct mthca_set_ib_param set_ib;
 	struct ib_port_attr attr;
 	int err;
-	u8 status;
 
 	if (mutex_lock_interruptible(&to_mdev(ibdev)->cap_mask_mutex))
 		return -ERESTARTSYS;
@@ -228,14 +217,9 @@ static int mthca_modify_port(struct ib_device *ibdev,
 	set_ib.cap_mask = (attr.port_cap_flags | props->set_port_cap_mask) &
 		~props->clr_port_cap_mask;
 
-	err = mthca_SET_IB(to_mdev(ibdev), &set_ib, port, &status);
+	err = mthca_SET_IB(to_mdev(ibdev), &set_ib, port);
 	if (err)
 		goto out;
-	if (status) {
-		err = -EINVAL;
-		goto out;
-	}
-
 out:
 	mutex_unlock(&to_mdev(ibdev)->cap_mask_mutex);
 	return err;
@@ -247,7 +231,6 @@ static int mthca_query_pkey(struct ib_device *ibdev,
 	struct ib_smp *in_mad  = NULL;
 	struct ib_smp *out_mad = NULL;
 	int err = -ENOMEM;
-	u8 status;
 
 	in_mad  = kzalloc(sizeof *in_mad, GFP_KERNEL);
 	out_mad = kmalloc(sizeof *out_mad, GFP_KERNEL);
@@ -259,14 +242,9 @@ static int mthca_query_pkey(struct ib_device *ibdev,
 	in_mad->attr_mod = cpu_to_be32(index / 32);
 
 	err = mthca_MAD_IFC(to_mdev(ibdev), 1, 1,
-			    port, NULL, NULL, in_mad, out_mad,
-			    &status);
+			    port, NULL, NULL, in_mad, out_mad);
 	if (err)
 		goto out;
-	if (status) {
-		err = -EINVAL;
-		goto out;
-	}
 
 	*pkey = be16_to_cpu(((__be16 *) out_mad->data)[index % 32]);
 
@@ -282,7 +260,6 @@ static int mthca_query_gid(struct ib_device *ibdev, u8 port,
 	struct ib_smp *in_mad  = NULL;
 	struct ib_smp *out_mad = NULL;
 	int err = -ENOMEM;
-	u8 status;
 
 	in_mad  = kzalloc(sizeof *in_mad, GFP_KERNEL);
 	out_mad = kmalloc(sizeof *out_mad, GFP_KERNEL);
@@ -294,14 +271,9 @@ static int mthca_query_gid(struct ib_device *ibdev, u8 port,
 	in_mad->attr_mod = cpu_to_be32(port);
 
 	err = mthca_MAD_IFC(to_mdev(ibdev), 1, 1,
-			    port, NULL, NULL, in_mad, out_mad,
-			    &status);
+			    port, NULL, NULL, in_mad, out_mad);
 	if (err)
 		goto out;
-	if (status) {
-		err = -EINVAL;
-		goto out;
-	}
 
 	memcpy(gid->raw, out_mad->data + 8, 8);
 
@@ -310,14 +282,9 @@ static int mthca_query_gid(struct ib_device *ibdev, u8 port,
 	in_mad->attr_mod = cpu_to_be32(index / 8);
 
 	err = mthca_MAD_IFC(to_mdev(ibdev), 1, 1,
-			    port, NULL, NULL, in_mad, out_mad,
-			    &status);
+			    port, NULL, NULL, in_mad, out_mad);
 	if (err)
 		goto out;
-	if (status) {
-		err = -EINVAL;
-		goto out;
-	}
 
 	memcpy(gid->raw + 8, out_mad->data + (index % 8) * 8, 8);
 
@@ -333,6 +300,9 @@ static struct ib_ucontext *mthca_alloc_ucontext(struct ib_device *ibdev,
 	struct mthca_alloc_ucontext_resp uresp;
 	struct mthca_ucontext           *context;
 	int                              err;
+
+	if (!(to_mdev(ibdev)->active))
+		return ERR_PTR(-EAGAIN);
 
 	memset(&uresp, 0, sizeof uresp);
 
@@ -366,6 +336,8 @@ static struct ib_ucontext *mthca_alloc_ucontext(struct ib_device *ibdev,
 		kfree(context);
 		return ERR_PTR(-EFAULT);
 	}
+
+	context->reg_mr_warned = 0;
 
 	return &context->ibucontext;
 }
@@ -468,6 +440,9 @@ static struct ib_srq *mthca_create_srq(struct ib_pd *pd,
 	struct mthca_srq *srq;
 	int err;
 
+	if (init_attr->srq_type != IB_SRQT_BASIC)
+		return ERR_PTR(-ENOSYS);
+
 	srq = kmalloc(sizeof *srq, GFP_KERNEL);
 	if (!srq)
 		return ERR_PTR(-ENOMEM);
@@ -539,6 +514,9 @@ static struct ib_qp *mthca_create_qp(struct ib_pd *pd,
 	struct mthca_create_qp ucmd;
 	struct mthca_qp *qp;
 	int err;
+
+	if (init_attr->create_flags)
+		return ERR_PTR(-EINVAL);
 
 	switch (init_attr->qp_type) {
 	case IB_QPT_RC:
@@ -791,7 +769,6 @@ static int mthca_resize_cq(struct ib_cq *ibcq, int entries, struct ib_udata *uda
 	struct mthca_cq *cq = to_mcq(ibcq);
 	struct mthca_resize_cq ucmd;
 	u32 lkey;
-	u8 status;
 	int ret;
 
 	if (entries < 1 || entries > dev->limits.max_cqes)
@@ -818,9 +795,7 @@ static int mthca_resize_cq(struct ib_cq *ibcq, int entries, struct ib_udata *uda
 		lkey = ucmd.lkey;
 	}
 
-	ret = mthca_RESIZE_CQ(dev, cq->cqn, lkey, ilog2(entries), &status);
-	if (status)
-		ret = -EINVAL;
+	ret = mthca_RESIZE_CQ(dev, cq->cqn, lkey, ilog2(entries));
 
 	if (ret) {
 		if (cq->resize_buf) {
@@ -923,17 +898,13 @@ static struct ib_mr *mthca_reg_phys_mr(struct ib_pd       *pd,
 	struct mthca_mr *mr;
 	u64 *page_list;
 	u64 total_size;
-	u64 mask;
+	unsigned long mask;
 	int shift;
 	int npages;
 	int err;
 	int i, j, n;
 
-	/* First check that we have enough alignment */
-	if ((*iova_start & ~PAGE_MASK) != (buffer_list[0].addr & ~PAGE_MASK))
-		return ERR_PTR(-EINVAL);
-
-	mask = 0;
+	mask = buffer_list[0].addr ^ *iova_start;
 	total_size = 0;
 	for (i = 0; i < num_phys_buf; ++i) {
 		if (i != 0)
@@ -947,17 +918,7 @@ static struct ib_mr *mthca_reg_phys_mr(struct ib_pd       *pd,
 	if (mask & ~PAGE_MASK)
 		return ERR_PTR(-EINVAL);
 
-	/* Find largest page shift we can use to cover buffers */
-	for (shift = PAGE_SHIFT; shift < 31; ++shift)
-		if (num_phys_buf > 1) {
-			if ((1ULL << shift) & mask)
-				break;
-		} else {
-			if (1ULL << shift >=
-			    buffer_list[0].size +
-			    (buffer_list[0].addr & ((1ULL << shift) - 1)))
-				break;
-		}
+	shift = __ffs(mask | 1 << 31);
 
 	buffer_list[0].size += buffer_list[0].addr & ((1ULL << shift) - 1);
 	buffer_list[0].addr &= ~0ull << shift;
@@ -1017,17 +978,31 @@ static struct ib_mr *mthca_reg_user_mr(struct ib_pd *pd, u64 start, u64 length,
 	struct mthca_dev *dev = to_mdev(pd->device);
 	struct ib_umem_chunk *chunk;
 	struct mthca_mr *mr;
+	struct mthca_reg_mr ucmd;
 	u64 *pages;
 	int shift, n, len;
 	int i, j, k;
 	int err = 0;
 	int write_mtt_size;
 
+	if (udata->inlen - sizeof (struct ib_uverbs_cmd_hdr) < sizeof ucmd) {
+		if (!to_mucontext(pd->uobject->context)->reg_mr_warned) {
+			mthca_warn(dev, "Process '%s' did not pass in MR attrs.\n",
+				   current->comm);
+			mthca_warn(dev, "  Update libmthca to fix this.\n");
+		}
+		++to_mucontext(pd->uobject->context)->reg_mr_warned;
+		ucmd.mr_attrs = 0;
+	} else if (ib_copy_from_udata(&ucmd, udata, sizeof ucmd))
+		return ERR_PTR(-EFAULT);
+
 	mr = kmalloc(sizeof *mr, GFP_KERNEL);
 	if (!mr)
 		return ERR_PTR(-ENOMEM);
 
-	mr->umem = ib_umem_get(pd->uobject->context, start, length, acc);
+	mr->umem = ib_umem_get(pd->uobject->context, start, length, acc,
+			       ucmd.mr_attrs & MTHCA_MR_DMASYNC);
+
 	if (IS_ERR(mr->umem)) {
 		err = PTR_ERR(mr->umem);
 		goto err;
@@ -1152,7 +1127,6 @@ static int mthca_unmap_fmr(struct list_head *fmr_list)
 {
 	struct ib_fmr *fmr;
 	int err;
-	u8 status;
 	struct mthca_dev *mdev = NULL;
 
 	list_for_each_entry(fmr, fmr_list, list) {
@@ -1173,31 +1147,33 @@ static int mthca_unmap_fmr(struct list_head *fmr_list)
 		list_for_each_entry(fmr, fmr_list, list)
 			mthca_tavor_fmr_unmap(mdev, to_mfmr(fmr));
 
-	err = mthca_SYNC_TPT(mdev, &status);
-	if (err)
-		return err;
-	if (status)
-		return -EINVAL;
-	return 0;
+	err = mthca_SYNC_TPT(mdev);
+	return err;
 }
 
-static ssize_t show_rev(struct class_device *cdev, char *buf)
+static ssize_t show_rev(struct device *device, struct device_attribute *attr,
+			char *buf)
 {
-	struct mthca_dev *dev = container_of(cdev, struct mthca_dev, ib_dev.class_dev);
+	struct mthca_dev *dev =
+		container_of(device, struct mthca_dev, ib_dev.dev);
 	return sprintf(buf, "%x\n", dev->rev_id);
 }
 
-static ssize_t show_fw_ver(struct class_device *cdev, char *buf)
+static ssize_t show_fw_ver(struct device *device, struct device_attribute *attr,
+			   char *buf)
 {
-	struct mthca_dev *dev = container_of(cdev, struct mthca_dev, ib_dev.class_dev);
+	struct mthca_dev *dev =
+		container_of(device, struct mthca_dev, ib_dev.dev);
 	return sprintf(buf, "%d.%d.%d\n", (int) (dev->fw_ver >> 32),
 		       (int) (dev->fw_ver >> 16) & 0xffff,
 		       (int) dev->fw_ver & 0xffff);
 }
 
-static ssize_t show_hca(struct class_device *cdev, char *buf)
+static ssize_t show_hca(struct device *device, struct device_attribute *attr,
+			char *buf)
 {
-	struct mthca_dev *dev = container_of(cdev, struct mthca_dev, ib_dev.class_dev);
+	struct mthca_dev *dev =
+		container_of(device, struct mthca_dev, ib_dev.dev);
 	switch (dev->pdev->device) {
 	case PCI_DEVICE_ID_MELLANOX_TAVOR:
 		return sprintf(buf, "MT23108\n");
@@ -1213,22 +1189,24 @@ static ssize_t show_hca(struct class_device *cdev, char *buf)
 	}
 }
 
-static ssize_t show_board(struct class_device *cdev, char *buf)
+static ssize_t show_board(struct device *device, struct device_attribute *attr,
+			  char *buf)
 {
-	struct mthca_dev *dev = container_of(cdev, struct mthca_dev, ib_dev.class_dev);
+	struct mthca_dev *dev =
+		container_of(device, struct mthca_dev, ib_dev.dev);
 	return sprintf(buf, "%.*s\n", MTHCA_BOARD_ID_LEN, dev->board_id);
 }
 
-static CLASS_DEVICE_ATTR(hw_rev,   S_IRUGO, show_rev,    NULL);
-static CLASS_DEVICE_ATTR(fw_ver,   S_IRUGO, show_fw_ver, NULL);
-static CLASS_DEVICE_ATTR(hca_type, S_IRUGO, show_hca,    NULL);
-static CLASS_DEVICE_ATTR(board_id, S_IRUGO, show_board,  NULL);
+static DEVICE_ATTR(hw_rev,   S_IRUGO, show_rev,    NULL);
+static DEVICE_ATTR(fw_ver,   S_IRUGO, show_fw_ver, NULL);
+static DEVICE_ATTR(hca_type, S_IRUGO, show_hca,    NULL);
+static DEVICE_ATTR(board_id, S_IRUGO, show_board,  NULL);
 
-static struct class_device_attribute *mthca_class_attributes[] = {
-	&class_device_attr_hw_rev,
-	&class_device_attr_fw_ver,
-	&class_device_attr_hca_type,
-	&class_device_attr_board_id
+static struct device_attribute *mthca_dev_attributes[] = {
+	&dev_attr_hw_rev,
+	&dev_attr_fw_ver,
+	&dev_attr_hca_type,
+	&dev_attr_board_id
 };
 
 static int mthca_init_node_data(struct mthca_dev *dev)
@@ -1236,7 +1214,6 @@ static int mthca_init_node_data(struct mthca_dev *dev)
 	struct ib_smp *in_mad  = NULL;
 	struct ib_smp *out_mad = NULL;
 	int err = -ENOMEM;
-	u8 status;
 
 	in_mad  = kzalloc(sizeof *in_mad, GFP_KERNEL);
 	out_mad = kmalloc(sizeof *out_mad, GFP_KERNEL);
@@ -1247,29 +1224,21 @@ static int mthca_init_node_data(struct mthca_dev *dev)
 	in_mad->attr_id = IB_SMP_ATTR_NODE_DESC;
 
 	err = mthca_MAD_IFC(dev, 1, 1,
-			    1, NULL, NULL, in_mad, out_mad,
-			    &status);
+			    1, NULL, NULL, in_mad, out_mad);
 	if (err)
 		goto out;
-	if (status) {
-		err = -EINVAL;
-		goto out;
-	}
 
 	memcpy(dev->ib_dev.node_desc, out_mad->data, 64);
 
 	in_mad->attr_id = IB_SMP_ATTR_NODE_INFO;
 
 	err = mthca_MAD_IFC(dev, 1, 1,
-			    1, NULL, NULL, in_mad, out_mad,
-			    &status);
+			    1, NULL, NULL, in_mad, out_mad);
 	if (err)
 		goto out;
-	if (status) {
-		err = -EINVAL;
-		goto out;
-	}
 
+	if (mthca_is_memfree(dev))
+		dev->rev_id = be32_to_cpup((__be32 *) (out_mad->data + 32));
 	memcpy(&dev->ib_dev.node_guid, out_mad->data + 12, 8);
 
 out:
@@ -1384,13 +1353,13 @@ int mthca_register_device(struct mthca_dev *dev)
 
 	mutex_init(&dev->cap_mask_mutex);
 
-	ret = ib_register_device(&dev->ib_dev);
+	ret = ib_register_device(&dev->ib_dev, NULL);
 	if (ret)
 		return ret;
 
-	for (i = 0; i < ARRAY_SIZE(mthca_class_attributes); ++i) {
-		ret = class_device_create_file(&dev->ib_dev.class_dev,
-					       mthca_class_attributes[i]);
+	for (i = 0; i < ARRAY_SIZE(mthca_dev_attributes); ++i) {
+		ret = device_create_file(&dev->ib_dev.dev,
+					 mthca_dev_attributes[i]);
 		if (ret) {
 			ib_unregister_device(&dev->ib_dev);
 			return ret;

@@ -28,7 +28,7 @@
  *     published by the Free Software Foundation; either version 2 of
  *     the License, or (at your option) any later version.
  *
- *     Neither Dag Brattli nor University of Tromsø admit liability nor
+ *     Neither Dag Brattli nor University of TromsÃ¸ admit liability nor
  *     provide warranty for any of this software. This material is
  *     provided "AS-IS" and at no charge.
  *
@@ -40,7 +40,7 @@
  *	o the hash function for ints is pathetic (but could be changed)
  *	o locking is sometime suspicious (especially during enumeration)
  *	o most users have only a few elements (== overhead)
- *	o most users never use seach, so don't benefit from hashing
+ *	o most users never use search, so don't benefit from hashing
  * Problem already fixed :
  *	o not 64 bit compliant (most users do hashv = (int) self)
  *	o hashbin_remove() is broken => use hashbin_remove_this()
@@ -192,6 +192,7 @@
  * Jean II
  */
 #include <linux/module.h>
+#include <linux/slab.h>
 
 #include <net/irda/irda.h>
 #include <net/irda/irqueue.h>
@@ -232,7 +233,7 @@ static __u32 hash( const char* name)
 static void enqueue_first(irda_queue_t **queue, irda_queue_t* element)
 {
 
-	IRDA_DEBUG( 4, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG( 4, "%s()\n", __func__);
 
 	/*
 	 * Check if queue is empty.
@@ -451,7 +452,7 @@ void hashbin_insert(hashbin_t* hashbin, irda_queue_t* entry, long hashv,
 	unsigned long flags = 0;
 	int bin;
 
-	IRDA_DEBUG( 4, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG( 4, "%s()\n", __func__);
 
 	IRDA_ASSERT( hashbin != NULL, return;);
 	IRDA_ASSERT( hashbin->magic == HB_MAGIC, return;);
@@ -522,7 +523,7 @@ void *hashbin_remove_first( hashbin_t *hashbin)
 		 * Dequeue the entry...
 		 */
 		dequeue_general( (irda_queue_t**) &hashbin->hb_queue[ bin ],
-				 (irda_queue_t*) entry );
+				 entry);
 		hashbin->hb_size--;
 		entry->q_next = NULL;
 		entry->q_prev = NULL;
@@ -564,7 +565,7 @@ void* hashbin_remove( hashbin_t* hashbin, long hashv, const char* name)
 	unsigned long flags = 0;
 	irda_queue_t* entry;
 
-	IRDA_DEBUG( 4, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG( 4, "%s()\n", __func__);
 
 	IRDA_ASSERT( hashbin != NULL, return NULL;);
 	IRDA_ASSERT( hashbin->magic == HB_MAGIC, return NULL;);
@@ -614,7 +615,7 @@ void* hashbin_remove( hashbin_t* hashbin, long hashv, const char* name)
 	 */
 	if ( found ) {
 		dequeue_general( (irda_queue_t**) &hashbin->hb_queue[ bin ],
-				 (irda_queue_t*) entry );
+				 entry);
 		hashbin->hb_size--;
 
 		/*
@@ -657,7 +658,7 @@ void* hashbin_remove_this( hashbin_t* hashbin, irda_queue_t* entry)
 	int	bin;
 	long	hashv;
 
-	IRDA_DEBUG( 4, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG( 4, "%s()\n", __func__);
 
 	IRDA_ASSERT( hashbin != NULL, return NULL;);
 	IRDA_ASSERT( hashbin->magic == HB_MAGIC, return NULL;);
@@ -684,7 +685,7 @@ void* hashbin_remove_this( hashbin_t* hashbin, irda_queue_t* entry)
 	 * Dequeue the entry...
 	 */
 	dequeue_general( (irda_queue_t**) &hashbin->hb_queue[ bin ],
-			 (irda_queue_t*) entry );
+			 entry);
 	hashbin->hb_size--;
 	entry->q_next = NULL;
 	entry->q_prev = NULL;
@@ -779,7 +780,7 @@ void* hashbin_lock_find( hashbin_t* hashbin, long hashv, const char* name )
 	/*
 	 * Search for entry
 	 */
-	entry = (irda_queue_t* ) hashbin_find( hashbin, hashv, name );
+	entry = hashbin_find(hashbin, hashv, name);
 
 	/* Release lock */
 	spin_unlock_irqrestore(&hashbin->hb_spinlock, flags);
@@ -812,7 +813,7 @@ void* hashbin_find_next( hashbin_t* hashbin, long hashv, const char* name,
 	 * This allow to check if the current item is still in the
 	 * hashbin or has been removed.
 	 */
-	entry = (irda_queue_t* ) hashbin_find( hashbin, hashv, name );
+	entry = hashbin_find(hashbin, hashv, name);
 
 	/*
 	 * Trick hashbin_get_next() to return what we want

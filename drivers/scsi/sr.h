@@ -20,6 +20,9 @@
 #include <linux/genhd.h>
 #include <linux/kref.h>
 
+#define MAX_RETRIES	3
+#define SR_TIMEOUT	(30 * HZ)
+
 struct scsi_device;
 
 /* The CDROM is fairly slow, so we need a little extra time */
@@ -37,6 +40,14 @@ typedef struct scsi_cd {
 	unsigned xa_flag:1;	/* CD has XA sectors ? */
 	unsigned readcd_known:1;	/* drive supports READ_CD (0xbe) */
 	unsigned readcd_cdda:1;	/* reading audio data using READ_CD */
+	unsigned media_present:1;	/* media is present */
+
+	/* GET_EVENT spurious event handling, blk layer guarantees exclusion */
+	int tur_mismatch;		/* nr of get_event TUR mismatches */
+	bool tur_changed:1;		/* changed according to TUR */
+	bool get_event_changed:1;	/* changed according to GET_EVENT */
+	bool ignore_get_event:1;	/* GET_EVENT is unreliable, use TUR */
+
 	struct cdrom_device_info cdi;
 	/* We hold gendisk and scsi_device references on probe and use
 	 * the refs on this kref to decide when to release them */

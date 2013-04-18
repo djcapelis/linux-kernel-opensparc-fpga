@@ -15,16 +15,23 @@
 #include <linux/cpu.h>
 #include <linux/irq.h>
 #include <linux/efi.h>
+#include <linux/numa.h>
+#include <linux/mmzone.h>
+
+#include <asm/numa.h>
 #include <asm/mmu_context.h>
 #include <asm/setup.h>
 #include <asm/delay.h>
 #include <asm/meminit.h>
+#include <asm/processor.h>
+#include <asm/sal.h>
+#include <asm/mca.h>
 
-typedef NORET_TYPE void (*relocate_new_kernel_t)(
+typedef void (*relocate_new_kernel_t)(
 					unsigned long indirection_page,
 					unsigned long start_address,
 					struct ia64_boot_param *boot_param,
-					unsigned long pal_addr) ATTRIB_NORET;
+					unsigned long pal_addr) __noreturn;
 
 struct kimage *ia64_kimage;
 
@@ -78,15 +85,28 @@ static void ia64_machine_kexec(struct unw_frame_info *info, void *arg)
 	struct kimage *image = arg;
 	relocate_new_kernel_t rnk;
 	void *pal_addr = efi_get_pal_addr();
-	unsigned long code_addr = (unsigned long)page_address(image->control_code_page);
-	unsigned long vector;
+	unsigned long code_addr;
 	int ii;
+	u64 fp, gp;
+	ia64_fptr_t *init_handler = (ia64_fptr_t *)ia64_os_init_on_kdump;
 
 	BUG_ON(!image);
+	code_addr = (unsigned long)page_address(image->control_code_page);
 	if (image->type == KEXEC_TYPE_CRASH) {
 		crash_save_this_cpu();
 		current->thread.ksp = (__u64)info->sw - 16;
+
+		/* Register noop init handler */
+		fp = ia64_tpa(init_handler->fp);
+		gp = ia64_tpa(ia64_getreg(_IA64_REG_GP));
+		ia64_sal_set_vectors(SAL_VECTOR_OS_INIT, fp, gp, 0, fp, gp, 0);
+	} else {
+		/* Unregister init handlers of current kernel */
+		ia64_sal_set_vectors(SAL_VECTOR_OS_INIT, 0, 0, 0, 0, 0, 0);
 	}
+
+	/* Unregister mca handler - No more recovery on current kernel */
+	ia64_sal_set_vectors(SAL_VECTOR_OS_MCA, 0, 0, 0, 0, 0, 0);
 
 	/* Interrupts aren't acceptable while we reboot */
 	local_irq_disable();
@@ -107,11 +127,8 @@ static void ia64_machine_kexec(struct unw_frame_info *info, void *arg)
 	/* unmask TPR and clear any pending interrupts */
 	ia64_setreg(_IA64_REG_CR_TPR, 0);
 	ia64_srlz_d();
-	vector = ia64_get_ivr();
-	while (vector != IA64_SPURIOUS_INT_VECTOR) {
+	while (ia64_get_ivr() != IA64_SPURIOUS_INT_VECTOR)
 		ia64_eoi();
-		vector = ia64_get_ivr();
-	}
 	platform_kernel_launch_event();
 	rnk = (relocate_new_kernel_t)&code_addr;
 	(*rnk)(image->head, image->start, ia64_boot_param,
@@ -125,3 +142,29 @@ void machine_kexec(struct kimage *image)
 	unw_init_running(ia64_machine_kexec, image);
 	for(;;);
 }
+
+void arch_crash_save_vmcoreinfo(void)
+{
+#if defined(CONFIG_DISCONTIGMEM) || defined(CONFIG_SPARSEMEM)
+	VMCOREINFO_SYMBOL(pgdat_list);
+	VMCOREINFO_LENGTH(pgdat_list, MAX_NUMNODES);
+#endif
+#ifdef CONFIG_NUMA
+	VMCOREINFO_SYMBOL(node_memblk);
+	VMCOREINFO_LENGTH(node_memblk, NR_NODE_MEMBLKS);
+	VMCOREINFO_STRUCT_SIZE(node_memblk_s);
+	VMCOREINFO_OFFSET(node_memblk_s, start_paddr);
+	VMCOREINFO_OFFSET(node_memblk_s, size);
+#endif
+#ifdef CONFIG_PGTABLE_3
+	VMCOREINFO_CONFIG(PGTABLE_3);
+#elif defined(CONFIG_PGTABLE_4)
+	VMCOREINFO_CONFIG(PGTABLE_4);
+#endif
+}
+
+unsigned long paddr_vmcoreinfo_note(void)
+{
+	return ia64_tpa((unsigned long)(char *)&vmcoreinfo_note);
+}
+

@@ -7,6 +7,8 @@
  */
 
 #include <linux/bootmem.h>
+#include <linux/export.h>
+#include <linux/slab.h>
 #include <asm/sn/types.h>
 #include <asm/sn/addrs.h>
 #include <asm/sn/sn_feature_sets.h>
@@ -26,7 +28,6 @@
 #include <linux/acpi.h>
 #include <asm/sn/sn2/sn_hwperf.h>
 #include <asm/sn/acpi.h>
-#include "acpi/acglobal.h"
 
 extern void sn_init_cpei_timer(void);
 extern void register_sn_procfs(void);
@@ -120,7 +121,6 @@ sn_pcidev_info_get(struct pci_dev *dev)
  * Additionally note that the struct sn_flush_device_war also has to be
  * removed from arch/ia64/sn/include/xtalk/hubdev.h
  */
-static u8 war_implemented = 0;
 
 static s64 sn_device_fixup_war(u64 nasid, u64 widget, int device,
 			       struct sn_flush_device_common *common)
@@ -129,15 +129,11 @@ static s64 sn_device_fixup_war(u64 nasid, u64 widget, int device,
 	struct sn_flush_device_war *dev_entry;
 	struct ia64_sal_retval isrv = {0,0,0,0};
 
-	if (!war_implemented) {
-		printk(KERN_WARNING "PROM version < 4.50 -- implementing old "
-		       "PROM flush WAR\n");
-		war_implemented = 1;
-	}
+	printk_once(KERN_WARNING
+		"PROM version < 4.50 -- implementing old PROM flush WAR\n");
 
 	war_list = kzalloc(DEV_PER_WIDGET * sizeof(*war_list), GFP_KERNEL);
-	if (!war_list)
-		BUG();
+	BUG_ON(!war_list);
 
 	SAL_CALL_NOLOCK(isrv, SN_SAL_IOIF_GET_WIDGET_DMAFLUSH_LIST,
 			nasid, widget, __pa(war_list), 0, 0, 0 ,0);
@@ -181,23 +177,20 @@ sn_common_hubdev_init(struct hubdev_info *hubdev)
 		sizeof(struct sn_flush_device_kernel *);
 	hubdev->hdi_flush_nasid_list.widget_p =
 		kzalloc(size, GFP_KERNEL);
-	if (!hubdev->hdi_flush_nasid_list.widget_p)
-		BUG();
+	BUG_ON(!hubdev->hdi_flush_nasid_list.widget_p);
 
 	for (widget = 0; widget <= HUB_WIDGET_ID_MAX; widget++) {
 		size = DEV_PER_WIDGET *
 			sizeof(struct sn_flush_device_kernel);
 		sn_flush_device_kernel = kzalloc(size, GFP_KERNEL);
-		if (!sn_flush_device_kernel)
-			BUG();
+		BUG_ON(!sn_flush_device_kernel);
 
 		dev_entry = sn_flush_device_kernel;
 		for (device = 0; device < DEV_PER_WIDGET;
 		     device++, dev_entry++) {
 			size = sizeof(struct sn_flush_device_common);
 			dev_entry->common = kzalloc(size, GFP_KERNEL);
-			if (!dev_entry->common)
-				BUG();
+			BUG_ON(!dev_entry->common);
 			if (sn_prom_feature_available(PRF_DEVICE_FLUSH_LIST))
 				status = sal_get_device_dmaflush_list(
 					     hubdev->hdi_nasid, widget, device,
@@ -236,7 +229,6 @@ void sn_pci_fixup_slot(struct pci_dev *dev, struct pcidev_info *pcidev_info,
 {
 	int segment = pci_domain_nr(dev->bus);
 	struct pcibus_bussoft *bs;
-	struct pci_bus *host_pci_bus;
 	struct pci_dev *host_pci_dev;
 	unsigned int bus_no, devfn;
 
@@ -252,8 +244,7 @@ void sn_pci_fixup_slot(struct pci_dev *dev, struct pcidev_info *pcidev_info,
 
 	bus_no = (pcidev_info->pdi_slot_host_handle >> 32) & 0xff;
 	devfn = pcidev_info->pdi_slot_host_handle & 0xffffffff;
- 	host_pci_bus = pci_find_bus(segment, bus_no);
- 	host_pci_dev = pci_get_slot(host_pci_bus, devfn);
+	host_pci_dev = pci_get_domain_bus_and_slot(segment, bus_no, devfn);
 
 	pcidev_info->host_pci_dev = host_pci_dev;
 	pcidev_info->pdi_linux_pcidev = dev;
@@ -327,8 +318,7 @@ sn_common_bus_fixup(struct pci_bus *bus,
 	 */
 	controller->platform_data = kzalloc(sizeof(struct sn_platform_data),
 					    GFP_KERNEL);
-	if (controller->platform_data == NULL)
-		BUG();
+	BUG_ON(controller->platform_data == NULL);
 	sn_platform_data =
 			(struct sn_platform_data *) controller->platform_data;
 	sn_platform_data->provider_soft = provider_soft;
@@ -347,8 +337,8 @@ sn_common_bus_fixup(struct pci_bus *bus,
 	if (controller->node >= num_online_nodes()) {
 		struct pcibus_bussoft *b = SN_PCIBUS_BUSSOFT(bus);
 
-		printk(KERN_WARNING "Device ASIC=%u XID=%u PBUSNUM=%u"
-		       "L_IO=%lx L_MEM=%lx BASE=%lx\n",
+		printk(KERN_WARNING "Device ASIC=%u XID=%u PBUSNUM=%u "
+		       "L_IO=%llx L_MEM=%llx BASE=%llx\n",
 		       b->bs_asic_type, b->bs_xid, b->bs_persist_busnum,
 		       b->bs_legacy_io, b->bs_legacy_mem, b->bs_base);
 		printk(KERN_WARNING "on node %d but only %d nodes online."
@@ -364,7 +354,7 @@ void sn_bus_store_sysdata(struct pci_dev *dev)
 
 	element = kzalloc(sizeof(struct sysdata_el), GFP_KERNEL);
 	if (!element) {
-		dev_dbg(&dev->dev, "%s: out of memory!\n", __FUNCTION__);
+		dev_dbg(&dev->dev, "%s: out of memory!\n", __func__);
 		return;
 	}
 	element->sysdata = SN_PCIDEV_INFO(dev);
@@ -391,7 +381,7 @@ void sn_bus_free_sysdata(void)
  * hubdev_init_node() - Creates the HUB data structure and link them to it's
  *			own NODE specific data area.
  */
-void hubdev_init_node(nodepda_t * npda, cnodeid_t node)
+void __init hubdev_init_node(nodepda_t * npda, cnodeid_t node)
 {
 	struct hubdev_info *hubdev_info;
 	int size;
@@ -441,11 +431,11 @@ void sn_generate_path(struct pci_bus *pci_bus, char *address)
 	bricktype = MODULE_GET_BTYPE(moduleid);
 	if ((bricktype == L1_BRICKTYPE_191010) ||
 	    (bricktype == L1_BRICKTYPE_1932))
-			sprintf(address, "%s^%d", address, geo_slot(geoid));
+			sprintf(address + strlen(address), "^%d",
+						geo_slot(geoid));
 }
 
-void __devinit
-sn_pci_fixup_bus(struct pci_bus *bus)
+void sn_pci_fixup_bus(struct pci_bus *bus)
 {
 
 	if (SN_ACPI_BASE_SUPPORT())
@@ -473,7 +463,7 @@ sn_io_early_init(void)
 	{
 		struct acpi_table_header *header = NULL;
 
-		acpi_get_table_by_index(ACPI_TABLE_INDEX_DSDT, &header);
+		acpi_get_table(ACPI_SIG_DSDT, 1, &header);
 		BUG_ON(header == NULL);
 		sn_acpi_rev = header->oem_revision;
 	}
@@ -505,7 +495,7 @@ sn_io_early_init(void)
 
 	{
 		struct acpi_table_header *header;
-		(void)acpi_get_table_by_index(ACPI_TABLE_INDEX_DSDT, &header);
+		(void)acpi_get_table(ACPI_SIG_DSDT, 1, &header);
 		printk(KERN_INFO "ACPI  DSDT OEM Rev 0x%x\n",
 			header->oem_revision);
 	}
@@ -545,19 +535,18 @@ sn_io_late_init(void)
 		nasid = NASID_GET(bussoft->bs_base);
 		cnode = nasid_to_cnodeid(nasid);
 		if ((bussoft->bs_asic_type == PCIIO_ASIC_TYPE_TIOCP) ||
-		    (bussoft->bs_asic_type == PCIIO_ASIC_TYPE_TIOCE)) {
-			/* TIO PCI Bridge: find nearest node with CPUs */
+		    (bussoft->bs_asic_type == PCIIO_ASIC_TYPE_TIOCE) ||
+		    (bussoft->bs_asic_type == PCIIO_ASIC_TYPE_PIC)) {
+			/* PCI Bridge: find nearest node with CPUs */
 			int e = sn_hwperf_get_nearest_node(cnode, NULL,
 							   &near_cnode);
 			if (e < 0) {
 				near_cnode = (cnodeid_t)-1; /* use any node */
-				printk(KERN_WARNING "pcibr_bus_fixup: failed "
-				       "to find near node with CPUs to TIO "
+				printk(KERN_WARNING "sn_io_late_init: failed "
+				       "to find near node with CPUs for "
 				       "node %d, err=%d\n", cnode, e);
 			}
 			PCI_CONTROLLER(bus)->node = near_cnode;
-		} else if (bussoft->bs_asic_type == PCIIO_ASIC_TYPE_PIC) {
-			PCI_CONTROLLER(bus)->node = cnode;
 		}
 	}
 

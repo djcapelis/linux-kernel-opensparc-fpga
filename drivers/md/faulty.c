@@ -30,7 +30,7 @@
  *
  * Different modes can be active at a time, but only
  * one can be set at array creation.  Others can be added later.
- * A mode can be one-shot or recurrent with the recurrance being
+ * A mode can be one-shot or recurrent with the recurrence being
  * once in every N requests.
  * The bottom 5 bits of the "layout" indicate the mode.  The
  * remainder indicate a period, or 0 for one-shot.
@@ -62,33 +62,36 @@
 #define	ModeShift	5
 
 #define MaxFault	50
-#include <linux/raid/md.h>
+#include <linux/blkdev.h>
+#include <linux/module.h>
+#include <linux/raid/md_u.h>
+#include <linux/slab.h>
+#include "md.h"
+#include <linux/seq_file.h>
 
 
-static int faulty_fail(struct bio *bio, unsigned int bytes_done, int error)
+static void faulty_fail(struct bio *bio, int error)
 {
 	struct bio *b = bio->bi_private;
 
 	b->bi_size = bio->bi_size;
 	b->bi_sector = bio->bi_sector;
 
-	if (bio->bi_size == 0)
-		bio_put(bio);
+	bio_put(bio);
 
-	clear_bit(BIO_UPTODATE, &b->bi_flags);
-	return (b->bi_end_io)(b, bytes_done, -EIO);
+	bio_io_error(b);
 }
 
-typedef struct faulty_conf {
+struct faulty_conf {
 	int period[Modes];
 	atomic_t counters[Modes];
 	sector_t faults[MaxFault];
 	int	modes[MaxFault];
 	int nfaults;
-	mdk_rdev_t *rdev;
-} conf_t;
+	struct md_rdev *rdev;
+};
 
-static int check_mode(conf_t *conf, int mode)
+static int check_mode(struct faulty_conf *conf, int mode)
 {
 	if (conf->period[mode] == 0 &&
 	    atomic_read(&conf->counters[mode]) <= 0)
@@ -103,7 +106,7 @@ static int check_mode(conf_t *conf, int mode)
 	return 0;
 }
 
-static int check_sector(conf_t *conf, sector_t start, sector_t end, int dir)
+static int check_sector(struct faulty_conf *conf, sector_t start, sector_t end, int dir)
 {
 	/* If we find a ReadFixable sector, we fix it ... */
 	int i;
@@ -127,7 +130,7 @@ static int check_sector(conf_t *conf, sector_t start, sector_t end, int dir)
 	return 0;
 }
 
-static void add_sector(conf_t *conf, sector_t start, int mode)
+static void add_sector(struct faulty_conf *conf, sector_t start, int mode)
 {
 	int i;
 	int n = conf->nfaults;
@@ -167,10 +170,9 @@ static void add_sector(conf_t *conf, sector_t start, int mode)
 		conf->nfaults = n+1;
 }
 
-static int make_request(request_queue_t *q, struct bio *bio)
+static void make_request(struct mddev *mddev, struct bio *bio)
 {
-	mddev_t *mddev = q->queuedata;
-	conf_t *conf = (conf_t*)mddev->private;
+	struct faulty_conf *conf = mddev->private;
 	int failit = 0;
 
 	if (bio_data_dir(bio) == WRITE) {
@@ -179,8 +181,8 @@ static int make_request(request_queue_t *q, struct bio *bio)
 			/* special case - don't decrement, don't generic_make_request,
 			 * just fail immediately
 			 */
-			bio_endio(bio, bio->bi_size, -EIO);
-			return 0;
+			bio_endio(bio, -EIO);
+			return;
 		}
 
 		if (check_sector(conf, bio->bi_sector, bio->bi_sector+(bio->bi_size>>9),
@@ -209,21 +211,21 @@ static int make_request(request_queue_t *q, struct bio *bio)
 		}
 	}
 	if (failit) {
-		struct bio *b = bio_clone(bio, GFP_NOIO);
+		struct bio *b = bio_clone_mddev(bio, GFP_NOIO, mddev);
+
 		b->bi_bdev = conf->rdev->bdev;
 		b->bi_private = bio;
 		b->bi_end_io = faulty_fail;
-		generic_make_request(b);
-		return 0;
-	} else {
+		bio = b;
+	} else
 		bio->bi_bdev = conf->rdev->bdev;
-		return 1;
-	}
+
+	generic_make_request(bio);
 }
 
-static void status(struct seq_file *seq, mddev_t *mddev)
+static void status(struct seq_file *seq, struct mddev *mddev)
 {
-	conf_t *conf = (conf_t*)mddev->private;
+	struct faulty_conf *conf = mddev->private;
 	int n;
 
 	if ((n=atomic_read(&conf->counters[WriteTransient])) != 0)
@@ -254,14 +256,14 @@ static void status(struct seq_file *seq, mddev_t *mddev)
 }
 
 
-static int reconfig(mddev_t *mddev, int layout, int chunk_size)
+static int reshape(struct mddev *mddev)
 {
-	int mode = layout & ModeMask;
-	int count = layout >> ModeShift;
-	conf_t *conf = mddev->private;
+	int mode = mddev->new_layout & ModeMask;
+	int count = mddev->new_layout >> ModeShift;
+	struct faulty_conf *conf = mddev->private;
 
-	if (chunk_size != -1)
-		return -EINVAL;
+	if (mddev->new_layout < 0)
+		return 0;
 
 	/* new layout */
 	if (mode == ClearFaults)
@@ -278,17 +280,34 @@ static int reconfig(mddev_t *mddev, int layout, int chunk_size)
 		atomic_set(&conf->counters[mode], count);
 	} else
 		return -EINVAL;
+	mddev->new_layout = -1;
 	mddev->layout = -1; /* makes sure further changes come through */
 	return 0;
 }
 
-static int run(mddev_t *mddev)
+static sector_t faulty_size(struct mddev *mddev, sector_t sectors, int raid_disks)
 {
-	mdk_rdev_t *rdev;
-	struct list_head *tmp;
-	int i;
+	WARN_ONCE(raid_disks,
+		  "%s does not support generic reshape\n", __func__);
 
-	conf_t *conf = kmalloc(sizeof(*conf), GFP_KERNEL);
+	if (sectors == 0)
+		return mddev->dev_sectors;
+
+	return sectors;
+}
+
+static int run(struct mddev *mddev)
+{
+	struct md_rdev *rdev;
+	int i;
+	struct faulty_conf *conf;
+
+	if (md_check_no_bitmap(mddev))
+		return -EINVAL;
+
+	conf = kmalloc(sizeof(*conf), GFP_KERNEL);
+	if (!conf)
+		return -ENOMEM;
 
 	for (i=0; i<Modes; i++) {
 		atomic_set(&conf->counters[i], 0);
@@ -296,27 +315,30 @@ static int run(mddev_t *mddev)
 	}
 	conf->nfaults = 0;
 
-	ITERATE_RDEV(mddev, rdev, tmp)
+	rdev_for_each(rdev, mddev) {
 		conf->rdev = rdev;
+		disk_stack_limits(mddev->gendisk, rdev->bdev,
+				  rdev->data_offset << 9);
+	}
 
-	mddev->array_size = mddev->size;
+	md_set_array_sectors(mddev, faulty_size(mddev, 0, 0));
 	mddev->private = conf;
 
-	reconfig(mddev, mddev->layout, -1);
+	reshape(mddev);
 
 	return 0;
 }
 
-static int stop(mddev_t *mddev)
+static int stop(struct mddev *mddev)
 {
-	conf_t *conf = (conf_t *)mddev->private;
+	struct faulty_conf *conf = mddev->private;
 
 	kfree(conf);
 	mddev->private = NULL;
 	return 0;
 }
 
-static struct mdk_personality faulty_personality =
+static struct md_personality faulty_personality =
 {
 	.name		= "faulty",
 	.level		= LEVEL_FAULTY,
@@ -325,7 +347,8 @@ static struct mdk_personality faulty_personality =
 	.run		= run,
 	.stop		= stop,
 	.status		= status,
-	.reconfig	= reconfig,
+	.check_reshape	= reshape,
+	.size		= faulty_size,
 };
 
 static int __init raid_init(void)
@@ -341,6 +364,7 @@ static void raid_exit(void)
 module_init(raid_init);
 module_exit(raid_exit);
 MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("Fault injection personality for MD");
 MODULE_ALIAS("md-personality-10"); /* faulty */
 MODULE_ALIAS("md-faulty");
 MODULE_ALIAS("md-level--5");

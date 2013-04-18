@@ -23,8 +23,8 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  * Authors:
- *   Thomas Hellström <thomas-at-tungstengraphics-dot-com>
- *   Michel Dänzer <michel-at-tungstengraphics-dot-com>
+ *   Thomas HellstrÃ¶m <thomas-at-tungstengraphics-dot-com>
+ *   Michel DÃ¤nzer <michel-at-tungstengraphics-dot-com>
  *   Alan Hourihane <alanh-at-tungstengraphics-dot-com>
  */
 
@@ -33,13 +33,13 @@
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/delay.h>
+#include <linux/slab.h>
 #include <linux/mm.h>
 #include <linux/fb.h>
 #include <linux/pci.h>
 #include <asm/cacheflush.h>
 #include <asm/tlbflush.h>
 #include <linux/mmzone.h>
-#include <asm/uaccess.h>
 
 /* #define VERMILION_DEBUG */
 
@@ -89,9 +89,7 @@ static int vmlfb_alloc_vram_area(struct vram_area *va, unsigned max_order,
 {
 	gfp_t flags;
 	unsigned long i;
-	pgprot_t wc_pageprot;
 
-	wc_pageprot = PAGE_KERNEL_NOCACHE;
 	max_order++;
 	do {
 		/*
@@ -115,8 +113,9 @@ static int vmlfb_alloc_vram_area(struct vram_area *va, unsigned max_order,
 
 	/*
 	 * It seems like __get_free_pages only ups the usage count
-	 * of the first page. This doesn't work with nopage mapping, so
-	 * up the usage count once more.
+	 * of the first page. This doesn't work with fault mapping, so
+	 * up the usage count once more (XXX: should use split_page or
+	 * compound page).
 	 */
 
 	memset((void *)va->logical, 0x00, va->size);
@@ -127,14 +126,8 @@ static int vmlfb_alloc_vram_area(struct vram_area *va, unsigned max_order,
 	/*
 	 * Change caching policy of the linear kernel map to avoid
 	 * mapping type conflicts with user-space mappings.
-	 * The first global_flush_tlb() is really only there to do a global
-	 * wbinvd().
 	 */
-
-	global_flush_tlb();
-	change_page_attr(virt_to_page(va->logical), va->size >> PAGE_SHIFT,
-			 wc_pageprot);
-	global_flush_tlb();
+	set_pages_uc(virt_to_page(va->logical), va->size >> PAGE_SHIFT);
 
 	printk(KERN_DEBUG MODULE_NAME
 	       ": Allocated %ld bytes vram area at 0x%08lx\n",
@@ -158,9 +151,8 @@ static void vmlfb_free_vram_area(struct vram_area *va)
 		 * Reset the linear kernel map caching policy.
 		 */
 
-		change_page_attr(virt_to_page(va->logical),
-				 va->size >> PAGE_SHIFT, PAGE_KERNEL);
-		global_flush_tlb();
+		set_pages_wb(virt_to_page(va->logical),
+				 va->size >> PAGE_SHIFT);
 
 		/*
 		 * Decrease the usage count on the pages we've used
@@ -401,7 +393,7 @@ static void vmlfb_release_devices(struct vml_par *par)
  * Free up allocated resources for a device.
  */
 
-static void __devexit vml_pci_remove(struct pci_dev *dev)
+static void vml_pci_remove(struct pci_dev *dev)
 {
 	struct fb_info *info;
 	struct vml_info *vinfo;
@@ -460,8 +452,7 @@ static void vmlfb_set_pref_pixel_format(struct fb_var_screeninfo *var)
  * struct per pipe. Currently we have only one pipe.
  */
 
-static int __devinit vml_pci_probe(struct pci_dev *dev,
-				   const struct pci_device_id *id)
+static int vml_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 {
 	struct vml_info *vinfo;
 	struct fb_info *info;
@@ -661,7 +652,7 @@ static int vmlfb_check_var_locked(struct fb_var_screeninfo *var,
 		return -EINVAL;
 	}
 
-	pitch = __ALIGN_MASK((var->xres * var->bits_per_pixel) >> 3, 0x3F);
+	pitch = ALIGN((var->xres * var->bits_per_pixel) >> 3, 0x40);
 	mem = pitch * var->yres_virtual;
 	if (mem > vinfo->vram_contig_size) {
 		return -ENOMEM;
@@ -795,8 +786,7 @@ static int vmlfb_set_par_locked(struct vml_info *vinfo)
 	int clock;
 
 	vinfo->bytes_per_pixel = var->bits_per_pixel >> 3;
-	vinfo->stride =
-	    __ALIGN_MASK(var->xres_virtual * vinfo->bytes_per_pixel, 0x3F);
+	vinfo->stride = ALIGN(var->xres_virtual * vinfo->bytes_per_pixel, 0x40);
 	info->fix.line_length = vinfo->stride;
 
 	if (!subsys)
@@ -900,8 +890,7 @@ static int vmlfb_set_par(struct fb_info *info)
 	int ret;
 
 	mutex_lock(&vml_mutex);
-	list_del(&vinfo->head);
-	list_add(&vinfo->head, (subsys) ? &global_has_mode : &global_no_mode);
+	list_move(&vinfo->head, (subsys) ? &global_has_mode : &global_no_mode);
 	ret = vmlfb_set_par_locked(vinfo);
 
 	mutex_unlock(&vml_mutex);
@@ -1028,7 +1017,6 @@ static int vmlfb_mmap(struct fb_info *info, struct vm_area_struct *vma)
 	offset += vinfo->vram_start;
 	pgprot_val(vma->vm_page_prot) |= _PAGE_PCD;
 	pgprot_val(vma->vm_page_prot) &= ~_PAGE_PWT;
-	vma->vm_flags |= VM_RESERVED | VM_IO;
 	if (remap_pfn_range(vma, vma->vm_start, offset >> PAGE_SHIFT,
 						size, vma->vm_page_prot))
 		return -EAGAIN;
@@ -1071,7 +1059,7 @@ static struct pci_driver vmlfb_pci_driver = {
 	.name = "vmlfb",
 	.id_table = vml_ids,
 	.probe = vml_pci_probe,
-	.remove = __devexit_p(vml_pci_remove)
+	.remove = vml_pci_remove,
 };
 
 static void __exit vmlfb_cleanup(void)
@@ -1178,8 +1166,7 @@ void vmlfb_unregister_subsys(struct vml_sys *sys)
 	list_for_each_entry_safe(entry, next, &global_has_mode, head) {
 		printk(KERN_DEBUG MODULE_NAME ": subsys disable pipe\n");
 		vmlfb_disable_pipe(entry);
-		list_del(&entry->head);
-		list_add_tail(&entry->head, &global_no_mode);
+		list_move_tail(&entry->head, &global_no_mode);
 	}
 	mutex_unlock(&vml_mutex);
 }

@@ -47,45 +47,39 @@ static ssize_t show_ctrl (struct device *dev, struct device_attribute *attr, cha
 	bus = pdev->subordinate;
 
 	out += sprintf(buf, "Free resources: memory\n");
-	for (index = 0; index < PCI_BUS_NUM_RESOURCES; index++) {
-		res = bus->resource[index];
+	pci_bus_for_each_resource(bus, res, index) {
 		if (res && (res->flags & IORESOURCE_MEM) &&
 				!(res->flags & IORESOURCE_PREFETCH)) {
-			out += sprintf(out, "start = %8.8llx, "
-					"length = %8.8llx\n",
-					(unsigned long long)res->start,
-					(unsigned long long)(res->end - res->start));
+			out += sprintf(out, "start = %8.8llx, length = %8.8llx\n",
+				       (unsigned long long)res->start,
+				       (unsigned long long)resource_size(res));
 		}
 	}
 	out += sprintf(out, "Free resources: prefetchable memory\n");
-	for (index = 0; index < PCI_BUS_NUM_RESOURCES; index++) {
-		res = bus->resource[index];
+	pci_bus_for_each_resource(bus, res, index) {
 		if (res && (res->flags & IORESOURCE_MEM) &&
 			       (res->flags & IORESOURCE_PREFETCH)) {
-			out += sprintf(out, "start = %8.8llx, "
-					"length = %8.8llx\n",
-					(unsigned long long)res->start,
-					(unsigned long long)(res->end - res->start));
+			out += sprintf(out, "start = %8.8llx, length = %8.8llx\n",
+				       (unsigned long long)res->start,
+				       (unsigned long long)resource_size(res));
 		}
 	}
 	out += sprintf(out, "Free resources: IO\n");
-	for (index = 0; index < PCI_BUS_NUM_RESOURCES; index++) {
-		res = bus->resource[index];
+	pci_bus_for_each_resource(bus, res, index) {
 		if (res && (res->flags & IORESOURCE_IO)) {
-			out += sprintf(out, "start = %8.8llx, "
-					"length = %8.8llx\n",
-					(unsigned long long)res->start,
-					(unsigned long long)(res->end - res->start));
+			out += sprintf(out, "start = %8.8llx, length = %8.8llx\n",
+				       (unsigned long long)res->start,
+				       (unsigned long long)resource_size(res));
 		}
 	}
 	out += sprintf(out, "Free resources: bus numbers\n");
-	for (busnr = bus->secondary; busnr <= bus->subordinate; busnr++) {
+	for (busnr = bus->busn_res.start; busnr <= bus->busn_res.end; busnr++) {
 		if (!pci_find_bus(pci_domain_nr(bus), busnr))
 			break;
 	}
-	if (busnr < bus->subordinate)
+	if (busnr < bus->busn_res.end)
 		out += sprintf(out, "start = %8.8x, length = %8.8x\n",
-				busnr, (bus->subordinate - busnr));
+				busnr, (int)(bus->busn_res.end - busnr));
 
 	return out - buf;
 }

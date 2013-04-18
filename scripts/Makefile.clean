@@ -37,13 +37,15 @@ subdir-ymn      := $(sort $(subdir-ym) $(subdir-n) $(subdir-))
 
 subdir-ymn	:= $(addprefix $(obj)/,$(subdir-ymn))
 
-# build a list of files to remove, usually releative to the current
+# build a list of files to remove, usually relative to the current
 # directory
 
-__clean-files	:= $(extra-y) $(EXTRA_TARGETS) $(always) \
+__clean-files	:= $(extra-y) $(always)                  \
 		   $(targets) $(clean-files)             \
 		   $(host-progs)                         \
 		   $(hostprogs-y) $(hostprogs-m) $(hostprogs-)
+
+__clean-files   := $(filter-out $(no-clean-files), $(__clean-files))
 
 # as clean-files is given relative to the current directory, this adds
 # a $(obj) prefix, except for absolute paths

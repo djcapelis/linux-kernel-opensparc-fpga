@@ -21,12 +21,15 @@
 #include <linux/device.h>
 #include <linux/firmware.h>
 #include <linux/mutex.h>
+#include <linux/slab.h>
+#include <linux/io.h>
+#include <linux/export.h>
 
-#include <asm/io.h>
-#include <asm/hardware.h>
-#include <asm/arch/netx-regs.h>
+#include <mach/hardware.h>
+#include <mach/irqs.h>
+#include <mach/netx-regs.h>
 
-#include <asm/arch/xc.h>
+#include <mach/xc.h>
 
 static DEFINE_MUTEX(xc_lock);
 
@@ -92,10 +95,10 @@ static int xc_check_ptr(struct xc *x, unsigned long adr, unsigned int size)
 	return -1;
 }
 
-static int xc_patch(struct xc *x, void *patch, int count)
+static int xc_patch(struct xc *x, const void *patch, int count)
 {
 	unsigned int val, adr;
-	unsigned int *data = patch;
+	const unsigned int *data = patch;
 
 	int i;
 	for (i = 0; i < count; i++) {
@@ -117,7 +120,7 @@ int xc_request_firmware(struct xc *x)
 	struct fw_header *head;
 	unsigned int size;
 	int i;
-	void *src;
+	const void *src;
 	unsigned long dst;
 
 	sprintf(name, "xc%d.bin", x->no);
@@ -133,7 +136,7 @@ int xc_request_firmware(struct xc *x)
 	if (head->magic != 0x4e657458) {
 		if (head->magic == 0x5874654e) {
 			dev_err(x->dev,
-			    "firmware magic is 'XteN'. Endianess problems?\n");
+			    "firmware magic is 'XteN'. Endianness problems?\n");
 			ret = -ENODEV;
 			goto exit_release_firmware;
 		}
@@ -190,15 +193,15 @@ struct xc *request_xc(int xcno, struct device *dev)
 		goto exit;
 
 	if (!request_mem_region
-	    (NETX_PA_XPEC(xcno), XPEC_MEM_SIZE, dev->kobj.name))
+	    (NETX_PA_XPEC(xcno), XPEC_MEM_SIZE, kobject_name(&dev->kobj)))
 		goto exit_free;
 
 	if (!request_mem_region
-	    (NETX_PA_XMAC(xcno), XMAC_MEM_SIZE, dev->kobj.name))
+	    (NETX_PA_XMAC(xcno), XMAC_MEM_SIZE, kobject_name(&dev->kobj)))
 		goto exit_release_1;
 
 	if (!request_mem_region
-	    (SRAM_INTERNAL_PHYS(xcno), SRAM_MEM_SIZE, dev->kobj.name))
+	    (SRAM_INTERNAL_PHYS(xcno), SRAM_MEM_SIZE, kobject_name(&dev->kobj)))
 		goto exit_release_2;
 
 	x->xpec_base = (void * __iomem)io_p2v(NETX_PA_XPEC(xcno));

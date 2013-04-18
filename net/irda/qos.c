@@ -30,6 +30,8 @@
  *
  ********************************************************************/
 
+#include <linux/export.h>
+
 #include <asm/byteorder.h>
 
 #include <net/irda/irda.h>
@@ -39,16 +41,16 @@
 #include <net/irda/irlap_frame.h>
 
 /*
- * Maximum values of the baud rate we negociate with the other end.
+ * Maximum values of the baud rate we negotiate with the other end.
  * Most often, you don't have to change that, because Linux-IrDA will
  * use the maximum offered by the link layer, which usually works fine.
  * In some very rare cases, you may want to limit it to lower speeds...
  */
 int sysctl_max_baud_rate = 16000000;
 /*
- * Maximum value of the lap disconnect timer we negociate with the other end.
+ * Maximum value of the lap disconnect timer we negotiate with the other end.
  * Most often, the value below represent the best compromise, but some user
- * may want to keep the LAP alive longuer or shorter in case of link failure.
+ * may want to keep the LAP alive longer or shorter in case of link failure.
  * Remember that the threshold time (early warning) is fixed to 3s...
  */
 int sysctl_max_noreply_time = 12;
@@ -60,7 +62,7 @@ int sysctl_max_noreply_time = 12;
  * Default is 10us which means using the unmodified value given by the
  * peer except if it's 0 (0 is likely a bug in the other stack).
  */
-unsigned sysctl_min_tx_turn_time = 10;
+unsigned int sysctl_min_tx_turn_time = 10;
 /*
  * Maximum data size to be used in transmission in payload of LAP frame.
  * There is a bit of confusion in the IrDA spec :
@@ -75,13 +77,13 @@ unsigned sysctl_min_tx_turn_time = 10;
  * bytes frames or all negotiated frame sizes, but you can use the sysctl
  * to play with this value anyway.
  * Jean II */
-unsigned sysctl_max_tx_data_size = 2042;
+unsigned int sysctl_max_tx_data_size = 2042;
 /*
  * Maximum transmit window, i.e. number of LAP frames between turn-around.
  * This allow to override what the peer told us. Some peers are buggy and
  * don't always support what they tell us.
  * Jean II */
-unsigned sysctl_max_tx_window = 7;
+unsigned int sysctl_max_tx_window = 7;
 
 static int irlap_param_baud_rate(void *instance, irda_param_t *param, int get);
 static int irlap_param_link_disconnect(void *instance, irda_param_t *parm,
@@ -201,7 +203,7 @@ static int msb_index (__u16 word)
 	 * it's very likely the peer. - Jean II */
 	if (word == 0) {
 		IRDA_WARNING("%s(), Detected buggy peer, adjust null PV to 0x1!\n",
-			 __FUNCTION__);
+			 __func__);
 		/* The only safe choice (we don't know the array size) */
 		word = 0x1;
 	}
@@ -342,7 +344,7 @@ static void irlap_adjust_qos_settings(struct qos_info *qos)
 	__u32 line_capacity;
 	int index;
 
-	IRDA_DEBUG(2, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG(2, "%s()\n", __func__);
 
 	/*
 	 * Make sure the mintt is sensible.
@@ -352,7 +354,7 @@ static void irlap_adjust_qos_settings(struct qos_info *qos)
 		int i;
 
 		IRDA_WARNING("%s(), Detected buggy peer, adjust mtt to %dus!\n",
-			 __FUNCTION__, sysctl_min_tx_turn_time);
+			 __func__, sysctl_min_tx_turn_time);
 
 		/* We don't really need bits, but easier this way */
 		i = value_highest_bit(sysctl_min_tx_turn_time, min_turn_times,
@@ -370,7 +372,7 @@ static void irlap_adjust_qos_settings(struct qos_info *qos)
 	{
 		IRDA_DEBUG(0,
 			   "%s(), adjusting max turn time from %d to 500 ms\n",
-			   __FUNCTION__, qos->max_turn_time.value);
+			   __func__, qos->max_turn_time.value);
 		qos->max_turn_time.value = 500;
 	}
 
@@ -386,7 +388,7 @@ static void irlap_adjust_qos_settings(struct qos_info *qos)
 	while ((qos->data_size.value > line_capacity) && (index > 0)) {
 		qos->data_size.value = data_sizes[index--];
 		IRDA_DEBUG(2, "%s(), reducing data size to %d\n",
-			   __FUNCTION__, qos->data_size.value);
+			   __func__, qos->data_size.value);
 	}
 #else /* Use method described in section 6.6.11 of IrLAP */
 	while (irlap_requested_line_capacity(qos) > line_capacity) {
@@ -396,14 +398,14 @@ static void irlap_adjust_qos_settings(struct qos_info *qos)
 		if (qos->window_size.value > 1) {
 			qos->window_size.value--;
 			IRDA_DEBUG(2, "%s(), reducing window size to %d\n",
-				   __FUNCTION__, qos->window_size.value);
+				   __func__, qos->window_size.value);
 		} else if (index > 1) {
 			qos->data_size.value = data_sizes[index--];
 			IRDA_DEBUG(2, "%s(), reducing data size to %d\n",
-				   __FUNCTION__, qos->data_size.value);
+				   __func__, qos->data_size.value);
 		} else {
 			IRDA_WARNING("%s(), nothing more we can do!\n",
-				     __FUNCTION__);
+				     __func__);
 		}
 	}
 #endif /* CONFIG_IRDA_DYNAMIC_WINDOW */
@@ -411,7 +413,7 @@ static void irlap_adjust_qos_settings(struct qos_info *qos)
 	 * Fix tx data size according to user limits - Jean II
 	 */
 	if (qos->data_size.value > sysctl_max_tx_data_size)
-		/* Allow non discrete adjustement to avoid loosing capacity */
+		/* Allow non discrete adjustement to avoid losing capacity */
 		qos->data_size.value = sysctl_max_tx_data_size;
 	/*
 	 * Override Tx window if user request it. - Jean II
@@ -538,7 +540,7 @@ static int irlap_param_baud_rate(void *instance, irda_param_t *param, int get)
 	if (get) {
 		param->pv.i = self->qos_rx.baud_rate.bits;
 		IRDA_DEBUG(2, "%s(), baud rate = 0x%02x\n",
-			   __FUNCTION__, param->pv.i);
+			   __func__, param->pv.i);
 	} else {
 		/*
 		 *  Stations must agree on baud rate, so calculate
@@ -711,7 +713,7 @@ __u32 irlap_max_line_capacity(__u32 speed, __u32 max_turn_time)
 	int i,j;
 
 	IRDA_DEBUG(2, "%s(), speed=%d, max_turn_time=%d\n",
-		   __FUNCTION__, speed, max_turn_time);
+		   __func__, speed, max_turn_time);
 
 	i = value_index(speed, baud_rates, 10);
 	j = value_index(max_turn_time, max_turn_times, 4);
@@ -722,7 +724,7 @@ __u32 irlap_max_line_capacity(__u32 speed, __u32 max_turn_time)
 	line_capacity = max_line_capacities[i][j];
 
 	IRDA_DEBUG(2, "%s(), line capacity=%d bytes\n",
-		   __FUNCTION__, line_capacity);
+		   __func__, line_capacity);
 
 	return line_capacity;
 }
@@ -738,7 +740,7 @@ static __u32 irlap_requested_line_capacity(struct qos_info *qos)
 					     qos->min_turn_time.value);
 
 	IRDA_DEBUG(2, "%s(), requested line capacity=%d\n",
-		   __FUNCTION__, line_capacity);
+		   __func__, line_capacity);
 
 	return line_capacity;
 }

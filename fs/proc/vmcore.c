@@ -10,9 +10,10 @@
 #include <linux/mm.h>
 #include <linux/proc_fs.h>
 #include <linux/user.h>
-#include <linux/a.out.h>
 #include <linux/elf.h>
 #include <linux/elfcore.h>
+#include <linux/export.h>
+#include <linux/slab.h>
 #include <linux/highmem.h>
 #include <linux/bootmem.h>
 #include <linux/init.h>
@@ -33,10 +34,47 @@ static size_t elfcorebuf_sz;
 /* Total size of vmcore file. */
 static u64 vmcore_size;
 
-/* Stores the physical address of elf header of crash image. */
-unsigned long long elfcorehdr_addr = ELFCORE_ADDR_MAX;
+static struct proc_dir_entry *proc_vmcore = NULL;
 
-struct proc_dir_entry *proc_vmcore = NULL;
+/*
+ * Returns > 0 for RAM pages, 0 for non-RAM pages, < 0 on error
+ * The called function has to take care of module refcounting.
+ */
+static int (*oldmem_pfn_is_ram)(unsigned long pfn);
+
+int register_oldmem_pfn_is_ram(int (*fn)(unsigned long pfn))
+{
+	if (oldmem_pfn_is_ram)
+		return -EBUSY;
+	oldmem_pfn_is_ram = fn;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(register_oldmem_pfn_is_ram);
+
+void unregister_oldmem_pfn_is_ram(void)
+{
+	oldmem_pfn_is_ram = NULL;
+	wmb();
+}
+EXPORT_SYMBOL_GPL(unregister_oldmem_pfn_is_ram);
+
+static int pfn_is_ram(unsigned long pfn)
+{
+	int (*fn)(unsigned long pfn);
+	/* pfn is ram unless fn() checks pagetype */
+	int ret = 1;
+
+	/*
+	 * Ask hypervisor if the pfn is really ram.
+	 * A ballooned page contains no data and reading from such a page
+	 * will cause high load in the hypervisor.
+	 */
+	fn = oldmem_pfn_is_ram;
+	if (fn)
+		ret = fn(pfn);
+
+	return ret;
+}
 
 /* Reads a page from the oldmem device from given offset. */
 static ssize_t read_from_oldmem(char *buf, size_t count,
@@ -51,8 +89,6 @@ static ssize_t read_from_oldmem(char *buf, size_t count,
 
 	offset = (unsigned long)(*ppos % PAGE_SIZE);
 	pfn = (unsigned long)(*ppos / PAGE_SIZE);
-	if (pfn > saved_max_pfn)
-		return -EINVAL;
 
 	do {
 		if (count > (PAGE_SIZE - offset))
@@ -60,9 +96,15 @@ static ssize_t read_from_oldmem(char *buf, size_t count,
 		else
 			nr_bytes = count;
 
-		tmp = copy_oldmem_page(pfn, buf, nr_bytes, offset, userbuf);
-		if (tmp < 0)
-			return tmp;
+		/* If pfn is not ram, return zeros for sparse dump files */
+		if (pfn_is_ram(pfn) == 0)
+			memset(buf, 0, nr_bytes);
+		else {
+			tmp = copy_oldmem_page(pfn, buf, nr_bytes,
+						offset, userbuf);
+			if (tmp < 0)
+				return tmp;
+		}
 		*ppos += nr_bytes;
 		count -= nr_bytes;
 		buf += nr_bytes;
@@ -166,24 +208,14 @@ static ssize_t read_vmcore(struct file *file, char __user *buffer,
 	return acc;
 }
 
-static int open_vmcore(struct inode *inode, struct file *filp)
-{
-	return 0;
-}
-
-const struct file_operations proc_vmcore_operations = {
+static const struct file_operations proc_vmcore_operations = {
 	.read		= read_vmcore,
-	.open		= open_vmcore,
+	.llseek		= default_llseek,
 };
 
 static struct vmcore* __init get_new_element(void)
 {
-	struct vmcore *p;
-
-	p = kmalloc(sizeof(*p), GFP_KERNEL);
-	if (p)
-		memset(p, 0, sizeof(*p));
-	return p;
+	return kzalloc(sizeof(struct vmcore), GFP_KERNEL);
 }
 
 static u64 __init get_vmcore_size_elf64(char *elfptr)
@@ -514,7 +546,7 @@ static int __init parse_crash_elf64_headers(void)
 	/* Do some basic Verification. */
 	if (memcmp(ehdr.e_ident, ELFMAG, SELFMAG) != 0 ||
 		(ehdr.e_type != ET_CORE) ||
-		!vmcore_elf_check_arch(&ehdr) ||
+		!vmcore_elf64_check_arch(&ehdr) ||
 		ehdr.e_ident[EI_CLASS] != ELFCLASS64 ||
 		ehdr.e_ident[EI_VERSION] != EV_CURRENT ||
 		ehdr.e_version != EV_CURRENT ||
@@ -654,7 +686,7 @@ static int __init vmcore_init(void)
 	int rc = 0;
 
 	/* If elfcorehdr= has been passed in cmdline, then capture the dump.*/
-	if (!(elfcorehdr_addr < ELFCORE_ADDR_MAX))
+	if (!(is_vmcore_usable()))
 		return rc;
 	rc = parse_crash_elf_headers();
 	if (rc) {
@@ -662,9 +694,32 @@ static int __init vmcore_init(void)
 		return rc;
 	}
 
-	/* Initialize /proc/vmcore size if proc is already up. */
+	proc_vmcore = proc_create("vmcore", S_IRUSR, NULL, &proc_vmcore_operations);
 	if (proc_vmcore)
 		proc_vmcore->size = vmcore_size;
 	return 0;
 }
 module_init(vmcore_init)
+
+/* Cleanup function for vmcore module. */
+void vmcore_cleanup(void)
+{
+	struct list_head *pos, *next;
+
+	if (proc_vmcore) {
+		remove_proc_entry(proc_vmcore->name, proc_vmcore->parent);
+		proc_vmcore = NULL;
+	}
+
+	/* clear the vmcore list. */
+	list_for_each_safe(pos, next, &vmcore_list) {
+		struct vmcore *m;
+
+		m = list_entry(pos, struct vmcore, list);
+		list_del(&m->list);
+		kfree(m);
+	}
+	kfree(elfcorebuf);
+	elfcorebuf = NULL;
+}
+EXPORT_SYMBOL_GPL(vmcore_cleanup);

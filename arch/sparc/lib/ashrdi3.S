@@ -1,14 +1,14 @@
-/* $Id: ashrdi3.S,v 1.4 1999/11/19 04:11:49 davem Exp $
+/*
  * ashrdi3.S:	The filesystem code creates all kinds of references to
  *              this little routine on the sparc with gcc.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
  */
 
+#include <linux/linkage.h>
+
 	.text
-	.align	4
-	.globl __ashrdi3
-__ashrdi3:
+ENTRY(__ashrdi3)
 	tst	%o2
 	be	3f
 	 or	%g0, 32, %g2
@@ -34,3 +34,4 @@ __ashrdi3:
 3:
 	jmpl	%o7 + 8, %g0
 	 nop
+ENDPROC(__ashrdi3)

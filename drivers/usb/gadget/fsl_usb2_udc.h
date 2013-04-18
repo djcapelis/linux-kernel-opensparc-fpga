@@ -1,4 +1,12 @@
 /*
+ * Copyright (C) 2004,2012 Freescale Semiconductor, Inc
+ * All rights reserved.
+ *
+ * This program is free software; you can redistribute  it and/or modify it
+ * under  the terms of  the GNU General  Public License as published by the
+ * Free Software Foundation;  either version 2 of the  License, or (at your
+ * option) any later version.
+ *
  * Freescale USB device/endpoint management registers
  */
 #ifndef __FSL_USB2_UDC_H
@@ -15,7 +23,7 @@ struct usb_dr_device {
 	u8 res1[256];
 	u16 caplength;		/* Capability Register Length */
 	u16 hciversion;		/* Host Controller Interface Version */
-	u32 hcsparams;		/* Host Controller Structual Parameters */
+	u32 hcsparams;		/* Host Controller Structural Parameters */
 	u32 hccparams;		/* Host Controller Capability Parameters */
 	u8 res2[20];
 	u32 dciversion;		/* Device Controller Interface Version */
@@ -52,7 +60,7 @@ struct usb_dr_host {
 	u8 res1[256];
 	u16 caplength;		/* Capability Register Length */
 	u16 hciversion;		/* Host Controller Interface Version */
-	u32 hcsparams;		/* Host Controller Structual Parameters */
+	u32 hcsparams;		/* Host Controller Structural Parameters */
 	u32 hccparams;		/* Host Controller Capability Parameters */
 	u8 res2[20];
 	u32 dciversion;		/* Device Controller Interface Version */
@@ -100,6 +108,10 @@ struct usb_sys_interface {
 #define DATA_STATE_NEED_ZLP     2
 #define WAIT_FOR_OUT_STATUS     3
 #define DATA_STATE_RECV         4
+
+/* Device Controller Capability Parameter register */
+#define DCCPARAMS_DC				0x00000080
+#define DCCPARAMS_DEN_MASK			0x0000001f
 
 /* Frame Index Register Bit Masks */
 #define	USB_FRINDEX_MASKS			0x3fff
@@ -271,7 +283,9 @@ struct usb_sys_interface {
 #define  USB_MODE_CTRL_MODE_IDLE              0x00000000
 #define  USB_MODE_CTRL_MODE_DEVICE            0x00000002
 #define  USB_MODE_CTRL_MODE_HOST              0x00000003
+#define  USB_MODE_CTRL_MODE_MASK              0x00000003
 #define  USB_MODE_CTRL_MODE_RSV               0x00000001
+#define  USB_MODE_ES                          0x00000004 /* Endian Select */
 #define  USB_MODE_SETUP_LOCK_OFF              0x00000008
 #define  USB_MODE_STREAM_DISABLE              0x00000010
 /* Endpoint Flush Register */
@@ -342,6 +356,9 @@ struct usb_sys_interface {
 /* control Register Bit Masks */
 #define  USB_CTRL_IOENB                       0x00000004
 #define  USB_CTRL_ULPI_INT0EN                 0x00000001
+#define USB_CTRL_UTMI_PHY_EN		      0x00000200
+#define USB_CTRL_USB_EN			      0x00000004
+#define USB_CTRL_ULPI_PHY_CLK_SEL	      0x00000400
 
 /* Endpoint Queue Head data struct
  * Rem: all the variables of qh are LittleEndian Mode
@@ -420,16 +437,6 @@ struct ep_td_struct {
 /* Controller dma boundary */
 #define UDC_DMA_BOUNDARY			0x1000
 
-/* -----------------------------------------------------------------------*/
-/* ##### enum data
-*/
-typedef enum {
-	e_ULPI,
-	e_UTMI_8BIT,
-	e_UTMI_16BIT,
-	e_SERIAL
-} e_PhyInterface;
-
 /*-------------------------------------------------------------------------*/
 
 /* ### driver private data
@@ -454,7 +461,6 @@ struct fsl_ep {
 	struct list_head queue;
 	struct fsl_udc *udc;
 	struct ep_queue_head *qh;
-	const struct usb_endpoint_descriptor *desc;
 	struct usb_gadget *gadget;
 
 	char name[14];
@@ -465,20 +471,23 @@ struct fsl_ep {
 #define EP_DIR_OUT	0
 
 struct fsl_udc {
-
 	struct usb_gadget gadget;
 	struct usb_gadget_driver *driver;
+	struct fsl_usb2_platform_data *pdata;
+	struct completion *done;	/* to make sure release() is done */
 	struct fsl_ep *eps;
 	unsigned int max_ep;
 	unsigned int irq;
 
 	struct usb_ctrlrequest local_setup_buff;
 	spinlock_t lock;
-	struct otg_transceiver *transceiver;
+	struct usb_phy *transceiver;
 	unsigned softconnect:1;
 	unsigned vbus_active:1;
 	unsigned stopped:1;
 	unsigned remote_wakeup:1;
+	unsigned already_stopped:1;
+	unsigned big_endian_desc:1;
 
 	struct ep_queue_head *ep_qh;	/* Endpoints Queue-Head */
 	struct fsl_req *status_req;	/* ep0 status request */
@@ -488,27 +497,21 @@ struct fsl_udc {
 	size_t ep_qh_size;		/* size after alignment adjustment*/
 	dma_addr_t ep_qh_dma;		/* dma address of QH */
 
-	u32 max_pipes;		/* Device max pipes */
-	u32 max_use_endpts;	/* Max endpointes to be used */
-	u32 bus_reset;		/* Device is bus reseting */
+	u32 max_pipes;          /* Device max pipes */
+	u32 bus_reset;		/* Device is bus resetting */
 	u32 resume_state;	/* USB state to resume */
 	u32 usb_state;		/* USB current state */
-	u32 usb_next_state;	/* USB next state */
 	u32 ep0_state;		/* Endpoint zero state */
 	u32 ep0_dir;		/* Endpoint zero direction: can be
 				   USB_DIR_IN or USB_DIR_OUT */
-	u32 usb_sof_count;	/* SOF count */
-	u32 errors;		/* USB ERRORs count */
 	u8 device_address;	/* Device USB address */
-
-	struct completion *done;	/* to make sure release() is done */
 };
 
 /*-------------------------------------------------------------------------*/
 
 #ifdef DEBUG
 #define DBG(fmt, args...) 	printk(KERN_DEBUG "[%s]  " fmt "\n", \
-				__FUNCTION__, ## args)
+				__func__, ## args)
 #else
 #define DBG(fmt, args...)	do{}while(0)
 #endif
@@ -547,9 +550,9 @@ static void dump_msg(const char *label, const u8 * buf, unsigned int length)
 #define VDBG(stuff...)	do{}while(0)
 #endif
 
-#define ERR(stuff...)		printk(KERN_ERR "udc: " stuff)
-#define WARN(stuff...)		printk(KERN_WARNING "udc: " stuff)
-#define INFO(stuff...)		printk(KERN_INFO "udc: " stuff)
+#define ERR(stuff...)		pr_err("udc: " stuff)
+#define WARNING(stuff...)		pr_warning("udc: " stuff)
+#define INFO(stuff...)		pr_info("udc: " stuff)
 
 /*-------------------------------------------------------------------------*/
 
@@ -565,15 +568,44 @@ static void dump_msg(const char *label, const u8 * buf, unsigned int length)
 /*
  * ### internal used help routines.
  */
-#define ep_index(EP)		((EP)->desc->bEndpointAddress&0xF)
+#define ep_index(EP)		((EP)->ep.desc->bEndpointAddress&0xF)
 #define ep_maxpacket(EP)	((EP)->ep.maxpacket)
 #define ep_is_in(EP)	( (ep_index(EP) == 0) ? (EP->udc->ep0_dir == \
-			USB_DIR_IN ):((EP)->desc->bEndpointAddress \
+			USB_DIR_IN) : ((EP)->ep.desc->bEndpointAddress \
 			& USB_DIR_IN)==USB_DIR_IN)
 #define get_ep_by_pipe(udc, pipe)	((pipe == 1)? &udc->eps[0]: \
 					&udc->eps[pipe])
 #define get_pipe_by_windex(windex)	((windex & USB_ENDPOINT_NUMBER_MASK) \
 					* 2 + ((windex & USB_DIR_IN) ? 1 : 0))
 #define get_pipe_by_ep(EP)	(ep_index(EP) * 2 + ep_is_in(EP))
+
+static inline struct ep_queue_head *get_qh_by_ep(struct fsl_ep *ep)
+{
+	/* we only have one ep0 structure but two queue heads */
+	if (ep_index(ep) != 0)
+		return ep->qh;
+	else
+		return &ep->udc->ep_qh[(ep->udc->ep0_dir ==
+				USB_DIR_IN) ? 1 : 0];
+}
+
+struct platform_device;
+#ifdef CONFIG_ARCH_MXC
+int fsl_udc_clk_init(struct platform_device *pdev);
+int fsl_udc_clk_finalize(struct platform_device *pdev);
+void fsl_udc_clk_release(void);
+#else
+static inline int fsl_udc_clk_init(struct platform_device *pdev)
+{
+	return 0;
+}
+static inline int fsl_udc_clk_finalize(struct platform_device *pdev)
+{
+	return 0;
+}
+static inline void fsl_udc_clk_release(void)
+{
+}
+#endif
 
 #endif

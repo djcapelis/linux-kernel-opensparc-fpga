@@ -1,7 +1,7 @@
 /*
  *  linux/arch/arm/kernel/signal.c
  *
- *  Copyright (C) 1995-2002 Russell King
+ *  Copyright (C) 1995-2009 Russell King
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -10,24 +10,22 @@
 #include <linux/errno.h>
 #include <linux/signal.h>
 #include <linux/personality.h>
-#include <linux/freezer.h>
+#include <linux/uaccess.h>
+#include <linux/tracehook.h>
 
 #include <asm/elf.h>
 #include <asm/cacheflush.h>
 #include <asm/ucontext.h>
-#include <asm/uaccess.h>
 #include <asm/unistd.h>
+#include <asm/vfp.h>
 
-#include "ptrace.h"
 #include "signal.h"
-
-#define _BLOCKABLE (~(sigmask(SIGKILL) | sigmask(SIGSTOP)))
 
 /*
  * For ARM syscalls, we encode the syscall number into the instruction.
  */
-#define SWI_SYS_SIGRETURN	(0xef000000|(__NR_sigreturn))
-#define SWI_SYS_RT_SIGRETURN	(0xef000000|(__NR_rt_sigreturn))
+#define SWI_SYS_SIGRETURN	(0xef000000|(__NR_sigreturn)|(__NR_OABI_SYSCALL_BASE))
+#define SWI_SYS_RT_SIGRETURN	(0xef000000|(__NR_rt_sigreturn)|(__NR_OABI_SYSCALL_BASE))
 
 /*
  * With EABI, the syscall number has to be loaded into r7.
@@ -47,57 +45,14 @@ const unsigned long sigreturn_codes[7] = {
 	MOV_R7_NR_RT_SIGRETURN, SWI_SYS_RT_SIGRETURN, SWI_THUMB_RT_SIGRETURN,
 };
 
-static int do_signal(sigset_t *oldset, struct pt_regs * regs, int syscall);
-
 /*
  * atomically swap in the new signal mask, and wait for a signal.
  */
-asmlinkage int sys_sigsuspend(int restart, unsigned long oldmask, old_sigset_t mask, struct pt_regs *regs)
+asmlinkage int sys_sigsuspend(int restart, unsigned long oldmask, old_sigset_t mask)
 {
-	sigset_t saveset;
-
-	mask &= _BLOCKABLE;
-	spin_lock_irq(&current->sighand->siglock);
-	saveset = current->blocked;
-	siginitset(&current->blocked, mask);
-	recalc_sigpending();
-	spin_unlock_irq(&current->sighand->siglock);
-	regs->ARM_r0 = -EINTR;
-
-	while (1) {
-		current->state = TASK_INTERRUPTIBLE;
-		schedule();
-		if (do_signal(&saveset, regs, 0))
-			return regs->ARM_r0;
-	}
-}
-
-asmlinkage int
-sys_rt_sigsuspend(sigset_t __user *unewset, size_t sigsetsize, struct pt_regs *regs)
-{
-	sigset_t saveset, newset;
-
-	/* XXX: Don't preclude handling different sized sigset_t's. */
-	if (sigsetsize != sizeof(sigset_t))
-		return -EINVAL;
-
-	if (copy_from_user(&newset, unewset, sizeof(newset)))
-		return -EFAULT;
-	sigdelsetmask(&newset, ~_BLOCKABLE);
-
-	spin_lock_irq(&current->sighand->siglock);
-	saveset = current->blocked;
-	current->blocked = newset;
-	recalc_sigpending();
-	spin_unlock_irq(&current->sighand->siglock);
-	regs->ARM_r0 = -EINTR;
-
-	while (1) {
-		current->state = TASK_INTERRUPTIBLE;
-		schedule();
-		if (do_signal(&saveset, regs, 0))
-			return regs->ARM_r0;
-	}
+	sigset_t blocked;
+	siginitset(&blocked, mask);
+	return sigsuspend(&blocked);
 }
 
 asmlinkage int 
@@ -111,10 +66,10 @@ sys_sigaction(int sig, const struct old_sigaction __user *act,
 		old_sigset_t mask;
 		if (!access_ok(VERIFY_READ, act, sizeof(*act)) ||
 		    __get_user(new_ka.sa.sa_handler, &act->sa_handler) ||
-		    __get_user(new_ka.sa.sa_restorer, &act->sa_restorer))
+		    __get_user(new_ka.sa.sa_restorer, &act->sa_restorer) ||
+		    __get_user(new_ka.sa.sa_flags, &act->sa_flags) ||
+		    __get_user(mask, &act->sa_mask))
 			return -EFAULT;
-		__get_user(new_ka.sa.sa_flags, &act->sa_flags);
-		__get_user(mask, &act->sa_mask);
 		siginitset(&new_ka.sa.sa_mask, mask);
 	}
 
@@ -123,17 +78,17 @@ sys_sigaction(int sig, const struct old_sigaction __user *act,
 	if (!ret && oact) {
 		if (!access_ok(VERIFY_WRITE, oact, sizeof(*oact)) ||
 		    __put_user(old_ka.sa.sa_handler, &oact->sa_handler) ||
-		    __put_user(old_ka.sa.sa_restorer, &oact->sa_restorer))
+		    __put_user(old_ka.sa.sa_restorer, &oact->sa_restorer) ||
+		    __put_user(old_ka.sa.sa_flags, &oact->sa_flags) ||
+		    __put_user(old_ka.sa.sa_mask.sig[0], &oact->sa_mask))
 			return -EFAULT;
-		__put_user(old_ka.sa.sa_flags, &oact->sa_flags);
-		__put_user(old_ka.sa.sa_mask.sig[0], &oact->sa_mask);
 	}
 
 	return ret;
 }
 
 #ifdef CONFIG_CRUNCH
-static int preserve_crunch_context(struct crunch_sigframe *frame)
+static int preserve_crunch_context(struct crunch_sigframe __user *frame)
 {
 	char kbuf[sizeof(*frame) + 8];
 	struct crunch_sigframe *kframe;
@@ -146,7 +101,7 @@ static int preserve_crunch_context(struct crunch_sigframe *frame)
 	return __copy_to_user(frame, kframe, sizeof(*frame));
 }
 
-static int restore_crunch_context(struct crunch_sigframe *frame)
+static int restore_crunch_context(struct crunch_sigframe __user *frame)
 {
 	char kbuf[sizeof(*frame) + 8];
 	struct crunch_sigframe *kframe;
@@ -196,6 +151,42 @@ static int restore_iwmmxt_context(struct iwmmxt_sigframe *frame)
 
 #endif
 
+#ifdef CONFIG_VFP
+
+static int preserve_vfp_context(struct vfp_sigframe __user *frame)
+{
+	const unsigned long magic = VFP_MAGIC;
+	const unsigned long size = VFP_STORAGE_SIZE;
+	int err = 0;
+
+	__put_user_error(magic, &frame->magic, err);
+	__put_user_error(size, &frame->size, err);
+
+	if (err)
+		return -EFAULT;
+
+	return vfp_preserve_user_clear_hwstate(&frame->ufp, &frame->ufp_exc);
+}
+
+static int restore_vfp_context(struct vfp_sigframe __user *frame)
+{
+	unsigned long magic;
+	unsigned long size;
+	int err = 0;
+
+	__get_user_error(magic, &frame->magic, err);
+	__get_user_error(size, &frame->size, err);
+
+	if (err)
+		return -EFAULT;
+	if (magic != VFP_MAGIC || size != VFP_STORAGE_SIZE)
+		return -EINVAL;
+
+	return vfp_restore_user_hwstate(&frame->ufp, &frame->ufp_exc);
+}
+
+#endif
+
 /*
  * Do a signal return; undo the signal stack.  These are aligned to 64-bit.
  */
@@ -216,13 +207,8 @@ static int restore_sigframe(struct pt_regs *regs, struct sigframe __user *sf)
 	int err;
 
 	err = __copy_from_user(&set, &sf->uc.uc_sigmask, sizeof(set));
-	if (err == 0) {
-		sigdelsetmask(&set, ~_BLOCKABLE);
-		spin_lock_irq(&current->sighand->siglock);
-		current->blocked = set;
-		recalc_sigpending();
-		spin_unlock_irq(&current->sighand->siglock);
-	}
+	if (err == 0)
+		set_current_blocked(&set);
 
 	__get_user_error(regs->ARM_r0, &sf->uc.uc_mcontext.arm_r0, err);
 	__get_user_error(regs->ARM_r1, &sf->uc.uc_mcontext.arm_r1, err);
@@ -254,8 +240,8 @@ static int restore_sigframe(struct pt_regs *regs, struct sigframe __user *sf)
 		err |= restore_iwmmxt_context(&aux->iwmmxt);
 #endif
 #ifdef CONFIG_VFP
-//	if (err == 0)
-//		err |= vfp_restore_state(&sf->aux.vfp);
+	if (err == 0)
+		err |= restore_vfp_context(&aux->vfp);
 #endif
 
 	return err;
@@ -283,8 +269,6 @@ asmlinkage int sys_sigreturn(struct pt_regs *regs)
 
 	if (restore_sigframe(regs, frame))
 		goto badframe;
-
-	single_step_trap(current);
 
 	return regs->ARM_r0;
 
@@ -318,8 +302,6 @@ asmlinkage int sys_rt_sigreturn(struct pt_regs *regs)
 
 	if (do_sigaltstack(&frame->sig.uc.uc_stack, NULL, regs->ARM_sp) == -EFAULT)
 		goto badframe;
-
-	single_step_trap(current);
 
 	return regs->ARM_r0;
 
@@ -369,8 +351,8 @@ setup_sigframe(struct sigframe __user *sf, struct pt_regs *regs, sigset_t *set)
 		err |= preserve_iwmmxt_context(&aux->iwmmxt);
 #endif
 #ifdef CONFIG_VFP
-//	if (err == 0)
-//		err |= vfp_save_state(&sf->aux.vfp);
+	if (err == 0)
+		err |= preserve_vfp_context(&aux->vfp);
 #endif
 	__put_user_error(0, &aux->end_magic, err);
 
@@ -410,7 +392,9 @@ setup_return(struct pt_regs *regs, struct k_sigaction *ka,
 	unsigned long handler = (unsigned long)ka->sa.sa_handler;
 	unsigned long retcode;
 	int thumb = 0;
-	unsigned long cpsr = regs->ARM_cpsr & ~PSR_f;
+	unsigned long cpsr = regs->ARM_cpsr & ~(PSR_f | PSR_E_BIT);
+
+	cpsr |= PSR_ENDSTATE;
 
 	/*
 	 * Maybe we need to deliver a 32-bit signal to a 26-bit task.
@@ -426,9 +410,13 @@ setup_return(struct pt_regs *regs, struct k_sigaction *ka,
 		 */
 		thumb = handler & 1;
 
-		if (thumb)
+		if (thumb) {
 			cpsr |= PSR_T_BIT;
-		else
+#if __LINUX_ARM_ARCH__ >= 7
+			/* clear the If-Then Thumb-2 execution state */
+			cpsr &= ~PSR_IT_MASK;
+#endif
+		} else
 			cpsr &= ~PSR_T_BIT;
 	}
 #endif
@@ -532,44 +520,18 @@ setup_rt_frame(int usig, struct k_sigaction *ka, siginfo_t *info,
 	return err;
 }
 
-static inline void restart_syscall(struct pt_regs *regs)
-{
-	regs->ARM_r0 = regs->ARM_ORIG_r0;
-	regs->ARM_pc -= thumb_mode(regs) ? 2 : 4;
-}
-
 /*
  * OK, we're invoking a handler
  */	
 static void
 handle_signal(unsigned long sig, struct k_sigaction *ka,
-	      siginfo_t *info, sigset_t *oldset,
-	      struct pt_regs * regs, int syscall)
+	      siginfo_t *info, struct pt_regs *regs)
 {
 	struct thread_info *thread = current_thread_info();
 	struct task_struct *tsk = current;
+	sigset_t *oldset = sigmask_to_save();
 	int usig = sig;
 	int ret;
-
-	/*
-	 * If we were from a system call, check for system call restarting...
-	 */
-	if (syscall) {
-		switch (regs->ARM_r0) {
-		case -ERESTART_RESTARTBLOCK:
-		case -ERESTARTNOHAND:
-			regs->ARM_r0 = -EINTR;
-			break;
-		case -ERESTARTSYS:
-			if (!(ka->sa.sa_flags & SA_RESTART)) {
-				regs->ARM_r0 = -EINTR;
-				break;
-			}
-			/* fallthrough */
-		case -ERESTARTNOINTR:
-			restart_syscall(regs);
-		}
-	}
 
 	/*
 	 * translate the signal
@@ -594,18 +556,7 @@ handle_signal(unsigned long sig, struct k_sigaction *ka,
 		force_sigsegv(sig, tsk);
 		return;
 	}
-
-	/*
-	 * Block the signal if we were successful.
-	 */
-	spin_lock_irq(&tsk->sighand->siglock);
-	sigorsets(&tsk->blocked, &tsk->blocked,
-		  &ka->sa.sa_mask);
-	if (!(ka->sa.sa_flags & SA_NODEFER))
-		sigaddset(&tsk->blocked, sig);
-	recalc_sigpending();
-	spin_unlock_irq(&tsk->sighand->siglock);
-
+	signal_delivered(sig, info, ka, regs, 0);
 }
 
 /*
@@ -617,90 +568,100 @@ handle_signal(unsigned long sig, struct k_sigaction *ka,
  * the kernel can handle, and then we build all the user-level signal handling
  * stack-frames in one go after that.
  */
-static int do_signal(sigset_t *oldset, struct pt_regs *regs, int syscall)
+static int do_signal(struct pt_regs *regs, int syscall)
 {
+	unsigned int retval = 0, continue_addr = 0, restart_addr = 0;
 	struct k_sigaction ka;
 	siginfo_t info;
 	int signr;
+	int restart = 0;
 
 	/*
-	 * We want the common case to go fast, which
-	 * is why we may in certain cases get here from
-	 * kernel mode. Just return without doing anything
-	 * if so.
-	 */
-	if (!user_mode(regs))
-		return 0;
-
-	if (try_to_freeze())
-		goto no_signal;
-
-	single_step_clear(current);
-
-	signr = get_signal_to_deliver(&info, &ka, regs, NULL);
-	if (signr > 0) {
-		handle_signal(signr, &ka, &info, oldset, regs, syscall);
-		single_step_set(current);
-		return 1;
-	}
-
- no_signal:
-	/*
-	 * No signal to deliver to the process - restart the syscall.
+	 * If we were from a system call, check for system call restarting...
 	 */
 	if (syscall) {
-		if (regs->ARM_r0 == -ERESTART_RESTARTBLOCK) {
-			if (thumb_mode(regs)) {
-				regs->ARM_r7 = __NR_restart_syscall - __NR_SYSCALL_BASE;
-				regs->ARM_pc -= 2;
-			} else {
-#if defined(CONFIG_AEABI) && !defined(CONFIG_OABI_COMPAT)
-				regs->ARM_r7 = __NR_restart_syscall;
-				regs->ARM_pc -= 4;
-#else
-				u32 __user *usp;
-				u32 swival = __NR_restart_syscall;
+		continue_addr = regs->ARM_pc;
+		restart_addr = continue_addr - (thumb_mode(regs) ? 2 : 4);
+		retval = regs->ARM_r0;
 
-				regs->ARM_sp -= 12;
-				usp = (u32 __user *)regs->ARM_sp;
-
-				/*
-				 * Either we supports OABI only, or we have
-				 * EABI with the OABI compat layer enabled.
-				 * In the later case we don't know if user
-				 * space is EABI or not, and if not we must
-				 * not clobber r7.  Always using the OABI
-				 * syscall solves that issue and works for
-				 * all those cases.
-				 */
-				swival = swival - __NR_SYSCALL_BASE + __NR_OABI_SYSCALL_BASE;
-
-				put_user(regs->ARM_pc, &usp[0]);
-				/* swi __NR_restart_syscall */
-				put_user(0xef000000 | swival, &usp[1]);
-				/* ldr	pc, [sp], #12 */
-				put_user(0xe49df00c, &usp[2]);
-
-				flush_icache_range((unsigned long)usp,
-						   (unsigned long)(usp + 3));
-
-				regs->ARM_pc = regs->ARM_sp + 4;
-#endif
-			}
-		}
-		if (regs->ARM_r0 == -ERESTARTNOHAND ||
-		    regs->ARM_r0 == -ERESTARTSYS ||
-		    regs->ARM_r0 == -ERESTARTNOINTR) {
-			restart_syscall(regs);
+		/*
+		 * Prepare for system call restart.  We do this here so that a
+		 * debugger will see the already changed PSW.
+		 */
+		switch (retval) {
+		case -ERESTART_RESTARTBLOCK:
+			restart -= 2;
+		case -ERESTARTNOHAND:
+		case -ERESTARTSYS:
+		case -ERESTARTNOINTR:
+			restart++;
+			regs->ARM_r0 = regs->ARM_ORIG_r0;
+			regs->ARM_pc = restart_addr;
+			break;
 		}
 	}
-	single_step_set(current);
-	return 0;
+
+	/*
+	 * Get the signal to deliver.  When running under ptrace, at this
+	 * point the debugger may change all our registers ...
+	 */
+	signr = get_signal_to_deliver(&info, &ka, regs, NULL);
+	/*
+	 * Depending on the signal settings we may need to revert the
+	 * decision to restart the system call.  But skip this if a
+	 * debugger has chosen to restart at a different PC.
+	 */
+	if (regs->ARM_pc != restart_addr)
+		restart = 0;
+	if (signr > 0) {
+		if (unlikely(restart)) {
+			if (retval == -ERESTARTNOHAND ||
+			    retval == -ERESTART_RESTARTBLOCK
+			    || (retval == -ERESTARTSYS
+				&& !(ka.sa.sa_flags & SA_RESTART))) {
+				regs->ARM_r0 = -EINTR;
+				regs->ARM_pc = continue_addr;
+			}
+		}
+
+		handle_signal(signr, &ka, &info, regs);
+		return 0;
+	}
+
+	restore_saved_sigmask();
+	if (unlikely(restart))
+		regs->ARM_pc = continue_addr;
+	return restart;
 }
 
-asmlinkage void
-do_notify_resume(struct pt_regs *regs, unsigned int thread_flags, int syscall)
+asmlinkage int
+do_work_pending(struct pt_regs *regs, unsigned int thread_flags, int syscall)
 {
-	if (thread_flags & _TIF_SIGPENDING)
-		do_signal(&current->blocked, regs, syscall);
+	do {
+		if (likely(thread_flags & _TIF_NEED_RESCHED)) {
+			schedule();
+		} else {
+			if (unlikely(!user_mode(regs)))
+				return 0;
+			local_irq_enable();
+			if (thread_flags & _TIF_SIGPENDING) {
+				int restart = do_signal(regs, syscall);
+				if (unlikely(restart)) {
+					/*
+					 * Restart without handlers.
+					 * Deal with it without leaving
+					 * the kernel space.
+					 */
+					return restart;
+				}
+				syscall = 0;
+			} else {
+				clear_thread_flag(TIF_NOTIFY_RESUME);
+				tracehook_notify_resume(regs);
+			}
+		}
+		local_irq_disable();
+		thread_flags = current_thread_info()->flags;
+	} while (thread_flags & _TIF_WORK_MASK);
+	return 0;
 }

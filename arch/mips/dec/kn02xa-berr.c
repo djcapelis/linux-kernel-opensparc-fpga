@@ -1,6 +1,4 @@
 /*
- *	linux/arch/mips/dec/kn02xa-berr.c
- *
  *	Bus error event handling code for 5000-series systems equipped
  *	with parity error detection logic, i.e. DECstation/DECsystem
  *	5000/120, /125, /133 (KN02-BA), 5000/150 (KN04-BA) and Personal
@@ -23,7 +21,6 @@
 #include <asm/addrspace.h>
 #include <asm/irq_regs.h>
 #include <asm/ptrace.h>
-#include <asm/system.h>
 #include <asm/traps.h>
 
 #include <asm/dec/kn02ca.h>
@@ -132,7 +129,7 @@ void __init dec_kn02xa_be_init(void)
 	volatile u32 *mbcs = (void *)CKSEG1ADDR(KN4K_SLOT_BASE + KN4K_MB_CSR);
 
         /* For KN04 we need to make sure EE (?) is enabled in the MB.  */
-        if (current_cpu_data.cputype == CPU_R4000SC)
+        if (current_cpu_type() == CPU_R4000SC)
 		*mbcs |= KN4K_MB_CSR_EE;
 	fast_iob();
 

@@ -86,26 +86,25 @@
 #include <linux/pci.h>
 #include <linux/delay.h>
 #include <linux/init.h>
-#include <linux/slab.h>
 #include <asm/io.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <video/sstfb.h>
 
 
 /* initialized by setup */
 
-static int vgapass;		/* enable VGA passthrough cable */
+static bool vgapass;		/* enable VGA passthrough cable */
 static int mem;			/* mem size in MB, 0 = autodetect */
-static int clipping = 1;	/* use clipping (slower, safer) */
+static bool clipping = 1;	/* use clipping (slower, safer) */
 static int gfxclk;		/* force FBI freq in Mhz . Dangerous */
-static int slowpci;		/* slow PCI settings */
+static bool slowpci;		/* slow PCI settings */
 
 /*
   Possible default video modes: 800x600@60, 640x480@75, 1024x768@76, 640x480@60
 */
 #define DEFAULT_VIDEO_MODE "640x480@60"
 
-static char *mode_option __devinitdata = DEFAULT_VIDEO_MODE;
+static char *mode_option = DEFAULT_VIDEO_MODE;
 
 enum {
 	ID_VOODOO1 = 0,
@@ -114,7 +113,7 @@ enum {
 
 #define IS_VOODOO2(par) ((par)->type == ID_VOODOO2)
 
-static struct sst_spec voodoo_spec[] __devinitdata = {
+static struct sst_spec voodoo_spec[] = {
  { .name = "Voodoo Graphics", .default_gfx_clock = 50000, .max_gfxclk = 60 },
  { .name = "Voodoo2",	      .default_gfx_clock = 75000, .max_gfxclk = 85 },
 };
@@ -222,7 +221,7 @@ static int __sst_wait_idle(u8 __iomem *vbase)
 	while(1) {
 		if (__sst_read(vbase, STATUS) & STATUS_FBI_BUSY) {
 			f_dddprintk("status: busy\n");
-/* FIXME basicaly, this is a busy wait. maybe not that good. oh well;
+/* FIXME basically, this is a busy wait. maybe not that good. oh well;
  * this is a small loop after all.
  * Or maybe we should use mdelay() or udelay() here instead ? */
 			count = 0;
@@ -502,7 +501,7 @@ static int sstfb_set_par(struct fb_info *info)
 	}
 
 	if (IS_VOODOO2(par)) {
-		/* voodoo2 has 32 pixel wide tiles , BUT stange things
+		/* voodoo2 has 32 pixel wide tiles , BUT strange things
 		   happen with odd number of tiles */
 		par->tiles_in_X = (info->var.xres + 63 ) / 64 * 2;
 	} else {
@@ -537,7 +536,7 @@ static int sstfb_set_par(struct fb_info *info)
 	fbiinit2 = sst_read(FBIINIT2);
 	fbiinit3 = sst_read(FBIINIT3);
 
-	/* everything is reset. we enable fbiinit2/3 remap : dac acces ok */
+	/* everything is reset. we enable fbiinit2/3 remap : dac access ok */
 	pci_write_config_dword(sst_dev, PCI_INIT_ENABLE,
 	                       PCI_EN_INIT_WR | PCI_REMAP_DAC );
 
@@ -823,7 +822,7 @@ static void sstfb_fillrect(struct fb_info *info, const struct fb_fillrect *rect)
 /* 
  * get lfb size 
  */
-static int __devinit sst_get_memsize(struct fb_info *info, __u32 *memsize)
+static int sst_get_memsize(struct fb_info *info, __u32 *memsize)
 {
 	u8 __iomem *fbbase_virt = info->screen_base;
 
@@ -866,7 +865,7 @@ static int __devinit sst_get_memsize(struct fb_info *info, __u32 *memsize)
 /* fbi should be idle, and fifo emty and mem disabled */
 /* supposed to detect AT&T ATT20C409 and Ti TVP3409 ramdacs */
 
-static int __devinit sst_detect_att(struct fb_info *info)
+static int sst_detect_att(struct fb_info *info)
 {
 	struct sstfb_par *par = info->par;
 	int i, mir, dir;
@@ -891,7 +890,7 @@ static int __devinit sst_detect_att(struct fb_info *info)
 	return 0;
 }
 
-static int __devinit sst_detect_ti(struct fb_info *info)
+static int sst_detect_ti(struct fb_info *info)
 {
 	struct sstfb_par *par = info->par;
 	int i, mir, dir;
@@ -921,13 +920,13 @@ static int __devinit sst_detect_ti(struct fb_info *info)
  * we get the 1st byte (M value) of preset f1,f7 and fB
  * why those 3 ? mmmh... for now, i'll do it the glide way...
  * and ask questions later. anyway, it seems that all the freq registers are
- * realy at their default state (cf specs) so i ask again, why those 3 regs ?
+ * really at their default state (cf specs) so i ask again, why those 3 regs ?
  * mmmmh.. it seems that's much more ugly than i thought. we use f0 and fA for
  * pll programming, so in fact, we *hope* that the f1, f7 & fB won't be
  * touched...
- * is it realy safe ? how can i reset this ramdac ? geee...
+ * is it really safe ? how can i reset this ramdac ? geee...
  */
-static int __devinit sst_detect_ics(struct fb_info *info)
+static int sst_detect_ics(struct fb_info *info)
 {
 	struct sstfb_par *par = info->par;
 	int m_clk0_1, m_clk0_7, m_clk1_b;
@@ -1006,7 +1005,7 @@ static int sst_set_pll_att_ti(struct fb_info *info,
 		break;
 	default:
 		dprintk("%s: wrong clock code '%d'\n",
-		        __FUNCTION__, clock);
+		        __func__, clock);
 		return 0;
 		}
 	udelay(300);
@@ -1048,7 +1047,7 @@ static int sst_set_pll_ics(struct fb_info *info,
 		break;
 	default:
 		dprintk("%s: wrong clock code '%d'\n",
-		        __FUNCTION__, clock);
+		        __func__, clock);
 		return 0;
 		}
 	udelay(300);
@@ -1079,7 +1078,7 @@ static void sst_set_vidmod_att_ti(struct fb_info *info, const int bpp)
 		sst_dac_write(DACREG_RMR, (cr0 & 0x0f) | DACREG_CR0_16BPP);
 		break;
 	default:
-		dprintk("%s: bad depth '%u'\n", __FUNCTION__, bpp);
+		dprintk("%s: bad depth '%u'\n", __func__, bpp);
 		break;
 	}
 }
@@ -1093,7 +1092,7 @@ static void sst_set_vidmod_ics(struct fb_info *info, const int bpp)
 		sst_dac_write(DACREG_ICS_CMD, DACREG_ICS_CMD_16BPP);
 		break;
 	default:
-		dprintk("%s: bad depth '%u'\n", __FUNCTION__, bpp);
+		dprintk("%s: bad depth '%u'\n", __func__, bpp);
 		break;
 	}
 }
@@ -1102,11 +1101,11 @@ static void sst_set_vidmod_ics(struct fb_info *info, const int bpp)
  * detect dac type
  * prerequisite : write to FbiInitx enabled, video and fbi and pci fifo reset,
  * dram refresh disabled, FbiInit remaped.
- * TODO: mmh.. maybe i shoud put the "prerequisite" in the func ...
+ * TODO: mmh.. maybe i should put the "prerequisite" in the func ...
  */
 
 
-static struct dac_switch dacs[] __devinitdata = {
+static struct dac_switch dacs[] = {
 	{	.name		= "TI TVP3409",
 		.detect		= sst_detect_ti,
 		.set_pll	= sst_set_pll_att_ti,
@@ -1122,7 +1121,7 @@ static struct dac_switch dacs[] __devinitdata = {
 		.set_vidmod	= sst_set_vidmod_ics },
 };
 
-static int __devinit sst_detect_dactype(struct fb_info *info, struct sstfb_par *par)
+static int sst_detect_dactype(struct fb_info *info, struct sstfb_par *par)
 {
 	int i, ret = 0;
 
@@ -1133,7 +1132,7 @@ static int __devinit sst_detect_dactype(struct fb_info *info, struct sstfb_par *
 	}
 	if (!ret)
 		return 0;
-	f_dprintk("%s found %s\n", __FUNCTION__, dacs[i].name);
+	f_dprintk("%s found %s\n", __func__, dacs[i].name);
 	par->dac_sw = dacs[i];
 	return 1;
 }
@@ -1141,7 +1140,7 @@ static int __devinit sst_detect_dactype(struct fb_info *info, struct sstfb_par *
 /*
  * Internal Routines
  */
-static int __devinit sst_init(struct fb_info *info, struct sstfb_par *par)
+static int sst_init(struct fb_info *info, struct sstfb_par *par)
 {
 	u32 fbiinit0, fbiinit1, fbiinit4;
 	struct pci_dev *dev = par->dev;
@@ -1240,7 +1239,7 @@ static int __devinit sst_init(struct fb_info *info, struct sstfb_par *par)
 	return 1;
 }
 
-static void  __devexit sst_shutdown(struct fb_info *info)
+static void sst_shutdown(struct fb_info *info)
 {
 	struct sstfb_par *par = info->par;
 	struct pci_dev *dev = par->dev;
@@ -1272,7 +1271,7 @@ static void  __devexit sst_shutdown(struct fb_info *info)
 /*
  * Interface to the world
  */
-static int  __devinit sstfb_setup(char *options)
+static int sstfb_setup(char *options)
 {
 	char *this_opt;
 
@@ -1318,8 +1317,7 @@ static struct fb_ops sstfb_ops = {
 	.fb_ioctl	= sstfb_ioctl,
 };
 
-static int __devinit sstfb_probe(struct pci_dev *pdev,
-			const struct pci_device_id *id)
+static int sstfb_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 {
 	struct fb_info *info;
 	struct fb_fix_screeninfo *fix;
@@ -1348,7 +1346,7 @@ static int __devinit sstfb_probe(struct pci_dev *pdev,
 	f_ddprintk("found device : %s\n", spec->name);
 
 	par->dev = pdev;
-	pci_read_config_byte(pdev, PCI_REVISION_ID, &par->revision);
+	par->revision = pdev->revision;
 
 	fix->mmio_start = pci_resource_start(pdev,0);
 	fix->mmio_len	= 0x400000;
@@ -1421,13 +1419,16 @@ static int __devinit sstfb_probe(struct pci_dev *pdev,
 		goto fail;
 	}
 	
-	fb_alloc_cmap(&info->cmap, 256, 0);
+	if (fb_alloc_cmap(&info->cmap, 256, 0)) {
+		printk(KERN_ERR "sstfb: can't alloc cmap memory.\n");
+		goto fail;
+	}
 
 	/* register fb */
 	info->device = &pdev->dev;
 	if (register_framebuffer(info) < 0) {
 		printk(KERN_ERR "sstfb: can't register framebuffer.\n");
-		goto fail;
+		goto fail_register;
 	}
 
 	sstfb_clear_screen(info);
@@ -1441,8 +1442,9 @@ static int __devinit sstfb_probe(struct pci_dev *pdev,
 
 	return 0;
 
-fail:
+fail_register:
 	fb_dealloc_cmap(&info->cmap);
+fail:
 	iounmap(info->screen_base);
 fail_fb_remap:
 	iounmap(par->mmio_vbase);
@@ -1455,7 +1457,7 @@ fail_mmio_mem:
 	return -ENXIO; 	/* no voodoo detected */
 }
 
-static void __devexit sstfb_remove(struct pci_dev *pdev)
+static void sstfb_remove(struct pci_dev *pdev)
 {
 	struct sstfb_par *par;
 	struct fb_info *info;
@@ -1487,11 +1489,11 @@ static struct pci_driver sstfb_driver = {
 	.name		= "sstfb",
 	.id_table	= sstfb_id_tbl,
 	.probe		= sstfb_probe,
-	.remove		= __devexit_p(sstfb_remove),
+	.remove		= sstfb_remove,
 };
 
 
-static int __devinit sstfb_init(void)
+static int sstfb_init(void)
 {
 	char *option = NULL;
 
@@ -1502,7 +1504,7 @@ static int __devinit sstfb_init(void)
 	return pci_register_driver(&sstfb_driver);
 }
 
-static void __devexit sstfb_exit(void)
+static void sstfb_exit(void)
 {
 	pci_unregister_driver(&sstfb_driver);
 }

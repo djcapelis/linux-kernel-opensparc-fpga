@@ -7,8 +7,10 @@
 #include <linux/module.h>
 #include <linux/pci.h>
 #include <linux/ioport.h>
+#include <linux/io.h>
 
-#include <asm/io.h>
+unsigned long vga_base;
+EXPORT_SYMBOL(vga_base);
 
 #ifdef __io
 void __iomem *ioport_map(unsigned long port, unsigned int nr)
@@ -24,26 +26,11 @@ EXPORT_SYMBOL(ioport_unmap);
 #endif
 
 #ifdef CONFIG_PCI
-void __iomem *pci_iomap(struct pci_dev *dev, int bar, unsigned long maxlen)
-{
-	unsigned long start = pci_resource_start(dev, bar);
-	unsigned long len   = pci_resource_len(dev, bar);
-	unsigned long flags = pci_resource_flags(dev, bar);
+unsigned long pcibios_min_io = 0x1000;
+EXPORT_SYMBOL(pcibios_min_io);
 
-	if (!len || !start)
-		return NULL;
-	if (maxlen && len > maxlen)
-		len = maxlen;
-	if (flags & IORESOURCE_IO)
-		return ioport_map(start, len);
-	if (flags & IORESOURCE_MEM) {
-		if (flags & IORESOURCE_CACHEABLE)
-			return ioremap(start, len);
-		return ioremap_nocache(start, len);
-	}
-	return NULL;
-}
-EXPORT_SYMBOL(pci_iomap);
+unsigned long pcibios_min_mem = 0x01000000;
+EXPORT_SYMBOL(pcibios_min_mem);
 
 void pci_iounmap(struct pci_dev *dev, void __iomem *addr)
 {

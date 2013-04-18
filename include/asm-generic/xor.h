@@ -13,7 +13,7 @@
  * Software Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
-#include <asm/processor.h>
+#include <linux/prefetch.h>
 
 static void
 xor_8regs_2(unsigned long bytes, unsigned long *p1, unsigned long *p2)
@@ -693,7 +693,7 @@ static struct xor_block_template xor_block_32regs = {
 	.do_5 = xor_32regs_5,
 };
 
-static struct xor_block_template xor_block_8regs_p = {
+static struct xor_block_template xor_block_8regs_p __maybe_unused = {
 	.name = "8regs_prefetch",
 	.do_2 = xor_8regs_p_2,
 	.do_3 = xor_8regs_p_3,
@@ -701,7 +701,7 @@ static struct xor_block_template xor_block_8regs_p = {
 	.do_5 = xor_8regs_p_5,
 };
 
-static struct xor_block_template xor_block_32regs_p = {
+static struct xor_block_template xor_block_32regs_p __maybe_unused = {
 	.name = "32regs_prefetch",
 	.do_2 = xor_32regs_p_2,
 	.do_3 = xor_32regs_p_3,

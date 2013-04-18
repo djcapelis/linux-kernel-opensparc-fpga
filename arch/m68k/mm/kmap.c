@@ -20,7 +20,6 @@
 #include <asm/page.h>
 #include <asm/pgalloc.h>
 #include <asm/io.h>
-#include <asm/system.h>
 
 #undef DEBUG
 
@@ -66,8 +65,10 @@ static struct vm_struct *get_io_area(unsigned long size)
 	for (p = &iolist; (tmp = *p) ; p = &tmp->next) {
 		if (size + addr < (unsigned long)tmp->addr)
 			break;
-		if (addr > KMAP_END-size)
+		if (addr > KMAP_END-size) {
+			kfree(area);
 			return NULL;
+		}
 		addr = tmp->size + (unsigned long)tmp->addr;
 	}
 	area->addr = (void *)addr;
@@ -97,8 +98,7 @@ static inline void free_io_area(void *addr)
 #endif
 
 /*
- * Map some physical address range into the kernel address space. The
- * code is copied and adapted from map_chunk().
+ * Map some physical address range into the kernel address space.
  */
 /* Rewritten by Andreas Schwab to remove all races. */
 
@@ -114,7 +114,7 @@ void __iomem *__ioremap(unsigned long physaddr, unsigned long size, int cachefla
 	/*
 	 * Don't allow mappings that wrap..
 	 */
-	if (!size || size > physaddr + size)
+	if (!size || physaddr > (unsigned long)(-size))
 		return NULL;
 
 #ifdef CONFIG_AMIGA
@@ -170,7 +170,8 @@ void __iomem *__ioremap(unsigned long physaddr, unsigned long size, int cachefla
 			break;
 		}
 	} else {
-		physaddr |= (_PAGE_PRESENT | _PAGE_ACCESSED | _PAGE_DIRTY);
+		physaddr |= (_PAGE_PRESENT | _PAGE_ACCESSED |
+			     _PAGE_DIRTY | _PAGE_READWRITE);
 		switch (cacheflag) {
 		case IOMAP_NOCACHE_SER:
 		case IOMAP_NOCACHE_NONSER:

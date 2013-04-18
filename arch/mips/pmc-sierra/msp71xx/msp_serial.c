@@ -27,77 +27,66 @@
 #include <linux/serial.h>
 #include <linux/serial_core.h>
 #include <linux/serial_reg.h>
+#include <linux/slab.h>
 
 #include <asm/bootinfo.h>
 #include <asm/io.h>
 #include <asm/processor.h>
 #include <asm/serial.h>
+#include <linux/serial_8250.h>
 
 #include <msp_prom.h>
 #include <msp_int.h>
 #include <msp_regs.h>
 
-#ifdef CONFIG_KGDB
-/*
- * kgdb uses serial port 1 so the console can remain on port 0.
- * To use port 0 change the definition to read as follows:
- * #define DEBUG_PORT_BASE KSEG1ADDR(MSP_UART0_BASE)
- */
-#define DEBUG_PORT_BASE KSEG1ADDR(MSP_UART1_BASE)
+struct msp_uart_data {
+	int	last_lcr;
+};
 
-int putDebugChar(char c)
+static void msp_serial_out(struct uart_port *p, int offset, int value)
 {
-	volatile uint32_t *uart = (volatile uint32_t *)DEBUG_PORT_BASE;
-	uint32_t val = (uint32_t)c;
+	struct msp_uart_data *d = p->private_data;
 
-	local_irq_disable();
-	while( !(uart[5] & 0x20) ); /* Wait for TXRDY */
-	uart[0] = val;
-	while( !(uart[5] & 0x20) ); /* Wait for TXRDY */
-	local_irq_enable();
+	if (offset == UART_LCR)
+		d->last_lcr = value;
 
-	return 1;
+	offset <<= p->regshift;
+	writeb(value, p->membase + offset);
 }
 
-char getDebugChar(void)
+static unsigned int msp_serial_in(struct uart_port *p, int offset)
 {
-	volatile uint32_t *uart = (volatile uint32_t *)DEBUG_PORT_BASE;
-	uint32_t val;
+	offset <<= p->regshift;
 
-	while( !(uart[5] & 0x01) ); /* Wait for RXRDY */
-	val = uart[0];
-
-	return (char)val;
+	return readb(p->membase + offset);
 }
 
-void initDebugPort(unsigned int uartclk, unsigned int baudrate)
+static int msp_serial_handle_irq(struct uart_port *p)
 {
-	unsigned int baud_divisor = (uartclk + 8 * baudrate)/(16 * baudrate);
+	struct msp_uart_data *d = p->private_data;
+	unsigned int iir = readb(p->membase + (UART_IIR << p->regshift));
 
-	/* Enable FIFOs */
-	writeb(UART_FCR_ENABLE_FIFO | UART_FCR_CLEAR_RCVR |
-			UART_FCR_CLEAR_XMIT | UART_FCR_TRIGGER_4,
-		(char *)DEBUG_PORT_BASE + (UART_FCR * 4));
+	if (serial8250_handle_irq(p, iir)) {
+		return 1;
+	} else if ((iir & UART_IIR_BUSY) == UART_IIR_BUSY) {
+		/*
+		 * The DesignWare APB UART has an Busy Detect (0x07) interrupt
+		 * meaning an LCR write attempt occurred while the UART was
+		 * busy. The interrupt must be cleared by reading the UART
+		 * status register (USR) and the LCR re-written.
+		 *
+		 * Note: MSP reserves 0x20 bytes of address space for the UART
+		 * and the USR is mapped in a separate block at an offset of
+		 * 0xc0 from the start of the UART.
+		 */
+		(void)readb(p->membase + 0xc0);
+		writeb(d->last_lcr, p->membase + (UART_LCR << p->regshift));
 
-	/* Select brtc divisor */
-	writeb(UART_LCR_DLAB, (char *)DEBUG_PORT_BASE + (UART_LCR * 4));
+		return 1;
+	}
 
-	/* Store divisor lsb */
-	writeb(baud_divisor, (char *)DEBUG_PORT_BASE + (UART_TX * 4));
-
-	/* Store divisor msb */
-	writeb(baud_divisor >> 8, (char *)DEBUG_PORT_BASE + (UART_IER * 4));
-
-	/* Set 8N1 mode */
-	writeb(UART_LCR_WLEN8, (char *)DEBUG_PORT_BASE + (UART_LCR * 4));
-
-	/* Disable flow control */
-	writeb(0, (char *)DEBUG_PORT_BASE + (UART_MCR * 4));
-
-	/* Disable receive interrupt(!) */
-	writeb(0, (char *)DEBUG_PORT_BASE + (UART_IER * 4));
+	return 0;
 }
-#endif
 
 void __init msp_serial_setup(void)
 {
@@ -116,17 +105,26 @@ void __init msp_serial_setup(void)
 
 	/* Initialize first serial port */
 	up.mapbase      = MSP_UART0_BASE;
-	up.membase      = ioremap_nocache(up.mapbase,MSP_UART_REG_LEN);
+	up.membase      = ioremap_nocache(up.mapbase, MSP_UART_REG_LEN);
 	up.irq          = MSP_INT_UART0;
 	up.uartclk      = uartclk;
 	up.regshift     = 2;
-	up.iotype       = UPIO_DWAPB; /* UPIO_MEM like */
-	up.flags        = STD_COM_FLAGS;
+	up.iotype       = UPIO_MEM;
+	up.flags        = ASYNC_BOOT_AUTOCONF | ASYNC_SKIP_TEST;
 	up.type         = PORT_16550A;
 	up.line         = 0;
-	up.private_data		= (void*)UART0_STATUS_REG;
-	if (early_serial_setup(&up))
-		printk(KERN_ERR "Early serial init of port 0 failed\n");
+	up.serial_out	= msp_serial_out;
+	up.serial_in	= msp_serial_in;
+	up.handle_irq	= msp_serial_handle_irq;
+	up.private_data	= kzalloc(sizeof(struct msp_uart_data), GFP_KERNEL);
+	if (!up.private_data) {
+		pr_err("failed to allocate uart private data\n");
+		return;
+	}
+	if (early_serial_setup(&up)) {
+		kfree(up.private_data);
+		pr_err("Early serial init of port 0 failed\n");
+	}
 
 	/* Initialize the second serial port, if one exists */
 	switch (mips_machtype) {
@@ -138,17 +136,6 @@ void __init msp_serial_setup(void)
 		case MACH_MSP7120_FPGA:
 			/* Enable UART1 on MSP4200 and MSP7120 */
 			*GPIO_CFG2_REG = 0x00002299;
-
-#ifdef CONFIG_KGDB
-			/* Initialize UART1 for kgdb since PMON doesn't */
-			if( DEBUG_PORT_BASE == KSEG1ADDR(MSP_UART1_BASE) ) {
-				if( mips_machtype == MACH_MSP4200_FPGA
-				 || mips_machtype == MACH_MSP7120_FPGA )
-					initDebugPort(uartclk,19200);
-				else
-					initDebugPort(uartclk,57600);
-			}
-#endif
 			break;
 
 		default:
@@ -156,10 +143,12 @@ void __init msp_serial_setup(void)
 	}
 
 	up.mapbase      = MSP_UART1_BASE;
-	up.membase      = ioremap_nocache(up.mapbase,MSP_UART_REG_LEN);
+	up.membase      = ioremap_nocache(up.mapbase, MSP_UART_REG_LEN);
 	up.irq          = MSP_INT_UART1;
 	up.line         = 1;
 	up.private_data		= (void*)UART1_STATUS_REG;
-	if (early_serial_setup(&up))
-		printk(KERN_ERR "Early serial init of port 1 failed\n");
+	if (early_serial_setup(&up)) {
+		kfree(up.private_data);
+		pr_err("Early serial init of port 1 failed\n");
+	}
 }

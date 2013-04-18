@@ -45,7 +45,7 @@
  *	buffer needs an amount of memory of 1.769.472 bytes which
  *	is near to 2 MByte (the allocated address space of Zorro2).
  *	The memory is channel interleaved. That means every channel
- *	owns four VRAMs. Unfortunatly most FrameMasters II are
+ *	owns four VRAMs. Unfortunately most FrameMasters II are
  *	not assembled with memory for the alpha channel. In this
  *	case it could be possible to add the frame buffer into the
  *	normal memory pool.
@@ -127,7 +127,7 @@
 
 static volatile unsigned char *fm2fb_reg;
 
-static struct fb_fix_screeninfo fb_fix __devinitdata = {
+static struct fb_fix_screeninfo fb_fix = {
 	.smem_len =	FRAMEMASTER_REG,
 	.type =		FB_TYPE_PACKED_PIXELS,
 	.visual =	FB_VISUAL_TRUECOLOR,
@@ -136,12 +136,12 @@ static struct fb_fix_screeninfo fb_fix __devinitdata = {
 	.accel =	FB_ACCEL_NONE,
 };
 
-static int fm2fb_mode __devinitdata = -1;
+static int fm2fb_mode = -1;
 
 #define FM2FB_MODE_PAL	0
 #define FM2FB_MODE_NTSC	1
 
-static struct fb_var_screeninfo fb_var_modes[] __devinitdata = {
+static struct fb_var_screeninfo fb_var_modes[] = {
     {
 	/* 768 x 576, 32 bpp (PAL) */
 	768, 576, 768, 576, 0, 0, 32, 0,
@@ -195,13 +195,15 @@ static int fm2fb_blank(int blank, struct fb_info *info)
 static int fm2fb_setcolreg(u_int regno, u_int red, u_int green, u_int blue,
                          u_int transp, struct fb_info *info)
 {
-	if (regno > info->cmap.len)
-		return 1;
-	red >>= 8;
-	green >>= 8;
-	blue >>= 8;
+	if (regno < 16) {
+		red >>= 8;
+		green >>= 8;
+		blue >>= 8;
 
-	((u32*)(info->pseudo_palette))[regno] = (red << 16) | (green << 8) | blue;
+		((u32*)(info->pseudo_palette))[regno] = (red << 16) |
+			(green << 8) | blue;
+	}
+
 	return 0;
 }
 
@@ -209,14 +211,14 @@ static int fm2fb_setcolreg(u_int regno, u_int red, u_int green, u_int blue,
      *  Initialisation
      */
 
-static int __devinit fm2fb_probe(struct zorro_dev *z,
-				 const struct zorro_device_id *id);
+static int fm2fb_probe(struct zorro_dev *z, const struct zorro_device_id *id);
 
-static struct zorro_device_id fm2fb_devices[] __devinitdata = {
+static struct zorro_device_id fm2fb_devices[] = {
 	{ ZORRO_PROD_BSC_FRAMEMASTER_II },
 	{ ZORRO_PROD_HELFRICH_RAINBOW_II },
 	{ 0 }
 };
+MODULE_DEVICE_TABLE(zorro, fm2fb_devices);
 
 static struct zorro_driver fm2fb_driver = {
 	.name		= "fm2fb",
@@ -224,8 +226,7 @@ static struct zorro_driver fm2fb_driver = {
 	.probe		= fm2fb_probe,
 };
 
-static int __devinit fm2fb_probe(struct zorro_dev *z,
-				 const struct zorro_device_id *id)
+static int fm2fb_probe(struct zorro_dev *z, const struct zorro_device_id *id)
 {
 	struct fb_info *info;
 	unsigned long *ptr;
@@ -237,7 +238,7 @@ static int __devinit fm2fb_probe(struct zorro_dev *z,
 	if (!zorro_request_device(z,"fm2fb"))
 		return -ENXIO;
 
-	info = framebuffer_alloc(256 * sizeof(u32), &z->dev);
+	info = framebuffer_alloc(16 * sizeof(u32), &z->dev);
 	if (!info) {
 		zorro_release_device(z);
 		return -ENOMEM;

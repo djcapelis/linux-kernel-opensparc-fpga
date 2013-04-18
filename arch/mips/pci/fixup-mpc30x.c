@@ -1,7 +1,7 @@
 /*
  *  fixup-mpc30x.c, The Victor MP-C303/304 specific PCI fixups.
  *
- *  Copyright (C) 2002,2004  Yoichi Yuasa <yoichi_yuasa@tripeaks.co.jp>
+ *  Copyright (C) 2002,2004  Yoichi Yuasa <yuasa@linux-mips.org>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -22,19 +22,19 @@
 
 #include <asm/vr41xx/mpc30x.h>
 
-static const int internal_func_irqs[] __initdata = {
+static const int internal_func_irqs[] __initconst = {
 	VRC4173_CASCADE_IRQ,
 	VRC4173_AC97_IRQ,
 	VRC4173_USB_IRQ,
 };
 
-static const int irq_tab_mpc30x[] __initdata = {
+static const int irq_tab_mpc30x[] __initconst = {
  [12] = VRC4173_PCMCIA1_IRQ,
  [13] = VRC4173_PCMCIA2_IRQ,
  [29] = MQ200_IRQ,
 };
 
-int __init pcibios_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
+int __init pcibios_map_irq(const struct pci_dev *dev, u8 slot, u8 pin)
 {
 	if (slot == 30)
 		return internal_func_irqs[PCI_FUNC(dev->devfn)];

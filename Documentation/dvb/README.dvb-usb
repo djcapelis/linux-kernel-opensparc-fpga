@@ -30,7 +30,7 @@ with the device via the bus. The connection between the DVB-API-functionality
 is done via callbacks, assigned in a static device-description (struct
 dvb_usb_device) each device-driver has to have.
 
-For an example have a look in drivers/media/dvb/dvb-usb/vp7045*.
+For an example have a look in drivers/media/usb/dvb-usb/vp7045*.
 
 Objective is to migrate all the usb-devices (dibusb, cinergyT2, maybe the
 ttusb; flexcop-usb already benefits from the generic flexcop-device) to use
@@ -85,7 +85,7 @@ http://www.linuxtv.org/wiki/index.php/DVB_USB
 	     - moved transfer control (pid filter, fifo control) from usb driver to frontend, it seems
 	       better settled there (added xfer_ops-struct)
 	     - created a common files for frontends (mc/p/mb)
-  2004-09-28 - added support for a new device (Unkown, vendor ID is Hyper-Paltek)
+  2004-09-28 - added support for a new device (Unknown, vendor ID is Hyper-Paltek)
   2004-09-20 - added support for a new device (Compro DVB-U2000), thanks
 	       to Amaury Demol for reporting
 	     - changed usb TS transfer method (several urbs, stopping transfer
@@ -138,7 +138,7 @@ Hotplug is able to load the driver, when it is needed (because you plugged
 in the device).
 
 If you want to enable debug output, you have to load the driver manually and
-from withing the dvb-kernel cvs repository.
+from within the dvb-kernel cvs repository.
 
 first have a look, which debug level are available:
 

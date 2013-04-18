@@ -1,10 +1,9 @@
 /*
- * File...........: linux/drivers/s390/block/dasd_diag.h
  * Author(s)......: Holger Smolinski <Holger.Smolinski@de.ibm.com>
  * Based on.......: linux/drivers/s390/block/mdisk.h
  * ...............: by Hartmunt Penner <hpenner@de.ibm.com>
  * Bugreports.to..: <Linux390@de.ibm.com>
- * (C) IBM Corporation, IBM Deutschland Entwicklung GmbH, 1999,2000
+ * Copyright IBM Corp. 1999, 2000
  *
  */
 
@@ -18,10 +17,6 @@
 #define DEV_CLASS_FBA	0x01
 #define DEV_CLASS_ECKD	0x04
 
-#define DASD_DIAG_LC_INT_CODE		132
-#define DASD_DIAG_LC_INT_STATUS		133
-#define DASD_DIAG_LC_INT_PARM_31BIT	128
-#define DASD_DIAG_LC_INT_PARM_64BIT	4536
 #define DASD_DIAG_CODE_31BIT		0x03
 #define DASD_DIAG_CODE_64BIT		0x07
 

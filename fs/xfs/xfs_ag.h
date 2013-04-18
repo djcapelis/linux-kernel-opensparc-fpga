@@ -68,6 +68,7 @@ typedef struct xfs_agf {
 	__be32		agf_flcount;	/* count of blocks in freelist */
 	__be32		agf_freeblks;	/* total free blocks */
 	__be32		agf_longest;	/* longest free space */
+	__be32		agf_btreeblks;	/* # of blocks held in AGF btrees */
 } xfs_agf_t;
 
 #define	XFS_AGF_MAGICNUM	0x00000001
@@ -81,14 +82,33 @@ typedef struct xfs_agf {
 #define	XFS_AGF_FLCOUNT		0x00000100
 #define	XFS_AGF_FREEBLKS	0x00000200
 #define	XFS_AGF_LONGEST		0x00000400
-#define	XFS_AGF_NUM_BITS	11
+#define	XFS_AGF_BTREEBLKS	0x00000800
+#define	XFS_AGF_NUM_BITS	12
 #define	XFS_AGF_ALL_BITS	((1 << XFS_AGF_NUM_BITS) - 1)
+
+#define XFS_AGF_FLAGS \
+	{ XFS_AGF_MAGICNUM,	"MAGICNUM" }, \
+	{ XFS_AGF_VERSIONNUM,	"VERSIONNUM" }, \
+	{ XFS_AGF_SEQNO,	"SEQNO" }, \
+	{ XFS_AGF_LENGTH,	"LENGTH" }, \
+	{ XFS_AGF_ROOTS,	"ROOTS" }, \
+	{ XFS_AGF_LEVELS,	"LEVELS" }, \
+	{ XFS_AGF_FLFIRST,	"FLFIRST" }, \
+	{ XFS_AGF_FLLAST,	"FLLAST" }, \
+	{ XFS_AGF_FLCOUNT,	"FLCOUNT" }, \
+	{ XFS_AGF_FREEBLKS,	"FREEBLKS" }, \
+	{ XFS_AGF_LONGEST,	"LONGEST" }, \
+	{ XFS_AGF_BTREEBLKS,	"BTREEBLKS" }
 
 /* disk block (xfs_daddr_t) in the AG */
 #define XFS_AGF_DADDR(mp)	((xfs_daddr_t)(1 << (mp)->m_sectbb_log))
 #define	XFS_AGF_BLOCK(mp)	XFS_HDR_BLOCK(mp, XFS_AGF_DADDR(mp))
-#define	XFS_BUF_TO_AGF(bp)	((xfs_agf_t *)XFS_BUF_PTR(bp))
+#define	XFS_BUF_TO_AGF(bp)	((xfs_agf_t *)((bp)->b_addr))
 
+extern int xfs_read_agf(struct xfs_mount *mp, struct xfs_trans *tp,
+			xfs_agnumber_t agno, int flags, struct xfs_buf **bpp);
+
+extern const struct xfs_buf_ops xfs_agf_buf_ops;
 
 /*
  * Size of the unlinked inode hash table in the agi.
@@ -138,7 +158,12 @@ typedef struct xfs_agi {
 /* disk block (xfs_daddr_t) in the AG */
 #define XFS_AGI_DADDR(mp)	((xfs_daddr_t)(2 << (mp)->m_sectbb_log))
 #define	XFS_AGI_BLOCK(mp)	XFS_HDR_BLOCK(mp, XFS_AGI_DADDR(mp))
-#define	XFS_BUF_TO_AGI(bp)	((xfs_agi_t *)XFS_BUF_PTR(bp))
+#define	XFS_BUF_TO_AGI(bp)	((xfs_agi_t *)((bp)->b_addr))
+
+extern int xfs_read_agi(struct xfs_mount *mp, struct xfs_trans *tp,
+				xfs_agnumber_t agno, struct xfs_buf **bpp);
+
+extern const struct xfs_buf_ops xfs_agi_buf_ops;
 
 /*
  * The third a.g. block contains the a.g. freelist, an array
@@ -147,36 +172,22 @@ typedef struct xfs_agi {
 #define XFS_AGFL_DADDR(mp)	((xfs_daddr_t)(3 << (mp)->m_sectbb_log))
 #define	XFS_AGFL_BLOCK(mp)	XFS_HDR_BLOCK(mp, XFS_AGFL_DADDR(mp))
 #define XFS_AGFL_SIZE(mp)	((mp)->m_sb.sb_sectsize / sizeof(xfs_agblock_t))
-#define	XFS_BUF_TO_AGFL(bp)	((xfs_agfl_t *)XFS_BUF_PTR(bp))
+#define	XFS_BUF_TO_AGFL(bp)	((xfs_agfl_t *)((bp)->b_addr))
 
 typedef struct xfs_agfl {
 	__be32		agfl_bno[1];	/* actually XFS_AGFL_SIZE(mp) */
 } xfs_agfl_t;
 
 /*
- * Busy block/extent entry.  Used in perag to mark blocks that have been freed
- * but whose transactions aren't committed to disk yet.
- */
-typedef struct xfs_perag_busy {
-	xfs_agblock_t	busy_start;
-	xfs_extlen_t	busy_length;
-	struct xfs_trans *busy_tp;	/* transaction that did the free */
-} xfs_perag_busy_t;
-
-/*
  * Per-ag incore structure, copies of information in agf and agi,
  * to improve the performance of allocation group selection.
- *
- * pick sizes which fit in allocation buckets well
  */
-#if (BITS_PER_LONG == 32)
-#define XFS_PAGB_NUM_SLOTS	84
-#elif (BITS_PER_LONG == 64)
 #define XFS_PAGB_NUM_SLOTS	128
-#endif
 
-typedef struct xfs_perag
-{
+typedef struct xfs_perag {
+	struct xfs_mount *pag_mount;	/* owner filesystem */
+	xfs_agnumber_t	pag_agno;	/* AG this structure belongs to */
+	atomic_t	pag_ref;	/* perag reference count */
 	char		pagf_init;	/* this agf's entry is initialized */
 	char		pagi_init;	/* this agi's entry is initialized */
 	char		pagf_metadata;	/* the agf is preferred to be metadata */
@@ -186,13 +197,47 @@ typedef struct xfs_perag
 	__uint32_t	pagf_flcount;	/* count of blocks in freelist */
 	xfs_extlen_t	pagf_freeblks;	/* total free blocks */
 	xfs_extlen_t	pagf_longest;	/* longest free space */
+	__uint32_t	pagf_btreeblks;	/* # of blocks held in AGF btrees */
 	xfs_agino_t	pagi_freecount;	/* number of free inodes */
+	xfs_agino_t	pagi_count;	/* number of allocated inodes */
+
+	/*
+	 * Inode allocation search lookup optimisation.
+	 * If the pagino matches, the search for new inodes
+	 * doesn't need to search the near ones again straight away
+	 */
+	xfs_agino_t	pagl_pagino;
+	xfs_agino_t	pagl_leftrec;
+	xfs_agino_t	pagl_rightrec;
 #ifdef __KERNEL__
-	lock_t		pagb_lock;	/* lock for pagb_list */
+	spinlock_t	pagb_lock;	/* lock for pagb_tree */
+	struct rb_root	pagb_tree;	/* ordered tree of busy extents */
+
+	atomic_t        pagf_fstrms;    /* # of filestreams active in this AG */
+
+	spinlock_t	pag_ici_lock;	/* incore inode cache lock */
+	struct radix_tree_root pag_ici_root;	/* incore inode cache root */
+	int		pag_ici_reclaimable;	/* reclaimable inodes */
+	struct mutex	pag_ici_reclaim_lock;	/* serialisation point */
+	unsigned long	pag_ici_reclaim_cursor;	/* reclaim restart point */
+
+	/* buffer cache index */
+	spinlock_t	pag_buf_lock;	/* lock for pag_buf_tree */
+	struct rb_root	pag_buf_tree;	/* ordered tree of active buffers */
+
+	/* for rcu-safe freeing */
+	struct rcu_head	rcu_head;
 #endif
 	int		pagb_count;	/* pagb slots in use */
-	xfs_perag_busy_t *pagb_list;	/* unstable blocks */
 } xfs_perag_t;
+
+/*
+ * tags for inode radix tree
+ */
+#define XFS_ICI_NO_TAG		(-1)	/* special flag for an untagged lookup
+					   in xfs_inode_ag_iterator */
+#define XFS_ICI_RECLAIM_TAG	0	/* inode is to be reclaimed */
+#define XFS_ICI_EOFBLOCKS_TAG	1	/* inode has blocks beyond EOF */
 
 #define	XFS_AG_MAXLEVELS(mp)		((mp)->m_ag_maxlevels)
 #define	XFS_MIN_FREELIST_RAW(bl,cl,mp)	\
@@ -203,15 +248,15 @@ typedef struct xfs_perag
 		be32_to_cpu((a)->agf_levels[XFS_BTNUM_CNTi]), mp))
 #define	XFS_MIN_FREELIST_PAG(pag,mp)	\
 	(XFS_MIN_FREELIST_RAW(		\
-		(uint_t)(pag)->pagf_levels[XFS_BTNUM_BNOi], \
-		(uint_t)(pag)->pagf_levels[XFS_BTNUM_CNTi], mp))
+		(unsigned int)(pag)->pagf_levels[XFS_BTNUM_BNOi], \
+		(unsigned int)(pag)->pagf_levels[XFS_BTNUM_CNTi], mp))
 
 #define XFS_AGB_TO_FSB(mp,agno,agbno)	\
 	(((xfs_fsblock_t)(agno) << (mp)->m_sb.sb_agblklog) | (agbno))
 #define	XFS_FSB_TO_AGNO(mp,fsbno)	\
 	((xfs_agnumber_t)((fsbno) >> (mp)->m_sb.sb_agblklog))
 #define	XFS_FSB_TO_AGBNO(mp,fsbno)	\
-	((xfs_agblock_t)((fsbno) & XFS_MASK32LO((mp)->m_sb.sb_agblklog)))
+	((xfs_agblock_t)((fsbno) & xfs_mask32lo((mp)->m_sb.sb_agblklog)))
 #define	XFS_AGB_TO_DADDR(mp,agno,agbno)	\
 	((xfs_daddr_t)XFS_FSB_TO_BB(mp, \
 		(xfs_fsblock_t)(agno) * (mp)->m_sb.sb_agblocks + (agbno)))
@@ -224,8 +269,8 @@ typedef struct xfs_perag
 #define	XFS_AG_CHECK_DADDR(mp,d,len)	\
 	((len) == 1 ? \
 	    ASSERT((d) == XFS_SB_DADDR || \
-		   XFS_DADDR_TO_AGBNO(mp, d) != XFS_SB_DADDR) : \
-	    ASSERT(XFS_DADDR_TO_AGNO(mp, d) == \
-		   XFS_DADDR_TO_AGNO(mp, (d) + (len) - 1)))
+		   xfs_daddr_to_agbno(mp, d) != XFS_SB_DADDR) : \
+	    ASSERT(xfs_daddr_to_agno(mp, d) == \
+		   xfs_daddr_to_agno(mp, (d) + (len) - 1)))
 
 #endif	/* __XFS_AG_H__ */

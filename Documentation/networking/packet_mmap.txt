@@ -2,42 +2,49 @@
 + ABSTRACT
 --------------------------------------------------------------------------------
 
-This file documents the CONFIG_PACKET_MMAP option available with the PACKET
-socket interface on 2.4 and 2.6 kernels. This type of sockets is used for 
-capture network traffic with utilities like tcpdump or any other that uses 
-the libpcap library. 
+This file documents the mmap() facility available with the PACKET
+socket interface on 2.4/2.6/3.x kernels. This type of sockets is used for
+i) capture network traffic with utilities like tcpdump, ii) transmit network
+traffic, or any other that needs raw access to network interface.
 
-You can find the latest version of this document at
+You can find the latest version of this document at:
+    http://wiki.ipxwarzone.com/index.php5?title=Linux_packet_mmap
 
-    http://pusa.uv.es/~ulisses/packet_mmap/
+Howto can be found at:
+    http://wiki.gnu-log.net (packet_mmap)
 
-Please send me your comments to
-
+Please send your comments to
     Ulisses Alonso Camaró <uaca@i.hate.spam.alumni.uv.es>
+    Johann Baudy <johann.baudy@gnu-log.net>
 
 -------------------------------------------------------------------------------
 + Why use PACKET_MMAP
 --------------------------------------------------------------------------------
 
-In Linux 2.4/2.6 if PACKET_MMAP is not enabled, the capture process is very
-inefficient. It uses very limited buffers and requires one system call
-to capture each packet, it requires two if you want to get packet's 
-timestamp (like libpcap always does).
+In Linux 2.4/2.6/3.x if PACKET_MMAP is not enabled, the capture process is very
+inefficient. It uses very limited buffers and requires one system call to
+capture each packet, it requires two if you want to get packet's timestamp
+(like libpcap always does).
 
 In the other hand PACKET_MMAP is very efficient. PACKET_MMAP provides a size 
-configurable circular buffer mapped in user space. This way reading packets just 
-needs to wait for them, most of the time there is no need to issue a single 
-system call. By using a shared buffer between the kernel and the user 
+configurable circular buffer mapped in user space that can be used to either
+send or receive packets. This way reading packets just needs to wait for them,
+most of the time there is no need to issue a single system call. Concerning
+transmission, multiple packets can be sent through one system call to get the
+highest bandwidth. By using a shared buffer between the kernel and the user
 also has the benefit of minimizing packet copies.
 
-It's fine to use PACKET_MMAP to improve the performance of the capture process, 
-but it isn't everything. At least, if you are capturing at high speeds (this 
-is relative to the cpu speed), you should check if the device driver of your 
-network interface card supports some sort of interrupt load mitigation or 
-(even better) if it supports NAPI, also make sure it is enabled.
+It's fine to use PACKET_MMAP to improve the performance of the capture and
+transmission process, but it isn't everything. At least, if you are capturing
+at high speeds (this is relative to the cpu speed), you should check if the
+device driver of your network interface card supports some sort of interrupt
+load mitigation or (even better) if it supports NAPI, also make sure it is
+enabled. For transmission, check the MTU (Maximum Transmission Unit) used and
+supported by devices of your network. CPU IRQ pinning of your network interface
+card can also be an advantage.
 
 --------------------------------------------------------------------------------
-+ How to use CONFIG_PACKET_MMAP
++ How to use mmap() to improve capture process
 --------------------------------------------------------------------------------
 
 From the user standpoint, you should use the higher level libpcap library, which
@@ -49,7 +56,7 @@ support for PACKET_MMAP, and also probably the libpcap included in your distribu
 
 I'm aware of two implementations of PACKET_MMAP in libpcap:
 
-    http://pusa.uv.es/~ulisses/packet_mmap/  (by Simon Patarin, based on libpcap 0.6.2)
+    http://wiki.ipxwarzone.com/		     (by Simon Patarin, based on libpcap 0.6.2)
     http://public.lanl.gov/cpw/              (by Phil Wood, based on lastest libpcap)
 
 The rest of this document is intended for people who want to understand
@@ -57,7 +64,7 @@ the low level details or want to improve libpcap by including PACKET_MMAP
 support.
 
 --------------------------------------------------------------------------------
-+ How to use CONFIG_PACKET_MMAP directly
++ How to use mmap() directly to improve capture process
 --------------------------------------------------------------------------------
 
 From the system calls stand point, the use of PACKET_MMAP involves
@@ -66,6 +73,7 @@ the following process:
 
 [setup]     socket() -------> creation of the capture socket
             setsockopt() ---> allocation of the circular buffer (ring)
+                              option: PACKET_RX_RING
             mmap() ---------> mapping of the allocated buffer to the
                               user process
 
@@ -79,9 +87,7 @@ the following process:
 socket creation and destruction is straight forward, and is done 
 the same way with or without PACKET_MMAP:
 
-int fd;
-
-fd= socket(PF_PACKET, mode, htons(ETH_P_ALL))
+ int fd = socket(PF_PACKET, mode, htons(ETH_P_ALL));
 
 where mode is SOCK_RAW for the raw interface were link level
 information can be captured or SOCK_DGRAM for the cooked
@@ -92,18 +98,92 @@ by the kernel.
 The destruction of the socket and all associated resources
 is done by a simple call to close(fd).
 
-Next I will describe PACKET_MMAP settings and it's constraints,
+Next I will describe PACKET_MMAP settings and its constraints,
 also the mapping of the circular buffer in the user process and 
 the use of this buffer.
+
+--------------------------------------------------------------------------------
++ How to use mmap() directly to improve transmission process
+--------------------------------------------------------------------------------
+Transmission process is similar to capture as shown below.
+
+[setup]          socket() -------> creation of the transmission socket
+                 setsockopt() ---> allocation of the circular buffer (ring)
+                                   option: PACKET_TX_RING
+                 bind() ---------> bind transmission socket with a network interface
+                 mmap() ---------> mapping of the allocated buffer to the
+                                   user process
+
+[transmission]   poll() ---------> wait for free packets (optional)
+                 send() ---------> send all packets that are set as ready in
+                                   the ring
+                                   The flag MSG_DONTWAIT can be used to return
+                                   before end of transfer.
+
+[shutdown]  close() --------> destruction of the transmission socket and
+                              deallocation of all associated resources.
+
+Binding the socket to your network interface is mandatory (with zero copy) to
+know the header size of frames used in the circular buffer.
+
+As capture, each frame contains two parts:
+
+ --------------------
+| struct tpacket_hdr | Header. It contains the status of
+|                    | of this frame
+|--------------------|
+| data buffer        |
+.                    .  Data that will be sent over the network interface.
+.                    .
+ --------------------
+
+ bind() associates the socket to your network interface thanks to
+ sll_ifindex parameter of struct sockaddr_ll.
+
+ Initialization example:
+
+ struct sockaddr_ll my_addr;
+ struct ifreq s_ifr;
+ ...
+
+ strncpy (s_ifr.ifr_name, "eth0", sizeof(s_ifr.ifr_name));
+
+ /* get interface index of eth0 */
+ ioctl(this->socket, SIOCGIFINDEX, &s_ifr);
+
+ /* fill sockaddr_ll struct to prepare binding */
+ my_addr.sll_family = AF_PACKET;
+ my_addr.sll_protocol = htons(ETH_P_ALL);
+ my_addr.sll_ifindex =  s_ifr.ifr_ifindex;
+
+ /* bind socket to eth0 */
+ bind(this->socket, (struct sockaddr *)&my_addr, sizeof(struct sockaddr_ll));
+
+ A complete tutorial is available at: http://wiki.gnu-log.net/
+
+By default, the user should put data at :
+ frame base + TPACKET_HDRLEN - sizeof(struct sockaddr_ll)
+
+So, whatever you choose for the socket mode (SOCK_DGRAM or SOCK_RAW),
+the beginning of the user data will be at :
+ frame base + TPACKET_ALIGN(sizeof(struct tpacket_hdr))
+
+If you wish to put user data at a custom offset from the beginning of
+the frame (for payload alignment with SOCK_RAW mode for instance) you
+can set tp_net (with SOCK_DGRAM) or tp_mac (with SOCK_RAW). In order
+to make this work it must be enabled previously with setsockopt()
+and the PACKET_TX_HAS_OFF option.
 
 --------------------------------------------------------------------------------
 + PACKET_MMAP settings
 --------------------------------------------------------------------------------
 
-
 To setup PACKET_MMAP from user level code is done with a call like
 
+ - Capture process
      setsockopt(fd, SOL_PACKET, PACKET_RX_RING, (void *) &req, sizeof(req))
+ - Transmission process
+     setsockopt(fd, SOL_PACKET, PACKET_TX_RING, (void *) &req, sizeof(req))
 
 The most significant argument in the previous call is the req parameter, 
 this parameter must to have the following structure:
@@ -117,11 +197,11 @@ this parameter must to have the following structure:
     };
 
 This structure is defined in /usr/include/linux/if_packet.h and establishes a 
-circular buffer (ring) of unswappable memory mapped in the capture process. 
+circular buffer (ring) of unswappable memory.
 Being mapped in the capture process allows reading the captured frames and 
 related meta-information like timestamps without requiring a system call.
 
-Captured frames are grouped in blocks. Each block is a physically contiguous 
+Frames are grouped in blocks. Each block is a physically contiguous
 region of memory and holds tp_block_size/tp_frame_size frames. The total number 
 of blocks is tp_block_nr. Note that tp_frame_nr is a redundant parameter because
 
@@ -130,7 +210,6 @@ of blocks is tp_block_nr. Note that tp_frame_nr is a redundant parameter because
 indeed, packet_set_ring checks that the following condition is true
 
     frames_per_block * tp_block_nr == tp_frame_nr
-
 
 Lets see an example, with the following values:
 
@@ -153,10 +232,9 @@ we will get the following buffer structure:
 
 A frame can be of any size with the only condition it can fit in a block. A block
 can only hold an integer number of frames, or in other words, a frame cannot 
-be spawned accross two blocks, so there are some details you have to take into 
+be spawned across two blocks, so there are some details you have to take into 
 account when choosing the frame_size. See "Mapping and use of the circular 
 buffer (ring)".
-
 
 --------------------------------------------------------------------------------
 + PACKET_MMAP setting constraints
@@ -194,7 +272,6 @@ User space programs can include /usr/include/sys/user.h and
 The pagesize can also be determined dynamically with the getpagesize (2) 
 system call. 
 
-
  Block number limit
 --------------------
 
@@ -214,7 +291,6 @@ called pg_vec, its size limits the number of blocks that can be allocated.
       v  block #2
      block #1
 
-
 kmalloc allocates any number of bytes of physically contiguous memory from 
 a pool of pre-determined sizes. This pool of memory is maintained by the slab 
 allocator which is at the end the responsible for doing the allocation and 
@@ -228,7 +304,6 @@ In a 32 bit architecture, pointers are 4 bytes long, so the total number of
 pointers to blocks is
 
      131072/4 = 32768 blocks
-
 
  PACKET_MMAP buffer size calculator
 ------------------------------------
@@ -270,7 +345,6 @@ and a value for <frame size> of 2048 bytes. These parameters will yield
 and hence the buffer will have a 262144 MiB size. So it can hold 
 262144 MiB / 2048 bytes = 134217728 frames
 
-
 Actually, this buffer size is not possible with an i386 architecture. 
 Remember that the memory is allocated in kernel space, in the case of 
 an i386 kernel's memory size is limited to 1GiB.
@@ -302,7 +376,6 @@ the following (from include/linux/if_packet.h):
    - Start+tp_net: Packet data, aligned to TPACKET_ALIGNMENT=16.
    - Pad to align to TPACKET_ALIGNMENT=16
  */
-           
  
  The following are conditions that are checked in packet_set_ring
 
@@ -326,7 +399,7 @@ just one call to mmap is needed:
     mmap(0, size, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
 
 If tp_frame_size is a divisor of tp_block_size frames will be 
-contiguosly spaced by tp_frame_size bytes. If not, each 
+contiguously spaced by tp_frame_size bytes. If not, each
 tp_block_size/tp_frame_size frames there will be a gap between 
 the frames. This is because a frame cannot be spawn across two
 blocks. 
@@ -336,12 +409,12 @@ struct tpacket_hdr). If this field is 0 means that the frame is ready
 to be used for the kernel, If not, there is a frame the user can read 
 and the following flags apply:
 
++++ Capture process:
      from include/linux/if_packet.h
 
      #define TP_STATUS_COPY          2 
      #define TP_STATUS_LOSING        4 
      #define TP_STATUS_CSUMNOTREADY  8 
-
 
 TP_STATUS_COPY        : This flag indicates that the frame (and associated
                         meta information) has been truncated because it's 
@@ -361,7 +434,7 @@ TP_STATUS_LOSING      : indicates there were packet drops from last time
                         the PACKET_STATISTICS option.
 
 TP_STATUS_CSUMNOTREADY: currently it's used for outgoing IP packets which 
-                        it's checksum will be done in hardware. So while 
+                        its checksum will be done in hardware. So while
                         reading the packet we should not try to check the 
                         checksum. 
 
@@ -390,6 +463,259 @@ packets are in the ring:
 
 It doesn't incur in a race condition to first check the status value and 
 then poll for frames.
+
+++ Transmission process
+Those defines are also used for transmission:
+
+     #define TP_STATUS_AVAILABLE        0 // Frame is available
+     #define TP_STATUS_SEND_REQUEST     1 // Frame will be sent on next send()
+     #define TP_STATUS_SENDING          2 // Frame is currently in transmission
+     #define TP_STATUS_WRONG_FORMAT     4 // Frame format is not correct
+
+First, the kernel initializes all frames to TP_STATUS_AVAILABLE. To send a
+packet, the user fills a data buffer of an available frame, sets tp_len to
+current data buffer size and sets its status field to TP_STATUS_SEND_REQUEST.
+This can be done on multiple frames. Once the user is ready to transmit, it
+calls send(). Then all buffers with status equal to TP_STATUS_SEND_REQUEST are
+forwarded to the network device. The kernel updates each status of sent
+frames with TP_STATUS_SENDING until the end of transfer.
+At the end of each transfer, buffer status returns to TP_STATUS_AVAILABLE.
+
+    header->tp_len = in_i_size;
+    header->tp_status = TP_STATUS_SEND_REQUEST;
+    retval = send(this->socket, NULL, 0, 0);
+
+The user can also use poll() to check if a buffer is available:
+(status == TP_STATUS_SENDING)
+
+    struct pollfd pfd;
+    pfd.fd = fd;
+    pfd.revents = 0;
+    pfd.events = POLLOUT;
+    retval = poll(&pfd, 1, timeout);
+
+-------------------------------------------------------------------------------
++ What TPACKET versions are available and when to use them?
+-------------------------------------------------------------------------------
+
+ int val = tpacket_version;
+ setsockopt(fd, SOL_PACKET, PACKET_VERSION, &val, sizeof(val));
+ getsockopt(fd, SOL_PACKET, PACKET_VERSION, &val, sizeof(val));
+
+where 'tpacket_version' can be TPACKET_V1 (default), TPACKET_V2, TPACKET_V3.
+
+TPACKET_V1:
+	- Default if not otherwise specified by setsockopt(2)
+	- RX_RING, TX_RING available
+	- VLAN metadata information available for packets
+	  (TP_STATUS_VLAN_VALID)
+
+TPACKET_V1 --> TPACKET_V2:
+	- Made 64 bit clean due to unsigned long usage in TPACKET_V1
+	  structures, thus this also works on 64 bit kernel with 32 bit
+	  userspace and the like
+	- Timestamp resolution in nanoseconds instead of microseconds
+	- RX_RING, TX_RING available
+	- How to switch to TPACKET_V2:
+		1. Replace struct tpacket_hdr by struct tpacket2_hdr
+		2. Query header len and save
+		3. Set protocol version to 2, set up ring as usual
+		4. For getting the sockaddr_ll,
+		   use (void *)hdr + TPACKET_ALIGN(hdrlen) instead of
+		   (void *)hdr + TPACKET_ALIGN(sizeof(struct tpacket_hdr))
+
+TPACKET_V2 --> TPACKET_V3:
+	- Flexible buffer implementation:
+		1. Blocks can be configured with non-static frame-size
+		2. Read/poll is at a block-level (as opposed to packet-level)
+		3. Added poll timeout to avoid indefinite user-space wait
+		   on idle links
+		4. Added user-configurable knobs:
+			4.1 block::timeout
+			4.2 tpkt_hdr::sk_rxhash
+	- RX Hash data available in user space
+	- Currently only RX_RING available
+
+-------------------------------------------------------------------------------
++ AF_PACKET fanout mode
+-------------------------------------------------------------------------------
+
+In the AF_PACKET fanout mode, packet reception can be load balanced among
+processes. This also works in combination with mmap(2) on packet sockets.
+
+Minimal example code by David S. Miller (try things like "./test eth0 hash",
+"./test eth0 lb", etc.):
+
+#include <stddef.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <sys/socket.h>
+#include <sys/ioctl.h>
+
+#include <unistd.h>
+
+#include <linux/if_ether.h>
+#include <linux/if_packet.h>
+
+#include <net/if.h>
+
+static const char *device_name;
+static int fanout_type;
+static int fanout_id;
+
+#ifndef PACKET_FANOUT
+# define PACKET_FANOUT			18
+# define PACKET_FANOUT_HASH		0
+# define PACKET_FANOUT_LB		1
+#endif
+
+static int setup_socket(void)
+{
+	int err, fd = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_IP));
+	struct sockaddr_ll ll;
+	struct ifreq ifr;
+	int fanout_arg;
+
+	if (fd < 0) {
+		perror("socket");
+		return EXIT_FAILURE;
+	}
+
+	memset(&ifr, 0, sizeof(ifr));
+	strcpy(ifr.ifr_name, device_name);
+	err = ioctl(fd, SIOCGIFINDEX, &ifr);
+	if (err < 0) {
+		perror("SIOCGIFINDEX");
+		return EXIT_FAILURE;
+	}
+
+	memset(&ll, 0, sizeof(ll));
+	ll.sll_family = AF_PACKET;
+	ll.sll_ifindex = ifr.ifr_ifindex;
+	err = bind(fd, (struct sockaddr *) &ll, sizeof(ll));
+	if (err < 0) {
+		perror("bind");
+		return EXIT_FAILURE;
+	}
+
+	fanout_arg = (fanout_id | (fanout_type << 16));
+	err = setsockopt(fd, SOL_PACKET, PACKET_FANOUT,
+			 &fanout_arg, sizeof(fanout_arg));
+	if (err) {
+		perror("setsockopt");
+		return EXIT_FAILURE;
+	}
+
+	return fd;
+}
+
+static void fanout_thread(void)
+{
+	int fd = setup_socket();
+	int limit = 10000;
+
+	if (fd < 0)
+		exit(fd);
+
+	while (limit-- > 0) {
+		char buf[1600];
+		int err;
+
+		err = read(fd, buf, sizeof(buf));
+		if (err < 0) {
+			perror("read");
+			exit(EXIT_FAILURE);
+		}
+		if ((limit % 10) == 0)
+			fprintf(stdout, "(%d) \n", getpid());
+	}
+
+	fprintf(stdout, "%d: Received 10000 packets\n", getpid());
+
+	close(fd);
+	exit(0);
+}
+
+int main(int argc, char **argp)
+{
+	int fd, err;
+	int i;
+
+	if (argc != 3) {
+		fprintf(stderr, "Usage: %s INTERFACE {hash|lb}\n", argp[0]);
+		return EXIT_FAILURE;
+	}
+
+	if (!strcmp(argp[2], "hash"))
+		fanout_type = PACKET_FANOUT_HASH;
+	else if (!strcmp(argp[2], "lb"))
+		fanout_type = PACKET_FANOUT_LB;
+	else {
+		fprintf(stderr, "Unknown fanout type [%s]\n", argp[2]);
+		exit(EXIT_FAILURE);
+	}
+
+	device_name = argp[1];
+	fanout_id = getpid() & 0xffff;
+
+	for (i = 0; i < 4; i++) {
+		pid_t pid = fork();
+
+		switch (pid) {
+		case 0:
+			fanout_thread();
+
+		case -1:
+			perror("fork");
+			exit(EXIT_FAILURE);
+		}
+	}
+
+	for (i = 0; i < 4; i++) {
+		int status;
+
+		wait(&status);
+	}
+
+	return 0;
+}
+
+-------------------------------------------------------------------------------
++ PACKET_TIMESTAMP
+-------------------------------------------------------------------------------
+
+The PACKET_TIMESTAMP setting determines the source of the timestamp in
+the packet meta information.  If your NIC is capable of timestamping
+packets in hardware, you can request those hardware timestamps to used.
+Note: you may need to enable the generation of hardware timestamps with
+SIOCSHWTSTAMP.
+
+PACKET_TIMESTAMP accepts the same integer bit field as
+SO_TIMESTAMPING.  However, only the SOF_TIMESTAMPING_SYS_HARDWARE
+and SOF_TIMESTAMPING_RAW_HARDWARE values are recognized by
+PACKET_TIMESTAMP.  SOF_TIMESTAMPING_SYS_HARDWARE takes precedence over
+SOF_TIMESTAMPING_RAW_HARDWARE if both bits are set.
+
+    int req = 0;
+    req |= SOF_TIMESTAMPING_SYS_HARDWARE;
+    setsockopt(fd, SOL_PACKET, PACKET_TIMESTAMP, (void *) &req, sizeof(req))
+
+If PACKET_TIMESTAMP is not set, a software timestamp generated inside
+the networking stack is used (the behavior before this setting was added).
+
+See include/linux/net_tstamp.h and Documentation/networking/timestamping
+for more information on hardware timestamps.
+
+-------------------------------------------------------------------------------
++ Miscellaneous bits
+-------------------------------------------------------------------------------
+
+- Packet sockets work well together with Linux socket filters, thus you also
+  might want to have a look at Documentation/networking/filter.txt
 
 --------------------------------------------------------------------------------
 + THANKS

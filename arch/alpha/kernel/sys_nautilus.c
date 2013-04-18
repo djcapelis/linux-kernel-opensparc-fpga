@@ -35,7 +35,6 @@
 #include <linux/bitops.h>
 
 #include <asm/ptrace.h>
-#include <asm/system.h>
 #include <asm/dma.h>
 #include <asm/irq.h>
 #include <asm/mmu_context.h>
@@ -65,7 +64,7 @@ nautilus_init_irq(void)
 }
 
 static int __init
-nautilus_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
+nautilus_map_irq(const struct pci_dev *dev, u8 slot, u8 pin)
 {
 	/* Preserve the IRQ set up by the console.  */
 
@@ -187,7 +186,12 @@ nautilus_machine_check(unsigned long vector, unsigned long la_ptr)
 }
 
 extern void free_reserved_mem(void *, void *);
+extern void pcibios_claim_one_bus(struct pci_bus *);
 
+static struct resource irongate_io = {
+	.name	= "Irongate PCI IO",
+	.flags	= IORESOURCE_IO,
+};
 static struct resource irongate_mem = {
 	.name	= "Irongate PCI MEM",
 	.flags	= IORESOURCE_MEM,
@@ -205,9 +209,11 @@ nautilus_init_pci(void)
 	/* Scan our single hose.  */
 	bus = pci_scan_bus(0, alpha_mv.pci_ops, hose);
 	hose->bus = bus;
+	pcibios_claim_one_bus(bus);
 
 	irongate = pci_get_bus_and_slot(0, 0);
 	bus->self = irongate;
+	bus->resource[0] = &irongate_io;
 	bus->resource[1] = &irongate_mem;
 
 	pci_bus_size_bridges(bus);
@@ -243,6 +249,10 @@ nautilus_init_pci(void)
 		IRONGATE0->pci_mem = pci_mem;
 
 	pci_bus_assign_resources(bus);
+
+	/* pci_common_swizzle() relies on bus->self being NULL
+	   for the root bus, so just clear it. */
+	bus->self = NULL;
 	pci_fixup_irqs(alpha_mv.pci_swizzle, alpha_mv.pci_map_irq);
 }
 

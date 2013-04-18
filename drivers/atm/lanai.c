@@ -55,6 +55,7 @@
  */
 
 #include <linux/module.h>
+#include <linux/slab.h>
 #include <linux/mm.h>
 #include <linux/atmdev.h>
 #include <asm/io.h>
@@ -65,7 +66,6 @@
 #include <linux/init.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
-#include <linux/dma-mapping.h>
 
 /* -------------------- TUNABLE PARAMATERS: */
 
@@ -246,8 +246,8 @@ struct lanai_vcc {
 };
 
 enum lanai_type {
-	lanai2	= PCI_VENDOR_ID_EF_ATM_LANAI2,
-	lanaihb	= PCI_VENDOR_ID_EF_ATM_LANAIHB
+	lanai2	= PCI_DEVICE_ID_EF_ATM_LANAI2,
+	lanaihb	= PCI_DEVICE_ID_EF_ATM_LANAIHB
 };
 
 struct lanai_dev_stats {
@@ -293,7 +293,6 @@ struct lanai_dev {
 	struct atm_vcc *cbrvcc;
 	int number;
 	int board_rev;
-	u8 pci_revision;
 /* TODO - look at race conditions with maintence of conf1/conf2 */
 /* TODO - transmit locking: should we use _irq not _irqsave? */
 /* TODO - organize above in some rational fashion (see <asm/cache.h>) */
@@ -308,11 +307,10 @@ static void vci_bitfield_iterate(struct lanai_dev *lanai,
 	const unsigned long *lp,
 	void (*func)(struct lanai_dev *,vci_t vci))
 {
-	vci_t vci = find_first_bit(lp, NUM_VCI);
-	while (vci < NUM_VCI) {
+	vci_t vci;
+
+	for_each_set_bit(vci, lp, NUM_VCI)
 		func(lanai, vci);
-		vci = find_next_bit(lp, NUM_VCI, vci + 1);
-	}
 }
 
 /* -------------------- BUFFER  UTILITIES: */
@@ -553,8 +551,8 @@ static inline void sram_write(const struct lanai_dev *lanai,
 	writel(val, sram_addr(lanai, offset));
 }
 
-static int __init sram_test_word(
-	const struct lanai_dev *lanai, int offset, u32 pattern)
+static int sram_test_word(const struct lanai_dev *lanai, int offset,
+			  u32 pattern)
 {
 	u32 readback;
 	sram_write(lanai, pattern, offset);
@@ -568,7 +566,7 @@ static int __init sram_test_word(
 	return -EIO;
 }
 
-static int __devinit sram_test_pass(const struct lanai_dev *lanai, u32 pattern)
+static int sram_test_pass(const struct lanai_dev *lanai, u32 pattern)
 {
 	int offset, result = 0;
 	for (offset = 0; offset < SRAM_BYTES && result == 0; offset += 4)
@@ -576,7 +574,7 @@ static int __devinit sram_test_pass(const struct lanai_dev *lanai, u32 pattern)
 	return result;
 }
 
-static int __devinit sram_test_and_clear(const struct lanai_dev *lanai)
+static int sram_test_and_clear(const struct lanai_dev *lanai)
 {
 #ifdef FULL_MEMORY_TEST
 	int result;
@@ -862,7 +860,7 @@ static inline void aal0_buffer_free(struct lanai_dev *lanai)
 #ifndef READ_EEPROM
 
 /* Stub functions to use if EEPROM reading is disabled */
-static int __devinit eeprom_read(struct lanai_dev *lanai)
+static int eeprom_read(struct lanai_dev *lanai)
 {
 	printk(KERN_INFO DEV_LABEL "(itf %d): *NOT* reading EEPROM\n",
 	    lanai->number);
@@ -870,7 +868,7 @@ static int __devinit eeprom_read(struct lanai_dev *lanai)
 	return 0;
 }
 
-static int __devinit eeprom_validate(struct lanai_dev *lanai)
+static int eeprom_validate(struct lanai_dev *lanai)
 {
 	lanai->serialno = 0;
 	lanai->magicno = EEPROM_MAGIC_VALUE;
@@ -879,7 +877,7 @@ static int __devinit eeprom_validate(struct lanai_dev *lanai)
 
 #else /* READ_EEPROM */
 
-static int __devinit eeprom_read(struct lanai_dev *lanai)
+static int eeprom_read(struct lanai_dev *lanai)
 {
 	int i, address;
 	u8 data;
@@ -903,7 +901,7 @@ static int __devinit eeprom_read(struct lanai_dev *lanai)
 		clock_l(); udelay(5);
 		for (i = 128; i != 0; i >>= 1) {   /* write command out */
 			tmp = (lanai->conf1 & ~CONFIG1_PROMDATA) |
-			    (data & i) ? CONFIG1_PROMDATA : 0;
+			    ((data & i) ? CONFIG1_PROMDATA : 0);
 			if (lanai->conf1 != tmp) {
 				set_config1(tmp);
 				udelay(5);	/* Let new data settle */
@@ -955,7 +953,7 @@ static inline u32 eeprom_be4(const struct lanai_dev *lanai, int address)
 }
 
 /* Checksum/validate EEPROM contents */
-static int __devinit eeprom_validate(struct lanai_dev *lanai)
+static int eeprom_validate(struct lanai_dev *lanai)
 {
 	int i, s;
 	u32 v;
@@ -1000,9 +998,7 @@ static int __devinit eeprom_validate(struct lanai_dev *lanai)
 			    (unsigned int) e[EEPROM_MAC_REV + i]);
 			return -EIO;
 		}
-	DPRINTK("eeprom: MAC address = %02X:%02X:%02X:%02X:%02X:%02X\n",
-		e[EEPROM_MAC + 0], e[EEPROM_MAC + 1], e[EEPROM_MAC + 2],
-		e[EEPROM_MAC + 3], e[EEPROM_MAC + 4], e[EEPROM_MAC + 5]);
+	DPRINTK("eeprom: MAC address = %pM\n", &e[EEPROM_MAC]);
 	/* Verify serial number */
 	lanai->serialno = eeprom_be4(lanai, EEPROM_SERIAL);
 	v = eeprom_be4(lanai, EEPROM_SERIAL_REV);
@@ -1259,7 +1255,7 @@ static inline void lanai_endtx(struct lanai_dev *lanai,
 	/*
 	 * Since the "butt register" is a shared resounce on the card we
 	 * serialize all accesses to it through this spinlock.  This is
-	 * mostly just paranoia sicne the register is rarely "busy" anyway
+	 * mostly just paranoia since the register is rarely "busy" anyway
 	 * but is needed for correctness.
 	 */
 	spin_lock(&lanai->endtxlock);
@@ -1452,7 +1448,7 @@ static void vcc_rx_aal0(struct lanai_dev *lanai)
 #include <linux/vmalloc.h>
 #endif
 
-static int __devinit vcc_table_allocate(struct lanai_dev *lanai)
+static int vcc_table_allocate(struct lanai_dev *lanai)
 {
 #ifdef VCCTABLE_GETFREEPAGE
 	APRINTK((lanai->num_vci) * sizeof(struct lanai_vcc *) <= PAGE_SIZE,
@@ -1461,10 +1457,9 @@ static int __devinit vcc_table_allocate(struct lanai_dev *lanai)
 	return (lanai->vccs == NULL) ? -ENOMEM : 0;
 #else
 	int bytes = (lanai->num_vci) * sizeof(struct lanai_vcc *);
-	lanai->vccs = (struct lanai_vcc **) vmalloc(bytes);
+	lanai->vccs = vzalloc(bytes);
 	if (unlikely(lanai->vccs == NULL))
 		return -ENOMEM;
-	memset(lanai->vccs, 0, bytes);
 	return 0;
 #endif
 }
@@ -1577,7 +1572,7 @@ static inline void host_vcc_unbind(struct lanai_dev *lanai,
 
 static void lanai_reset(struct lanai_dev *lanai)
 {
-	printk(KERN_CRIT DEV_LABEL "(itf %d): *NOT* reseting - not "
+	printk(KERN_CRIT DEV_LABEL "(itf %d): *NOT* resetting - not "
 	    "implemented\n", lanai->number);
 	/* TODO */
 	/* The following is just a hack until we write the real
@@ -1593,7 +1588,7 @@ static void lanai_reset(struct lanai_dev *lanai)
 /*
  * Allocate service buffer and tell card about it
  */
-static int __devinit service_buffer_allocate(struct lanai_dev *lanai)
+static int service_buffer_allocate(struct lanai_dev *lanai)
 {
 	lanai_buf_allocate(&lanai->service, SERVICE_ENTRIES * 4, 8,
 	    lanai->pci);
@@ -1947,11 +1942,10 @@ static int check_board_id_and_rev(const char *name, u32 val, int *revp)
 
 /* -------------------- PCI INITIALIZATION/SHUTDOWN: */
 
-static int __devinit lanai_pci_start(struct lanai_dev *lanai)
+static int lanai_pci_start(struct lanai_dev *lanai)
 {
 	struct pci_dev *pci = lanai->pci;
 	int result;
-	u16 w;
 
 	if (pci_enable_device(pci) != 0) {
 		printk(KERN_ERR DEV_LABEL "(itf %d): can't enable "
@@ -1959,31 +1953,17 @@ static int __devinit lanai_pci_start(struct lanai_dev *lanai)
 		return -ENXIO;
 	}
 	pci_set_master(pci);
-	if (pci_set_dma_mask(pci, DMA_32BIT_MASK) != 0) {
+	if (pci_set_dma_mask(pci, DMA_BIT_MASK(32)) != 0) {
 		printk(KERN_WARNING DEV_LABEL
 		    "(itf %d): No suitable DMA available.\n", lanai->number);
 		return -EBUSY;
 	}
-	if (pci_set_consistent_dma_mask(pci, DMA_32BIT_MASK) != 0) {
+	if (pci_set_consistent_dma_mask(pci, DMA_BIT_MASK(32)) != 0) {
 		printk(KERN_WARNING DEV_LABEL
 		    "(itf %d): No suitable DMA available.\n", lanai->number);
 		return -EBUSY;
 	}
-	/* Get the pci revision byte */
-	result = pci_read_config_byte(pci, PCI_REVISION_ID,
-	    &lanai->pci_revision);
-	if (result != PCIBIOS_SUCCESSFUL) {
-		printk(KERN_ERR DEV_LABEL "(itf %d): can't read "
-		    "PCI_REVISION_ID: %d\n", lanai->number, result);
-		return -EINVAL;
-	}
-	result = pci_read_config_word(pci, PCI_SUBSYSTEM_ID, &w);
-	if (result != PCIBIOS_SUCCESSFUL) {
-		printk(KERN_ERR DEV_LABEL "(itf %d): can't read "
-		    "PCI_SUBSYSTEM_ID: %d\n", lanai->number, result);
-		return -EINVAL;
-	}
-	result = check_board_id_and_rev("PCI", w, NULL);
+	result = check_board_id_and_rev("PCI", pci->subsystem_device, NULL);
 	if (result != 0)
 		return result;
 	/* Set latency timer to zero as per lanai docs */
@@ -2002,7 +1982,7 @@ static int __devinit lanai_pci_start(struct lanai_dev *lanai)
 
 /*
  * We _can_ use VCI==0 for normal traffic, but only for UBR (or we'll
- * get a CBRZERO interrupt), and we can use it only if noone is receiving
+ * get a CBRZERO interrupt), and we can use it only if no one is receiving
  * AAL0 traffic (since they will use the same queue) - according to the
  * docs we shouldn't even use it for AAL0 traffic
  */
@@ -2143,7 +2123,7 @@ static inline void lanai_cbr_shutdown(struct lanai_dev *lanai)
 /* -------------------- OPERATIONS: */
 
 /* setup a newly detected device */
-static int __devinit lanai_dev_open(struct atm_dev *atmdev)
+static int lanai_dev_open(struct atm_dev *atmdev)
 {
 	struct lanai_dev *lanai = (struct lanai_dev *) atmdev->dev_data;
 	unsigned long raw_base;
@@ -2253,11 +2233,8 @@ static int __devinit lanai_dev_open(struct atm_dev *atmdev)
 	memcpy(atmdev->esi, eeprom_mac(lanai), ESI_LEN);
 	lanai_timed_poll_start(lanai);
 	printk(KERN_NOTICE DEV_LABEL "(itf %d): rev.%d, base=0x%lx, irq=%u "
-	    "(%02X-%02X-%02X-%02X-%02X-%02X)\n", lanai->number,
-	    (int) lanai->pci_revision, (unsigned long) lanai->base,
-	    lanai->pci->irq,
-	    atmdev->esi[0], atmdev->esi[1], atmdev->esi[2],
-	    atmdev->esi[3], atmdev->esi[4], atmdev->esi[5]);
+		"(%pMF)\n", lanai->number, (int) lanai->pci->revision,
+		(unsigned long) lanai->base, lanai->pci->irq, atmdev->esi);
 	printk(KERN_NOTICE DEV_LABEL "(itf %d): LANAI%s, serialno=%u(0x%X), "
 	    "board_rev=%d\n", lanai->number,
 	    lanai->type==lanai2 ? "2" : "HB", (unsigned int) lanai->serialno,
@@ -2491,16 +2468,10 @@ static int lanai_proc_read(struct atm_dev *atmdev, loff_t *pos, char *page)
 		    (unsigned int) lanai->magicno, lanai->num_vci);
 	if (left-- == 0)
 		return sprintf(page, "revision: board=%d, pci_if=%d\n",
-		    lanai->board_rev, (int) lanai->pci_revision);
+		    lanai->board_rev, (int) lanai->pci->revision);
 	if (left-- == 0)
-		return sprintf(page, "EEPROM ESI: "
-		    "%02X:%02X:%02X:%02X:%02X:%02X\n",
-		    lanai->eeprom[EEPROM_MAC + 0],
-		    lanai->eeprom[EEPROM_MAC + 1],
-		    lanai->eeprom[EEPROM_MAC + 2],
-		    lanai->eeprom[EEPROM_MAC + 3],
-		    lanai->eeprom[EEPROM_MAC + 4],
-		    lanai->eeprom[EEPROM_MAC + 5]);
+		return sprintf(page, "EEPROM ESI: %pM\n",
+		    &lanai->eeprom[EEPROM_MAC]);
 	if (left-- == 0)
 		return sprintf(page, "status: SOOL=%d, LOCD=%d, LED=%d, "
 		    "GPIN=%d\n", (lanai->status & STATUS_SOOL) ? 1 : 0,
@@ -2595,8 +2566,8 @@ static const struct atmdev_ops ops = {
 };
 
 /* initialize one probed card */
-static int __devinit lanai_init_one(struct pci_dev *pci,
-				    const struct pci_device_id *ident)
+static int lanai_init_one(struct pci_dev *pci,
+			  const struct pci_device_id *ident)
 {
 	struct lanai_dev *lanai;
 	struct atm_dev *atmdev;
@@ -2609,7 +2580,7 @@ static int __devinit lanai_init_one(struct pci_dev *pci,
 		return -ENOMEM;
 	}
 
-	atmdev = atm_dev_register(DEV_LABEL, &ops, -1, NULL);
+	atmdev = atm_dev_register(DEV_LABEL, &pci->dev, &ops, -1, NULL);
 	if (atmdev == NULL) {
 		printk(KERN_ERR DEV_LABEL
 		    ": couldn't register atm device!\n");
@@ -2631,14 +2602,8 @@ static int __devinit lanai_init_one(struct pci_dev *pci,
 }
 
 static struct pci_device_id lanai_pci_tbl[] = {
-	{
-		PCI_VENDOR_ID_EF, PCI_VENDOR_ID_EF_ATM_LANAI2,
-		PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0
-	},
-	{
-		PCI_VENDOR_ID_EF, PCI_VENDOR_ID_EF_ATM_LANAIHB,
-		PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0
-	},
+	{ PCI_VDEVICE(EF, PCI_DEVICE_ID_EF_ATM_LANAI2) },
+	{ PCI_VDEVICE(EF, PCI_DEVICE_ID_EF_ATM_LANAIHB) },
 	{ 0, }	/* terminal entry */
 };
 MODULE_DEVICE_TABLE(pci, lanai_pci_tbl);

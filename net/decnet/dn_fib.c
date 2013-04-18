@@ -20,6 +20,7 @@
 #include <linux/string.h>
 #include <linux/net.h>
 #include <linux/socket.h>
+#include <linux/slab.h>
 #include <linux/sockios.h>
 #include <linux/init.h>
 #include <linux/skbuff.h>
@@ -29,7 +30,7 @@
 #include <linux/netdevice.h>
 #include <linux/timer.h>
 #include <linux/spinlock.h>
-#include <asm/atomic.h>
+#include <linux/atomic.h>
 #include <asm/uaccess.h>
 #include <net/neighbour.h>
 #include <net/dst.h>
@@ -200,10 +201,8 @@ static int dn_fib_check_nh(const struct rtmsg *r, struct dn_fib_info *fi, struct
 	int err;
 
 	if (nh->nh_gw) {
-		struct flowi fl;
+		struct flowidn fld;
 		struct dn_fib_res res;
-
-		memset(&fl, 0, sizeof(fl));
 
 		if (nh->nh_flags&RTNH_F_ONLINK) {
 			struct net_device *dev;
@@ -212,7 +211,7 @@ static int dn_fib_check_nh(const struct rtmsg *r, struct dn_fib_info *fi, struct
 				return -EINVAL;
 			if (dnet_addr_type(nh->nh_gw) != RTN_UNICAST)
 				return -EINVAL;
-			if ((dev = __dev_get_by_index(nh->nh_oif)) == NULL)
+			if ((dev = __dev_get_by_index(&init_net, nh->nh_oif)) == NULL)
 				return -ENODEV;
 			if (!(dev->flags&IFF_UP))
 				return -ENETDOWN;
@@ -222,15 +221,15 @@ static int dn_fib_check_nh(const struct rtmsg *r, struct dn_fib_info *fi, struct
 			return 0;
 		}
 
-		memset(&fl, 0, sizeof(fl));
-		fl.fld_dst = nh->nh_gw;
-		fl.oif = nh->nh_oif;
-		fl.fld_scope = r->rtm_scope + 1;
+		memset(&fld, 0, sizeof(fld));
+		fld.daddr = nh->nh_gw;
+		fld.flowidn_oif = nh->nh_oif;
+		fld.flowidn_scope = r->rtm_scope + 1;
 
-		if (fl.fld_scope < RT_SCOPE_LINK)
-			fl.fld_scope = RT_SCOPE_LINK;
+		if (fld.flowidn_scope < RT_SCOPE_LINK)
+			fld.flowidn_scope = RT_SCOPE_LINK;
 
-		if ((err = dn_fib_lookup(&fl, &res)) != 0)
+		if ((err = dn_fib_lookup(&fld, &res)) != 0)
 			return err;
 
 		err = -EINVAL;
@@ -255,7 +254,7 @@ out:
 		if (nh->nh_flags&(RTNH_F_PERVASIVE|RTNH_F_ONLINK))
 			return -EINVAL;
 
-		dev = __dev_get_by_index(nh->nh_oif);
+		dev = __dev_get_by_index(&init_net, nh->nh_oif);
 		if (dev == NULL || dev->dn_ptr == NULL)
 			return -ENODEV;
 		if (!(dev->flags&IFF_UP))
@@ -303,11 +302,12 @@ struct dn_fib_info *dn_fib_create_info(const struct rtmsg *r, struct dn_kern_rta
 		struct rtattr *attr = RTA_DATA(rta->rta_mx);
 
 		while(RTA_OK(attr, attrlen)) {
-			unsigned flavour = attr->rta_type;
+			unsigned int flavour = attr->rta_type;
+
 			if (flavour) {
 				if (flavour > RTAX_MAX)
 					goto err_inval;
-				fi->fib_metrics[flavour-1] = *(unsigned*)RTA_DATA(attr);
+				fi->fib_metrics[flavour-1] = *(unsigned int *)RTA_DATA(attr);
 			}
 			attr = RTA_NEXT(attr, attrlen);
 		}
@@ -355,7 +355,7 @@ struct dn_fib_info *dn_fib_create_info(const struct rtmsg *r, struct dn_kern_rta
 		if (nhs != 1 || nh->nh_gw)
 			goto err_inval;
 		nh->nh_scope = RT_SCOPE_NOWHERE;
-		nh->nh_dev = dev_get_by_index(fi->fib_nh->nh_oif);
+		nh->nh_dev = dev_get_by_index(&init_net, fi->fib_nh->nh_oif);
 		err = -ENODEV;
 		if (nh->nh_dev == NULL)
 			goto failure;
@@ -405,7 +405,7 @@ failure:
 	return NULL;
 }
 
-int dn_fib_semantic_match(int type, struct dn_fib_info *fi, const struct flowi *fl, struct dn_fib_res *res)
+int dn_fib_semantic_match(int type, struct dn_fib_info *fi, const struct flowidn *fld, struct dn_fib_res *res)
 {
 	int err = dn_fib_props[type].error;
 
@@ -415,38 +415,39 @@ int dn_fib_semantic_match(int type, struct dn_fib_info *fi, const struct flowi *
 
 		res->fi = fi;
 
-		switch(type) {
-			case RTN_NAT:
-				DN_FIB_RES_RESET(*res);
+		switch (type) {
+		case RTN_NAT:
+			DN_FIB_RES_RESET(*res);
+			atomic_inc(&fi->fib_clntref);
+			return 0;
+		case RTN_UNICAST:
+		case RTN_LOCAL:
+			for_nexthops(fi) {
+				if (nh->nh_flags & RTNH_F_DEAD)
+					continue;
+				if (!fld->flowidn_oif ||
+				    fld->flowidn_oif == nh->nh_oif)
+					break;
+			}
+			if (nhsel < fi->fib_nhs) {
+				res->nh_sel = nhsel;
 				atomic_inc(&fi->fib_clntref);
 				return 0;
-			case RTN_UNICAST:
-			case RTN_LOCAL:
-				for_nexthops(fi) {
-					if (nh->nh_flags & RTNH_F_DEAD)
-						continue;
-					if (!fl->oif || fl->oif == nh->nh_oif)
-						break;
-				}
-				if (nhsel < fi->fib_nhs) {
-					res->nh_sel = nhsel;
-					atomic_inc(&fi->fib_clntref);
-					return 0;
-				}
-				endfor_nexthops(fi);
-				res->fi = NULL;
-				return 1;
-			default:
-				if (net_ratelimit())
-					 printk("DECnet: impossible routing event : dn_fib_semantic_match type=%d\n", type);
-				res->fi = NULL;
-				return -EINVAL;
+			}
+			endfor_nexthops(fi);
+			res->fi = NULL;
+			return 1;
+		default:
+			net_err_ratelimited("DECnet: impossible routing event : dn_fib_semantic_match type=%d\n",
+					    type);
+			res->fi = NULL;
+			return -EINVAL;
 		}
 	}
 	return err;
 }
 
-void dn_fib_select_multipath(const struct flowi *fl, struct dn_fib_res *res)
+void dn_fib_select_multipath(const struct flowidn *fld, struct dn_fib_res *res)
 {
 	struct dn_fib_info *fi = res->fi;
 	int w;
@@ -504,11 +505,26 @@ static int dn_fib_check_attr(struct rtmsg *r, struct rtattr **rta)
 	return 0;
 }
 
+static inline u32 rtm_get_table(struct rtattr **rta, u8 table)
+{
+	if (rta[RTA_TABLE - 1])
+		table = nla_get_u32((struct nlattr *) rta[RTA_TABLE - 1]);
+
+	return table;
+}
+
 static int dn_fib_rtm_delroute(struct sk_buff *skb, struct nlmsghdr *nlh, void *arg)
 {
+	struct net *net = sock_net(skb->sk);
 	struct dn_fib_table *tb;
 	struct rtattr **rta = arg;
 	struct rtmsg *r = NLMSG_DATA(nlh);
+
+	if (!capable(CAP_NET_ADMIN))
+		return -EPERM;
+
+	if (!net_eq(net, &init_net))
+		return -EINVAL;
 
 	if (dn_fib_check_attr(r, rta))
 		return -EINVAL;
@@ -522,9 +538,16 @@ static int dn_fib_rtm_delroute(struct sk_buff *skb, struct nlmsghdr *nlh, void *
 
 static int dn_fib_rtm_newroute(struct sk_buff *skb, struct nlmsghdr *nlh, void *arg)
 {
+	struct net *net = sock_net(skb->sk);
 	struct dn_fib_table *tb;
 	struct rtattr **rta = arg;
 	struct rtmsg *r = NLMSG_DATA(nlh);
+
+	if (!capable(CAP_NET_ADMIN))
+		return -EPERM;
+
+	if (!net_eq(net, &init_net))
+		return -EINVAL;
 
 	if (dn_fib_check_attr(r, rta))
 		return -EINVAL;
@@ -601,19 +624,21 @@ static void dn_fib_del_ifaddr(struct dn_ifaddr *ifa)
 	ASSERT_RTNL();
 
 	/* Scan device list */
-	read_lock(&dev_base_lock);
-	for_each_netdev(dev) {
-		dn_db = dev->dn_ptr;
+	rcu_read_lock();
+	for_each_netdev_rcu(&init_net, dev) {
+		dn_db = rcu_dereference(dev->dn_ptr);
 		if (dn_db == NULL)
 			continue;
-		for(ifa2 = dn_db->ifa_list; ifa2; ifa2 = ifa2->ifa_next) {
+		for (ifa2 = rcu_dereference(dn_db->ifa_list);
+		     ifa2 != NULL;
+		     ifa2 = rcu_dereference(ifa2->ifa_next)) {
 			if (ifa2->ifa_local == ifa->ifa_local) {
 				found_it = 1;
 				break;
 			}
 		}
 	}
-	read_unlock(&dev_base_lock);
+	rcu_read_unlock();
 
 	if (found_it == 0) {
 		fib_magic(RTM_DELROUTE, RTN_LOCAL, ifa->ifa_local, 16, ifa);
@@ -637,20 +662,20 @@ static int dn_fib_dnaddr_event(struct notifier_block *this, unsigned long event,
 {
 	struct dn_ifaddr *ifa = (struct dn_ifaddr *)ptr;
 
-	switch(event) {
-		case NETDEV_UP:
-			dn_fib_add_ifaddr(ifa);
-			dn_fib_sync_up(ifa->ifa_dev->dev);
+	switch (event) {
+	case NETDEV_UP:
+		dn_fib_add_ifaddr(ifa);
+		dn_fib_sync_up(ifa->ifa_dev->dev);
+		dn_rt_cache_flush(-1);
+		break;
+	case NETDEV_DOWN:
+		dn_fib_del_ifaddr(ifa);
+		if (ifa->ifa_dev && ifa->ifa_dev->ifa_list == NULL) {
+			dn_fib_disable_addr(ifa->ifa_dev->dev, 1);
+		} else {
 			dn_rt_cache_flush(-1);
-			break;
-		case NETDEV_DOWN:
-			dn_fib_del_ifaddr(ifa);
-			if (ifa->ifa_dev && ifa->ifa_dev->ifa_list == NULL) {
-				dn_fib_disable_addr(ifa->ifa_dev->dev, 1);
-			} else {
-				dn_rt_cache_flush(-1);
-			}
-			break;
+		}
+		break;
 	}
 	return NOTIFY_DONE;
 }
@@ -753,8 +778,8 @@ void __init dn_fib_init(void)
 
 	register_dnaddr_notifier(&dn_fib_dnaddr_notifier);
 
-	rtnl_register(PF_DECnet, RTM_NEWROUTE, dn_fib_rtm_newroute, NULL);
-	rtnl_register(PF_DECnet, RTM_DELROUTE, dn_fib_rtm_delroute, NULL);
+	rtnl_register(PF_DECnet, RTM_NEWROUTE, dn_fib_rtm_newroute, NULL, NULL);
+	rtnl_register(PF_DECnet, RTM_DELROUTE, dn_fib_rtm_delroute, NULL, NULL);
 }
 
 

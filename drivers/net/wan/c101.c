@@ -14,8 +14,11 @@
  *    Moxa C101 User's Manual
  */
 
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 #include <linux/module.h>
 #include <linux/kernel.h>
+#include <linux/capability.h>
 #include <linux/slab.h>
 #include <linux/types.h>
 #include <linux/string.h>
@@ -88,7 +91,7 @@ static card_t **new_card = &first_card;
 /* EDA address register must be set in EDAL, EDAH order - 8 bit ISA bus */
 #define sca_outw(value, reg, card) do { \
 	writeb(value & 0xFF, (card)->win0base + C101_SCA + (reg)); \
-	writeb((value >> 8 ) & 0xFF, (card)->win0base + C101_SCA + (reg+1));\
+	writeb((value >> 8 ) & 0xFF, (card)->win0base + C101_SCA + (reg + 1));\
 } while(0)
 
 #define port_to_card(port)	   (port)
@@ -113,7 +116,7 @@ static inline void openwin(card_t *card, u8 page)
 }
 
 
-#include "hd6457x.c"
+#include "hd64570.c"
 
 
 static inline void set_carrier(port_t *port)
@@ -133,9 +136,9 @@ static void sca_msci_intr(port_t *port)
 	sca_out(stat & (ST1_UDRN | ST1_CDCD), MSCI0_OFFSET + ST1, port);
 
 	if (stat & ST1_UDRN) {
-		struct net_device_stats *stats = hdlc_stats(port_to_dev(port));
-		stats->tx_errors++; /* TX Underrun error detected */
-		stats->tx_fifo_errors++;
+		/* TX Underrun error detected */
+		port_to_dev(port)->stats.tx_errors++;
+		port_to_dev(port)->stats.tx_fifo_errors++;
 	}
 
 	stat = sca_in(MSCI1_OFFSET + ST1, port); /* read MSCI1 ST1 status */
@@ -263,7 +266,7 @@ static int c101_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 		    new_line.clock_type != CLOCK_TXFROMRX &&
 		    new_line.clock_type != CLOCK_INT &&
 		    new_line.clock_type != CLOCK_TXINT)
-		return -EINVAL;	/* No such clock setting */
+			return -EINVAL;	/* No such clock setting */
 
 		if (new_line.loopback != 0 && new_line.loopback != 1)
 			return -EINVAL;
@@ -296,7 +299,13 @@ static void c101_destroy_card(card_t *card)
 	kfree(card);
 }
 
-
+static const struct net_device_ops c101_ops = {
+	.ndo_open       = c101_open,
+	.ndo_stop       = c101_close,
+	.ndo_change_mtu = hdlc_change_mtu,
+	.ndo_start_xmit = hdlc_start_xmit,
+	.ndo_do_ioctl   = c101_ioctl,
+};
 
 static int __init c101_run(unsigned long irq, unsigned long winbase)
 {
@@ -306,45 +315,42 @@ static int __init c101_run(unsigned long irq, unsigned long winbase)
 	int result;
 
 	if (irq<3 || irq>15 || irq == 6) /* FIXME */ {
-		printk(KERN_ERR "c101: invalid IRQ value\n");
+		pr_err("invalid IRQ value\n");
 		return -ENODEV;
 	}
 
 	if (winbase < 0xC0000 || winbase > 0xDFFFF || (winbase & 0x3FFF) !=0) {
-		printk(KERN_ERR "c101: invalid RAM value\n");
+		pr_err("invalid RAM value\n");
 		return -ENODEV;
 	}
 
-	card = kmalloc(sizeof(card_t), GFP_KERNEL);
-	if (card == NULL) {
-		printk(KERN_ERR "c101: unable to allocate memory\n");
+	card = kzalloc(sizeof(card_t), GFP_KERNEL);
+	if (card == NULL)
 		return -ENOBUFS;
-	}
-	memset(card, 0, sizeof(card_t));
 
 	card->dev = alloc_hdlcdev(card);
 	if (!card->dev) {
-		printk(KERN_ERR "c101: unable to allocate memory\n");
+		pr_err("unable to allocate memory\n");
 		kfree(card);
 		return -ENOBUFS;
 	}
 
 	if (request_irq(irq, sca_intr, 0, devname, card)) {
-		printk(KERN_ERR "c101: could not allocate IRQ\n");
+		pr_err("could not allocate IRQ\n");
 		c101_destroy_card(card);
 		return -EBUSY;
 	}
 	card->irq = irq;
 
 	if (!request_mem_region(winbase, C101_MAPPED_RAM_SIZE, devname)) {
-		printk(KERN_ERR "c101: could not request RAM window\n");
+		pr_err("could not request RAM window\n");
 		c101_destroy_card(card);
 		return -EBUSY;
 	}
 	card->phy_winbase = winbase;
 	card->win0base = ioremap(winbase, C101_MAPPED_RAM_SIZE);
 	if (!card->win0base) {
-		printk(KERN_ERR "c101: could not map I/O address\n");
+		pr_err("could not map I/O address\n");
 		c101_destroy_card(card);
 		return -EFAULT;
 	}
@@ -364,32 +370,27 @@ static int __init c101_run(unsigned long irq, unsigned long winbase)
 	hdlc = dev_to_hdlc(dev);
 
 	spin_lock_init(&card->lock);
-	SET_MODULE_OWNER(dev);
 	dev->irq = irq;
 	dev->mem_start = winbase;
 	dev->mem_end = winbase + C101_MAPPED_RAM_SIZE - 1;
 	dev->tx_queue_len = 50;
-	dev->do_ioctl = c101_ioctl;
-	dev->open = c101_open;
-	dev->stop = c101_close;
+	dev->netdev_ops = &c101_ops;
 	hdlc->attach = sca_attach;
 	hdlc->xmit = sca_xmit;
 	card->settings.clock_type = CLOCK_EXT;
 
 	result = register_hdlc_device(dev);
 	if (result) {
-		printk(KERN_WARNING "c101: unable to register hdlc device\n");
+		pr_warn("unable to register hdlc device\n");
 		c101_destroy_card(card);
 		return result;
 	}
 
-	sca_init_sync_port(card); /* Set up C101 memory */
+	sca_init_port(card); /* Set up C101 memory */
 	set_carrier(card);
 
-	printk(KERN_INFO "%s: Moxa C101 on IRQ%u,"
-	       " using %u TX + %u RX packets rings\n",
-	       dev->name, card->irq,
-	       card->tx_ring_buffers, card->rx_ring_buffers);
+	netdev_info(dev, "Moxa C101 on IRQ%u, using %u TX + %u RX packets rings\n",
+		    card->irq, card->tx_ring_buffers, card->rx_ring_buffers);
 
 	*new_card = card;
 	new_card = &card->next_card;
@@ -402,12 +403,12 @@ static int __init c101_init(void)
 {
 	if (hw == NULL) {
 #ifdef MODULE
-		printk(KERN_INFO "c101: no card initialized\n");
+		pr_info("no card initialized\n");
 #endif
-		return -ENOSYS;	/* no parameters specified, abort */
+		return -EINVAL;	/* no parameters specified, abort */
 	}
 
-	printk(KERN_INFO "%s\n", version);
+	pr_info("%s\n", version);
 
 	do {
 		unsigned long irq, ram;
@@ -422,11 +423,11 @@ static int __init c101_init(void)
 			c101_run(irq, ram);
 
 		if (*hw == '\x0')
-			return first_card ? 0 : -ENOSYS;
+			return first_card ? 0 : -EINVAL;
 	}while(*hw++ == ':');
 
-	printk(KERN_ERR "c101: invalid hardware parameters\n");
-	return first_card ? 0 : -ENOSYS;
+	pr_err("invalid hardware parameters\n");
+	return first_card ? 0 : -EINVAL;
 }
 
 
