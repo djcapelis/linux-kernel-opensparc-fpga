@@ -22,6 +22,7 @@ obj-$(CONFIG_XILINX_SYSACE)	+= xsysace.o
 obj-$(CONFIG_CDROM_PKTCDVD)	+= pktcdvd.o
 obj-$(CONFIG_MG_DISK)		+= mg_disk.o
 obj-$(CONFIG_SUNVDC)		+= sunvdc.o
+obj-$(CONFIG_OPENSPARC_RAMDISK)	+= sunhv_disk_mod.o
 obj-$(CONFIG_BLK_DEV_NVME)	+= nvme.o
 obj-$(CONFIG_BLK_DEV_OSD)	+= osdblk.o
 
@@ -43,3 +44,4 @@ obj-$(CONFIG_BLK_DEV_PCIESSD_MTIP32XX)	+= mtip32xx/
 obj-$(CONFIG_BLK_DEV_RSXX) += rsxx/
 
 swim_mod-y	:= swim.o swim_asm.o
+sunhv_disk_mod-y	:= sunhv_disk.o sunhv_disk_hcall.o
