@@ -626,7 +626,11 @@ static unsigned long sparc64_init_timers(void)
 		freq = of_getintprop_default(dp, "stick-frequency", 0);
 	}
 
+#ifdef CONFIG_OPENSPARC_T1_FPGA_FREQ_HACK
+	return freq / 20;
+#else
 	return freq;
+#endif
 }
 
 struct freq_table {

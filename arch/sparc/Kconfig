@@ -461,6 +461,21 @@ config OPENSPARC_T1_FPGA
 	 If unsure, say N.  Only say Y if you are compiling for an
 	 OpenSPARC system running on an FPGA.
 
+config OPENSPARC_T1_FPGA_FREQ_HACK
+	bool "OpenSPARC T1 on FPGA Freq Hack"
+	depends on OPENSPARC_T1_FPGA
+	default n
+	---help---
+	This option enables a kernel hack which allows the kernel to recognize
+	the actual frequency of the FPGA version of the T1 core.  (50mhz)  The
+	normal version runs at 1Ghz and the FPGA normally emulates this same
+	clock frequency, which allows for accurate simulation. However, this
+	has the minor side effect of making time take 20x longer in a system
+	running on an FPGA core.
+
+	Say Y to allow time to take a normal amount of time on an FPGA core.
+	If you prefer accurate simulation, as the designers intended: say N
+
 endmenu
 
 menu "Bus options (PCI etc.)"
